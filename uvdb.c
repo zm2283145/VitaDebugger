@@ -589,6 +589,28 @@ static void write_x(size_t sz)
         buffer_write(&out_buf, "xx", 2);
 }
 
+#ifdef UVDB_KERNEL_THREAD_CONTROL
+static int write_kernel_thread_registers(SceUID thread_id)
+{
+    unsigned int token = __atomic_load_n(&uvdb_stop_token,
+                                          __ATOMIC_SEQ_CST);
+    struct vd_thread_registers registers;
+    if(!token || vdKernelGetThreadRegisters(token, thread_id, &registers) < 0)
+        return -1;
+
+    /* ksceKernelGetThreadCpuRegisters entry 1 is the saved user-mode bank.
+     * Keep VFP registers unavailable until their kernel layout is validated. */
+    const struct vd_arm_registers* user = &registers.entry[1];
+    write_hex((char*)user->r, sizeof(user->r));
+    write_hex((char*)&user->sp, sizeof(user->sp));
+    write_hex((char*)&user->lr, sizeof(user->lr));
+    write_hex((char*)&user->pc, sizeof(user->pc));
+    write_x(25 * 4);
+    write_hex((char*)&user->cpsr, sizeof(user->cpsr));
+    return 0;
+}
+#endif
+
 static void write_hex_uint32(uint32_t value)
 {
     char digits[8];
@@ -1016,7 +1038,14 @@ static void uvdb_main_loop(KuKernelExceptionContext* ctx, int stop_signal)
         else if(IS("g"))
         {
             if(uvdb_general_thread > 0 && uvdb_general_thread != uvdb_stopped_thread)
+#ifdef UVDB_KERNEL_THREAD_CONTROL
+            {
+                if(write_kernel_thread_registers(uvdb_general_thread) < 0)
+                    buffer_write(&out_buf, STRING("E16"));
+            }
+#else
                 write_x(42 * 4);
+#endif
             else
             {
                 write_hex((void*)ctx, 16*4);

@@ -110,6 +110,21 @@ int main(void)
         result = vdKernelBeginStop(1000, -1, &stop_result);
         sceKernelDelayThread(150000);
         unsigned int stopped_delta = worker_ticks - before;
+        struct vd_thread_registers thread_registers;
+        int register_result = result >= 0
+            ? vdKernelGetThreadRegisters(stop_result.token, worker,
+                                         &thread_registers)
+            : result;
+        if(register_result >= 0)
+        {
+            for(int bank = 0; bank < 2; ++bank)
+                psvDebugScreenPrintf(
+                    "  reg%d pc=%08X sp=%08X cpsr=%08X fpscr=%08X\n",
+                    bank, thread_registers.entry[bank].pc,
+                    thread_registers.entry[bank].sp,
+                    thread_registers.entry[bank].cpsr,
+                    thread_registers.entry[bank].fpscr);
+        }
         int resumed_count = -1;
         int end_result = result >= 0
             ? vdKernelEndStop(stop_result.token, &resumed_count)
@@ -118,6 +133,7 @@ int main(void)
         unsigned int resumed_delta = worker_ticks - before - stopped_delta;
         report_check("begin stop session", result >= 0 && stop_result.token != 0);
         report_check("session stopped worker", stopped_delta <= 2);
+        report_check("read worker register banks", register_result >= 0);
         report_check("end stop session", end_result >= 0 && resumed_count >= 1);
         report_check("session resumed worker", resumed_delta >= 5);
 

@@ -6,13 +6,27 @@
 extern "C" {
 #endif
 
-#define VD_KERNEL_ABI_VERSION 0x00010003u
+#define VD_KERNEL_ABI_VERSION 0x00010004u
 #define VD_KERNEL_MAX_THREADS 64
 
 enum vd_kernel_capability {
     VD_KERNEL_CAP_THREAD_LIST = 1u << 0,
     VD_KERNEL_CAP_THREAD_CONTROL = 1u << 1,
+    VD_KERNEL_CAP_THREAD_REGISTERS = 1u << 2,
     VD_KERNEL_CAP_PROBE_SUSPEND = 1u << 31,
+};
+
+struct vd_arm_registers {
+    unsigned int r[13];
+    unsigned int sp;
+    unsigned int lr;
+    unsigned int pc;
+    unsigned int cpsr;
+    unsigned int fpscr;
+};
+
+struct vd_thread_registers {
+    struct vd_arm_registers entry[2];
 };
 
 struct vd_kernel_stop_result {
@@ -68,6 +82,12 @@ int vdKernelRenewStop(unsigned int token, unsigned int lease_ms);
 
 // Resume only threads suspended by the matching session token.
 int vdKernelEndStop(unsigned int token, int* resumed_count);
+
+// Read both saved ARM register banks for a thread suspended and owned by the
+// caller's active stop session. Bank interpretation is intentionally left raw
+// until validated across Vita firmware and exception states.
+int vdKernelGetThreadRegisters(unsigned int token, SceUID target_user_thread,
+                               struct vd_thread_registers* registers);
 
 #ifdef __cplusplus
 }

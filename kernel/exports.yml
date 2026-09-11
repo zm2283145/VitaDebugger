@@ -16,3 +16,4 @@ vitadebug_kernel:
         - vdKernelBeginStop: 0x76A3D004
         - vdKernelRenewStop: 0x76A3D005
         - vdKernelEndStop: 0x76A3D006
+        - vdKernelGetThreadRegisters: 0x76A3D007

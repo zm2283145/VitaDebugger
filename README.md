@@ -61,6 +61,8 @@ The current application-side library has been tested on real Vita hardware with:
 - Hardware-tested GDB all-stop integration: initial attach, live Ctrl-C,
   lease renewal during long stops, continue, detach, reconnect, and recovery
   after forced client termination.
+- Hardware-tested read-only GDB register integration for main and worker
+  threads owned by an active stop session, including symbolized stack frames.
 - A debugger-enabled Render96ex build as a larger real-world test.
 
 It is already useful for controlled application debugging. It is not yet a
@@ -77,6 +79,7 @@ hardware. These unedited Vita screenshots record the completed probe results:
 | v2 | [Single-thread suspend](docs/hardware/kernel-probe-v2-single-thread-suspend.jpg) | `0x1002` suspended state, normal resume to state 0, disposable worker behavior |
 | v3 | [Stop session and watchdog](docs/hardware/kernel-probe-v3-stop-session-watchdog.jpg) | Tokenized process stop/end and automatic recovery of an abandoned lease |
 | v4 | [Lease-keeper exemption](docs/hardware/kernel-probe-v4-lease-exemption.jpg) | A validated exempt thread remains active to renew long GDB stop sessions |
+| v5 | [Saved register banks](docs/hardware/kernel-probe-v5-register-banks.jpg) | Session ownership checks and both raw ARM banks; bank 1 contains the saved user-mode PC, SP, CPSR, and general registers |
 
 Every displayed probe check passed. These images document controlled test
 coverage; they do not claim that arbitrary applications or every firmware and
@@ -112,7 +115,8 @@ implemented reliably from a user process:
 
 - Enumerating all application threads.
 - Coherently suspending and resuming them.
-- Reading and writing registers belonging to another thread.
+- Reading and, after additional validation, writing registers belonging to
+  another thread.
 - Hardware breakpoints and watchpoints.
 - Process and module discovery.
 - Eventually attaching to an application not built with `libvitadebug`.
@@ -123,8 +127,9 @@ The current implementation derives process ownership in kernel context,
 excludes the calling debugger thread, records only threads it successfully
 suspends, rolls back partial failures, requires a process-owned session token,
 and automatically resumes an abandoned session when its short lease expires.
-Foreign-thread register access remains disabled until its representation is
-validated on hardware.
+Foreign-thread register reads use the hardware-validated user-mode saved bank
+in experimental kernel-integrated builds. Foreign-thread writes remain
+disabled until mutation and restoration are independently validated.
 
 ### `libvitaprofiler`
 
@@ -251,9 +256,9 @@ cmake --build kernel/build
 
 This produces `vitadebug.skprx` plus strong and weak user import libraries.
 The current companion provides ABI/capability queries, caller-process thread
-enumeration, and lease-protected stop sessions. It does not yet expose foreign
-thread registers. Keep a known-good taiHEN configuration backup while testing
-kernel builds.
+enumeration, lease-protected stop sessions, and token-protected reads of both
+saved ARM register banks for a session-owned suspended thread. Keep a known-good
+taiHEN configuration backup while testing kernel builds.
 
 The same build produces `vitadebug-kernel-probe.vpk`. The probe checks the ABI,
 capability bits, main/worker thread visibility, invalid argument rejection, a
@@ -359,8 +364,10 @@ the debugger service thread while other application threads continue. Builds
 compiled with `UVDB_KERNEL_THREAD_CONTROL=1` and linked to the matching kernel
 stub use lease-protected process all-stop. A dedicated exempt keeper renews the
 lease while GDB is stopped; continue, detach, shutdown, and I/O failure end the
-session, while the kernel watchdog recovers an abandoned client. Foreign-thread
-register capture is still pending.
+session, while the kernel watchdog recovers an abandoned client. Experimental
+builds can also return the validated user-mode register bank for a selected
+suspended thread; register writes and VFP-register packet mapping remain
+disabled.
 Later calls while connected act as intentional software breakpoints. Calling it
 before graphics initialization normally leaves a black screen while waiting;
 this is expected.
@@ -414,9 +421,10 @@ static void *worker(void *argument) {
 
 The implementation supports GDB thread listing, names, liveness checks,
 selection, and identification of the thread that entered the exception
-handler. Kernel-integrated builds now suspend the other process threads
-coherently, but GDB still reports their registers as unavailable until foreign
-saved-context selection is validated and connected to register packets.
+handler. Kernel-integrated builds suspend the other process threads coherently
+and can report a selected suspended thread's saved general registers, PC, SP,
+LR, and CPSR. VFP registers remain unavailable and foreign register writes are
+rejected.
 
 ## Connecting with GDB
 
@@ -495,8 +503,8 @@ remain installed. Preserve the matching unstripped ELF on the computer.
   library-only builds continue to provide application-side stopping.
 - Threads created after a stop-session snapshot are not yet folded into the
   active session.
-- Foreign-thread register access is not implemented, even though those threads
-  are suspended in kernel-integrated builds.
+- Foreign-thread register writes and VFP context mapping are not implemented;
+  foreign-thread general-register reads are hardware tested.
 - Hardware breakpoints and watchpoints are not implemented.
 - Software stepping does not decode every instruction capable of writing PC.
   Important remaining cases include Thumb IT blocks, `POP {..., pc}`, load-
@@ -510,7 +518,7 @@ remain installed. Preserve the matching unstripped ELF on the computer.
 
 ## Roadmap
 
-1. Foreign-thread register and VFP-context validation and GDB integration.
+1. Validate foreign-thread VFP context mapping without enabling writes.
 2. Fold newly created threads into an active all-stop session.
 3. Complete ARM and Thumb-2 control-flow decoding.
 4. Hardware breakpoints and watchpoints.

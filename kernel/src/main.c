@@ -133,6 +133,7 @@ int vdKernelGetStatus(struct vd_kernel_status* status)
         .abi_version = VD_KERNEL_ABI_VERSION,
         .capabilities = VD_KERNEL_CAP_THREAD_LIST |
                         VD_KERNEL_CAP_THREAD_CONTROL |
+                        VD_KERNEL_CAP_THREAD_REGISTERS |
                         VD_KERNEL_CAP_PROBE_SUSPEND,
         .max_threads = VD_KERNEL_MAX_THREADS,
         .reserved = 0,
@@ -414,6 +415,53 @@ int vdKernelEndStop(unsigned int token, int* resumed_count)
     if(result >= 0)
         result = ksceKernelMemcpyKernelToUser(resumed_count, &resumed,
                                                sizeof(resumed));
+    EXIT_SYSCALL(syscall_state);
+    return result;
+}
+
+int vdKernelGetThreadRegisters(unsigned int token, SceUID target_user_thread,
+                               struct vd_thread_registers* registers)
+{
+    uint32_t syscall_state;
+    ENTER_SYSCALL(syscall_state);
+    if(!token || !registers)
+    {
+        EXIT_SYSCALL(syscall_state);
+        return -1;
+    }
+
+    int result = -5;
+    SceUID caller_pid = ksceKernelGetProcessId();
+    lock_sessions();
+    if(stop_session.active && stop_session.pid == caller_pid &&
+       stop_session.token == token)
+    {
+        SceUID target_guid = -1;
+        for(int i = 0; i < stop_session.suspended_count; ++i)
+        {
+            SceUID candidate = stop_session.suspended[i];
+            if(ksceKernelGetUserThreadId(candidate) == target_user_thread)
+            {
+                target_guid = candidate;
+                break;
+            }
+        }
+        if(target_guid >= 0)
+        {
+            SceThreadCpuRegisters kernel_registers;
+            result = ksceKernelGetThreadCpuRegisters(target_guid,
+                                                      &kernel_registers);
+            if(result >= 0)
+                result = ksceKernelMemcpyKernelToUser(registers,
+                                                       &kernel_registers,
+                                                       sizeof(*registers));
+        }
+        else
+        {
+            result = -3;
+        }
+    }
+    unlock_sessions();
     EXIT_SYSCALL(syscall_state);
     return result;
 }
