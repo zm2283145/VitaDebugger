@@ -49,6 +49,8 @@ The current application-side library has been tested on real Vita hardware with:
 - Catching data aborts before the standard Vita crash screen.
 - Structured fault information: exception type, signal, FSR, FAR, PC, LR, SP.
 - Reconnection at a later `uvdb_enter()` after a disconnected session.
+- Opt-in persistent server thread for clean reattachment and experimental
+  Ctrl-C interruption while the application is running.
 - Build-tested cooperative registration and GDB discovery of named application
   threads; hardware validation of this new path is in progress.
 - A debugger-enabled Render96ex build as a larger real-world test.
@@ -270,6 +272,30 @@ int main(int argc, char **argv) {
 ```
 
 On its first successful call, `uvdb_enter()` opens the server and waits for GDB.
+
+### Persistent server and Ctrl-C
+
+Applications that need reattachment without returning to a manual debugger
+entry point can start the opt-in service after networking is initialized:
+
+```c
+if (uvdb_start_server() < 0) {
+    /* report or handle startup failure */
+}
+```
+
+The service owns a small 64 KiB Vita thread. It listens on the configured port,
+accepts a new client after a clean GDB `detach`, and watches an attached session
+for GDB's Ctrl-C interrupt byte while the application is running. Call
+`uvdb_stop_server()` during orderly teardown, or let `uvdb_shutdown()` stop it
+and release all debugger resources.
+
+This is an experimental application-side stop rather than complete all-stop
+debugging. Ctrl-C currently stops the debugger service thread; registered
+application threads remain active and their registers remain unavailable.
+Do not use it to inspect state that other threads are actively changing. The
+planned kernel companion will provide validated process-wide suspension and
+foreign-thread register capture.
 Later calls while connected act as intentional software breakpoints. Calling it
 before graphics initialization normally leaves a black screen while waiting;
 this is expected.
@@ -403,6 +429,9 @@ remain installed. Preserve the matching unstripped ELF on the computer.
 - Initial cooperative GDB thread discovery is implemented, but other threads
   are not yet coherently suspended and another thread can encounter a temporary
   stepping breakpoint first.
+- The persistent server can receive Ctrl-C and reconnect after clean detach,
+  but its application-side stop does not freeze other threads. Abrupt network
+  loss recovery and repeated stop/resume stress testing remain experimental.
 - Reliable enumeration, suspension, resumption, and foreign-thread register
   access require the planned kernel companion.
 - Hardware breakpoints and watchpoints are not implemented.
@@ -418,7 +447,7 @@ remain installed. Preserve the matching unstripped ELF on the computer.
 
 ## Roadmap
 
-1. Cooperative thread registration and GDB thread-protocol support.
+1. Persistent application-side connection, reattachment, and Ctrl-C handling.
 2. Correct all-stop behavior backed by a minimal kernel companion.
 3. Complete ARM and Thumb-2 control-flow decoding.
 4. Hardware breakpoints and watchpoints.

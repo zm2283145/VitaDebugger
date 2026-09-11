@@ -54,8 +54,13 @@ int main(void)
     pthread_t workers[2];
     pthread_create(&workers[0], NULL, worker_main, (void*)0);
     pthread_create(&workers[1], NULL, worker_main, (void*)1);
-    uvdb_enter();
-    psvDebugScreenPrintf("Debugger connected. Running quiet step target.\n");
+    if(uvdb_start_server() < 0)
+    {
+        psvDebugScreenPrintf("Failed to start persistent debugger server.\n");
+        return 1;
+    }
+    psvDebugScreenPrintf("Persistent debugger server started.\n");
+    psvDebugScreenPrintf("Ctrl-C and clean reconnect are enabled.\n");
     for(int i = 0;; i++)
     {
         if(trigger_fault)

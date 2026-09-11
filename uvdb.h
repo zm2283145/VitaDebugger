@@ -54,7 +54,19 @@ enum uvdb_state uvdb_get_state(void);
 // details are available, 0 before the first exception, or -1 for NULL output.
 int uvdb_get_last_fault(struct uvdb_fault_info* info);
 
-// Close the active/listening sockets and release allocations owned by uvdb.
+// Start an opt-in debugger service thread. The service keeps accepting clean
+// reconnects and converts GDB's Ctrl-C byte into a debugger stop while the
+// application is running. Networking must already be initialized.
+// Returns 0 on success (including when already running), or -1 on failure.
+int uvdb_start_server(void);
+
+// Stop and delete the debugger service thread. Any active GDB connection is
+// closed. Returns 0 on success (including when already stopped), or -1 when
+// called from the service thread itself.
+int uvdb_stop_server(void);
+
+// Stop the service thread, close active/listening sockets, and release
+// allocations owned by uvdb.
 // Call only from normal application code, never from an exception handler.
 void uvdb_shutdown(void);
 
