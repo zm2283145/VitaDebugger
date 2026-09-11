@@ -6,6 +6,7 @@
 
 static volatile int keep_worker_running = 1;
 static volatile unsigned int worker_ticks;
+static volatile unsigned int newcomer_ticks;
 
 static int probe_worker(SceSize args, void* argp)
 {
@@ -14,6 +15,18 @@ static int probe_worker(SceSize args, void* argp)
     while(keep_worker_running)
     {
         worker_ticks++;
+        sceKernelDelayThread(10000);
+    }
+    return 0;
+}
+
+static int newcomer_worker(SceSize args, void* argp)
+{
+    (void)args;
+    (void)argp;
+    while(keep_worker_running)
+    {
+        newcomer_ticks++;
         sceKernelDelayThread(10000);
     }
     return 0;
@@ -154,6 +167,31 @@ int main(void)
         report_check("begin exempt session", result >= 0);
         report_check("exempt worker kept running", exempt_delta >= 8);
         report_check("end exempt session", end_result >= 0);
+
+        result = vdKernelBeginStop(1000, -1, &stop_result);
+        SceUID newcomer = sceKernelCreateThread(
+            "vd late worker", newcomer_worker, 0x10000100,
+            16 * 1024, 0, 0, NULL);
+        int newcomer_started = newcomer >= 0 &&
+            sceKernelStartThread(newcomer, 0, NULL) >= 0;
+        sceKernelDelayThread(80000);
+        unsigned int newcomer_before = newcomer_ticks;
+        int renew_result = result >= 0 && newcomer_started
+            ? vdKernelRenewStop(stop_result.token, 1000)
+            : -1;
+        sceKernelDelayThread(150000);
+        unsigned int newcomer_stopped_delta = newcomer_ticks - newcomer_before;
+        end_result = result >= 0
+            ? vdKernelEndStop(stop_result.token, &resumed_count)
+            : result;
+        sceKernelDelayThread(100000);
+        unsigned int newcomer_resumed_delta = newcomer_ticks -
+            newcomer_before - newcomer_stopped_delta;
+        report_check("late worker started", newcomer_started);
+        report_check("renew reconciled session", renew_result >= 0);
+        report_check("late worker joined stop", newcomer_stopped_delta <= 2);
+        report_check("late worker resumed", newcomer_resumed_delta >= 5);
+        report_check("end reconciled session", end_result >= 0);
     }
 
     psvDebugScreenPrintf("\nLeave this screen open and report any FAIL line.\n");

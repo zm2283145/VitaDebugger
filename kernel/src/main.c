@@ -14,6 +14,8 @@
 struct vd_stop_session {
     SceUID pid;
     unsigned int token;
+    SceUID controller_thread;
+    SceUID exempt_thread;
     SceUID suspended[VD_KERNEL_MAX_THREADS];
     int suspended_count;
     uint64_t deadline_us;
@@ -59,6 +61,8 @@ static int resume_session_locked(void)
     stop_session.active = 0;
     stop_session.pid = -1;
     stop_session.token = 0;
+    stop_session.controller_thread = -1;
+    stop_session.exempt_thread = -1;
     stop_session.suspended_count = 0;
     stop_session.deadline_us = 0;
     return first_error;
@@ -134,6 +138,7 @@ int vdKernelGetStatus(struct vd_kernel_status* status)
         .capabilities = VD_KERNEL_CAP_THREAD_LIST |
                         VD_KERNEL_CAP_THREAD_CONTROL |
                         VD_KERNEL_CAP_THREAD_REGISTERS |
+                        VD_KERNEL_CAP_STOP_RECONCILE |
                         VD_KERNEL_CAP_PROBE_SUSPEND,
         .max_threads = VD_KERNEL_MAX_THREADS,
         .reserved = 0,
@@ -316,6 +321,8 @@ int vdKernelBeginStop(unsigned int lease_ms, SceUID exempt_user_thread,
     }
 
     stop_session.pid = caller_pid;
+    stop_session.controller_thread = caller_thread;
+    stop_session.exempt_thread = exempt_thread;
     stop_session.suspended_count = 0;
     for(int i = 0; i < copied; ++i)
     {
@@ -382,9 +389,57 @@ int vdKernelRenewStop(unsigned int token, unsigned int lease_ms)
     if(stop_session.active && stop_session.pid == caller_pid &&
        stop_session.token == token)
     {
-        stop_session.deadline_us = (uint64_t)ksceKernelGetSystemTimeWide() +
-                                   (uint64_t)lease_ms * 1000u;
-        result = 0;
+        SceUID threads[VD_KERNEL_MAX_THREADS];
+        int copied = 0;
+        int total = ksceKernelGetThreadIdList(caller_pid, threads,
+                                              VD_KERNEL_MAX_THREADS, &copied);
+        if(total < 0 || total > VD_KERNEL_MAX_THREADS)
+            result = total < 0 ? total : -4;
+        else
+        {
+            int original_count = stop_session.suspended_count;
+            result = 0;
+            for(int i = 0; i < copied; ++i)
+            {
+                SceUID thread = threads[i];
+                if(thread == stop_session.controller_thread ||
+                   thread == stop_session.exempt_thread)
+                    continue;
+
+                int owned = 0;
+                for(int j = 0; j < stop_session.suspended_count; ++j)
+                    if(stop_session.suspended[j] == thread)
+                    {
+                        owned = 1;
+                        break;
+                    }
+                if(owned || ksceKernelIsThreadDebugSuspended(thread) > 0)
+                    continue;
+
+                result = ksceKernelDebugSuspendThread(thread,
+                                                       VD_SUSPEND_STATUS);
+                if(result < 0)
+                    break;
+                stop_session.suspended[stop_session.suspended_count++] = thread;
+            }
+
+            if(result < 0)
+            {
+                while(stop_session.suspended_count > original_count)
+                {
+                    SceUID thread = stop_session.suspended[
+                        --stop_session.suspended_count];
+                    int resume = ksceKernelDebugResumeThread(
+                        thread, VD_SUSPEND_STATUS);
+                    if(resume < 0)
+                        ksceKernelChangeThreadSuspendStatus(thread, 2);
+                }
+            }
+            else
+                stop_session.deadline_us =
+                    (uint64_t)ksceKernelGetSystemTimeWide() +
+                    (uint64_t)lease_ms * 1000u;
+        }
     }
     unlock_sessions();
     EXIT_SYSCALL(syscall_state);

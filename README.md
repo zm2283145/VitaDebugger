@@ -63,6 +63,8 @@ The current application-side library has been tested on real Vita hardware with:
   after forced client termination.
 - Hardware-tested read-only GDB register integration for main and worker
   threads owned by an active stop session, including symbolized stack frames.
+- Hardware-tested stop-session reconciliation: threads created after the
+  initial snapshot are discovered and suspended by the next lease renewal.
 - A debugger-enabled Render96ex build as a larger real-world test.
 
 It is already useful for controlled application debugging. It is not yet a
@@ -80,6 +82,7 @@ hardware. These unedited Vita screenshots record the completed probe results:
 | v3 | [Stop session and watchdog](docs/hardware/kernel-probe-v3-stop-session-watchdog.jpg) | Tokenized process stop/end and automatic recovery of an abandoned lease |
 | v4 | [Lease-keeper exemption](docs/hardware/kernel-probe-v4-lease-exemption.jpg) | A validated exempt thread remains active to renew long GDB stop sessions |
 | v5 | [Saved register banks](docs/hardware/kernel-probe-v5-register-banks.jpg) | Session ownership checks and both raw ARM banks; bank 1 contains the saved user-mode PC, SP, CPSR, and general registers |
+| v6 | [Late-thread reconciliation](docs/hardware/kernel-probe-v6-late-thread-reconcile.jpg) | A thread created after stop begins is discovered on renewal, suspended, tracked, and resumed with the session |
 
 Every displayed probe check passed. These images document controlled test
 coverage; they do not claim that arbitrary applications or every firmware and
@@ -256,9 +259,10 @@ cmake --build kernel/build
 
 This produces `vitadebug.skprx` plus strong and weak user import libraries.
 The current companion provides ABI/capability queries, caller-process thread
-enumeration, lease-protected stop sessions, and token-protected reads of both
-saved ARM register banks for a session-owned suspended thread. Keep a known-good
-taiHEN configuration backup while testing kernel builds.
+enumeration, lease-protected stop sessions, renewal-time reconciliation of new
+threads, and token-protected reads of both saved ARM register banks for a
+session-owned suspended thread. Keep a known-good taiHEN configuration backup
+while testing kernel builds.
 
 The same build produces `vitadebug-kernel-probe.vpk`. The probe checks the ABI,
 capability bits, main/worker thread visibility, invalid argument rejection, a
@@ -501,8 +505,8 @@ remain installed. Preserve the matching unstripped ELF on the computer.
   to an arbitrary unmodified process.
 - Kernel all-stop is opt-in and requires the matching `vitadebug.skprx` ABI;
   library-only builds continue to provide application-side stopping.
-- Threads created after a stop-session snapshot are not yet folded into the
-  active session.
+- A newly created thread is folded into all-stop at the next lease renewal, so
+  there can be a brief interval before it is suspended.
 - Foreign-thread register writes and VFP context mapping are not implemented;
   foreign-thread general-register reads are hardware tested.
 - Hardware breakpoints and watchpoints are not implemented.
@@ -519,14 +523,13 @@ remain installed. Preserve the matching unstripped ELF on the computer.
 ## Roadmap
 
 1. Validate foreign-thread VFP context mapping without enabling writes.
-2. Fold newly created threads into an active all-stop session.
-3. Complete ARM and Thumb-2 control-flow decoding.
-4. Hardware breakpoints and watchpoints.
-5. Reusable VitaSDK and exported CMake packages.
-6. Hardened optional DebugNet log and telemetry streaming.
-7. VS Code build, deployment, IntelliSense, and GDB configurations.
-8. A separate optimized profiler library and desktop trace viewer.
-9. Optional attachment to applications not compiled with the library.
+2. Complete ARM and Thumb-2 control-flow decoding.
+3. Hardware breakpoints and watchpoints.
+4. Reusable VitaSDK and exported CMake packages.
+5. Hardened optional DebugNet log and telemetry streaming.
+6. VS Code build, deployment, IntelliSense, and GDB configurations.
+7. A separate optimized profiler library and desktop trace viewer.
+8. Optional attachment to applications not compiled with the library.
 
 ## Repository layout
 

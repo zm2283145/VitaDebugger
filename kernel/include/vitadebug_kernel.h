@@ -6,13 +6,14 @@
 extern "C" {
 #endif
 
-#define VD_KERNEL_ABI_VERSION 0x00010004u
+#define VD_KERNEL_ABI_VERSION 0x00010005u
 #define VD_KERNEL_MAX_THREADS 64
 
 enum vd_kernel_capability {
     VD_KERNEL_CAP_THREAD_LIST = 1u << 0,
     VD_KERNEL_CAP_THREAD_CONTROL = 1u << 1,
     VD_KERNEL_CAP_THREAD_REGISTERS = 1u << 2,
+    VD_KERNEL_CAP_STOP_RECONCILE = 1u << 3,
     VD_KERNEL_CAP_PROBE_SUSPEND = 1u << 31,
 };
 
