@@ -897,7 +897,7 @@ static void uvdb_main_loop(KuKernelExceptionContext* ctx, int stop_signal)
         else if(IS("g"))
         {
             if(uvdb_general_thread > 0 && uvdb_general_thread != uvdb_stopped_thread)
-                buffer_write(&out_buf, STRING("E16"));
+                write_x(42 * 4);
             else
             {
                 write_hex((void*)ctx, 16*4);
@@ -975,6 +975,15 @@ static void uvdb_main_loop(KuKernelExceptionContext* ctx, int stop_signal)
         }
         else if(IS("k"))
             _sceKernelExitProcessForUser(1);
+        else if(IS("D"))
+        {
+            buffer_write(&out_buf, STRING("OK"));
+            discard_packet(pkt, sz);
+            send_packet();
+            uvdb_close_socket(&uvdb_socket);
+            uvdb_state = UVDB_STATE_IDLE;
+            return;
+        }
         else if(sz && (pkt[0] == 'c' || pkt[0] == 'C' || pkt[0] == 's' || pkt[0] == 'S'))
         {
             int stepping = pkt[0] == 's' || pkt[0] == 'S';
