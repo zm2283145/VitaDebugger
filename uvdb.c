@@ -813,6 +813,33 @@ static int breakpoint_insert_step(KuKernelExceptionContext* ctx)
             if(safe_memcpy((char*)&second, (const char*)(pc + 2), sizeof(second)) != sizeof(second))
                 return -1;
 
+            // Thumb-2 table branch byte/halfword. Read the selected table
+            // entry through safe_memcpy and branch relative to Align(PC, 4).
+            if((instruction & 0xfff0) == 0xe8d0 &&
+               (second & 0xffe0) == 0xf000)
+            {
+                unsigned int rn = instruction & 0xf;
+                unsigned int rm = second & 0xf;
+                unsigned int halfword = (second >> 4) & 1;
+                if(rm == 15)
+                    return -1;
+                const uint32_t* registers = &ctx->r0;
+                uintptr_t base = rn == 15
+                    ? (pc + 4) & ~(uintptr_t)3
+                    : registers[rn];
+                uintptr_t table_address = base +
+                    ((uintptr_t)registers[rm] << halfword);
+                uint16_t table_offset = 0;
+                size_t entry_size = halfword ? 2 : 1;
+                if(safe_memcpy((char*)&table_offset,
+                               (const char*)table_address, entry_size) !=
+                   entry_size)
+                    return -1;
+                uintptr_t target = ((pc + 4) & ~(uintptr_t)3) +
+                                   (uintptr_t)table_offset * 2;
+                return breakpoint_insert_internal(target, 2, 1);
+            }
+
             if((instruction & 0xf800) == 0xf000 && (second & 0x8000) == 0x8000)
             {
                 // Thumb-2 B.W, BL and BLX immediate. The encoded J bits are

@@ -47,6 +47,7 @@ The current application-side library has been tested on real Vita hardware with:
 - Taken and non-taken 16-bit Thumb conditional branches.
 - Selected Thumb-2 `B.W`, conditional `B.W`, `BL`, and `BLX` instructions.
 - Thumb `POP {..., PC}` returns and high-register `MOV PC, Rm` branches.
+- Thumb-2 `TBB` and `TBH` table branches with protected table-entry reads.
 - Catching data aborts before the standard Vita crash screen.
 - Structured fault information: exception type, signal, FSR, FAR, PC, LR, SP.
 - Reconnection at a later `uvdb_enter()` after a disconnected session.
@@ -513,7 +514,7 @@ remain installed. Preserve the matching unstripped ELF on the computer.
 - Hardware breakpoints and watchpoints are not implemented.
 - Software stepping does not decode every instruction capable of writing PC.
   Important remaining cases include Thumb IT blocks, load-multiple into PC,
-  `TBB`/`TBH`, and uncommon ARM control flow.
+  and uncommon ARM control flow.
 - Loaded-module base-address discovery is not implemented.
 - Remote syscall catching is not implemented.
 - Kernel plugins cannot be debugged with the current application-side stub.
