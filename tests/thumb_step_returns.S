@@ -130,3 +130,41 @@ thumb_step_ldmdb_target:
 .Lldmdb_end_address:
     .word .Lldmdb_end
 .size thumb_step_ldmdb_fixture, .-thumb_step_ldmdb_fixture
+
+.arm
+.balign 4
+.global arm_step_mov_fixture
+.global arm_step_mov_site
+.global arm_step_mov_target
+.type arm_step_mov_fixture, %function
+arm_step_mov_fixture:
+    ldr r0, .Larm_mov_target_address
+arm_step_mov_site:
+    mov pc, r0
+    udf #6
+arm_step_mov_target:
+    bx lr
+.Larm_mov_target_address:
+    .word arm_step_mov_target
+.size arm_step_mov_fixture, .-arm_step_mov_fixture
+
+.global arm_step_ldm_fixture
+.global arm_step_ldm_site
+.global arm_step_ldm_target
+.type arm_step_ldm_fixture, %function
+arm_step_ldm_fixture:
+    ldr r0, .Larm_ldm_end_address
+arm_step_ldm_site:
+    ldmdb r0!, {r4, pc}
+    udf #7
+arm_step_ldm_target:
+    bx lr
+.Larm_ldm_table:
+    .word 0xccddeeff
+    .word arm_step_ldm_target
+.Larm_ldm_end:
+.Larm_ldm_end_address:
+    .word .Larm_ldm_end
+.size arm_step_ldm_fixture, .-arm_step_ldm_fixture
+
+.thumb

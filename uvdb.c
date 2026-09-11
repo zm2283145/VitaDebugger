@@ -1001,6 +1001,48 @@ static int breakpoint_insert_step(KuKernelExceptionContext* ctx)
         return 0;
     }
 
+    // ARM MOV PC, Rm without a shifted operand. Conditional forms fall
+    // through when their saved CPSR condition is false.
+    if((instruction & 0x0ffffff0) == 0x01a0f000)
+    {
+        unsigned int condition = instruction >> 28;
+        if(!arm_condition_passed(condition, ctx->SPSR))
+            return breakpoint_insert_internal(pc + 4, 4, 1);
+        unsigned int rm = instruction & 0xf;
+        const uint32_t* registers = &ctx->r0;
+        uintptr_t target = rm == 15 ? pc + 8 : registers[rm];
+        return breakpoint_insert_internal(target, 4, 1);
+    }
+
+    // ARM LDM variants that restore PC. Account for increment/decrement and
+    // before/after addressing to locate PC's word in the transfer area.
+    if((instruction & 0x0e108000) == 0x08108000)
+    {
+        unsigned int condition = instruction >> 28;
+        if(!arm_condition_passed(condition, ctx->SPSR))
+            return breakpoint_insert_internal(pc + 4, 4, 1);
+        unsigned int rn = (instruction >> 16) & 0xf;
+        if(rn == 15)
+            return -1;
+        const uint32_t* registers = &ctx->r0;
+        unsigned int lower_count =
+            (unsigned int)__builtin_popcount(instruction & 0x7fff);
+        unsigned int increment = (instruction >> 23) & 1;
+        unsigned int before = (instruction >> 24) & 1;
+        uintptr_t saved_pc_address;
+        if(increment)
+            saved_pc_address = registers[rn] +
+                (lower_count + before) * sizeof(uint32_t);
+        else
+            saved_pc_address = registers[rn] -
+                (before ? sizeof(uint32_t) : 0);
+        uintptr_t target;
+        if(safe_memcpy((char*)&target, (const char*)saved_pc_address,
+                       sizeof(target)) != sizeof(target))
+            return -1;
+        return breakpoint_insert_internal(target, 4, 1);
+    }
+
     // ARM BX/BLX register.
     if((instruction & 0x0ffffff0) == 0x012fff10 ||
        (instruction & 0x0ffffff0) == 0x012fff30)

@@ -51,6 +51,7 @@ The current application-side library has been tested on real Vita hardware with:
 - Thumb-2 `LDMIA/POP.W` returns that restore `PC` from a register list.
 - Thumb `IT` blocks using saved condition flags and width-aware skipping.
 - Thumb-2 `LDMDB` returns that restore `PC` from below the base address.
+- ARM-state `MOV PC, Rm` and increment/decrement load-multiple PC restores.
 - Catching data aborts before the standard Vita crash screen.
 - Structured fault information: exception type, signal, FSR, FAR, PC, LR, SP.
 - Reconnection at a later `uvdb_enter()` after a disconnected session.
@@ -516,8 +517,8 @@ remain installed. Preserve the matching unstripped ELF on the computer.
   foreign-thread general-register reads are hardware tested.
 - Hardware breakpoints and watchpoints are not implemented.
 - Software stepping does not decode every instruction capable of writing PC.
-  Important remaining cases are concentrated in uncommon ARM/Thumb control
-  flow and additional PC-writing data-processing/load forms.
+  Important remaining cases are concentrated in shifted PC-writing data-
+  processing forms, PC loads, and uncommon ARM/Thumb control flow.
 - Loaded-module base-address discovery is not implemented.
 - Remote syscall catching is not implemented.
 - Kernel plugins cannot be debugged with the current application-side stub.
