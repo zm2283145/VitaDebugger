@@ -52,6 +52,8 @@ The current application-side library has been tested on real Vita hardware with:
 - Thumb `IT` blocks using saved condition flags and width-aware skipping.
 - Thumb-2 `LDMDB` returns that restore `PC` from below the base address.
 - ARM-state `MOV PC, Rm` and increment/decrement load-multiple PC restores.
+- Thumb-2 and ARM immediate load-to-PC forms with protected target reads and
+  correct ARM/Thumb interworking.
 - Catching data aborts before the standard Vita crash screen.
 - Structured fault information: exception type, signal, FSR, FAR, PC, LR, SP.
 - Reconnection at a later `uvdb_enter()` after a disconnected session.
@@ -526,7 +528,8 @@ remain installed. Preserve the matching unstripped ELF on the computer.
 - Hardware breakpoints and watchpoints are not implemented.
 - Software stepping does not decode every instruction capable of writing PC.
   Important remaining cases are concentrated in shifted PC-writing data-
-  processing forms, PC loads, and uncommon ARM/Thumb control flow.
+  processing forms, register-offset PC loads, and uncommon ARM/Thumb control
+  flow.
 - GDB receives module segment bases, but automatic symbol loading still
   requires matching unstripped module files and a configured solib search path.
 - Remote syscall catching is not implemented.

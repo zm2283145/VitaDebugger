@@ -131,6 +131,25 @@ thumb_step_ldmdb_target:
     .word .Lldmdb_end
 .size thumb_step_ldmdb_fixture, .-thumb_step_ldmdb_fixture
 
+.global thumb_step_ldr_pc_fixture
+.global thumb_step_ldr_pc_site
+.global thumb_step_ldr_pc_target
+.type thumb_step_ldr_pc_fixture, %function
+.thumb_func
+thumb_step_ldr_pc_fixture:
+    ldr r0, .Lthumb_ldr_table_address
+thumb_step_ldr_pc_site:
+    ldr.w pc, [r0]
+    udf #8
+thumb_step_ldr_pc_target:
+    bx lr
+    .balign 4
+.Lthumb_ldr_table:
+    .word thumb_step_ldr_pc_target + 1
+.Lthumb_ldr_table_address:
+    .word .Lthumb_ldr_table
+.size thumb_step_ldr_pc_fixture, .-thumb_step_ldr_pc_fixture
+
 .arm
 .balign 4
 .global arm_step_mov_fixture
@@ -166,5 +185,22 @@ arm_step_ldm_target:
 .Larm_ldm_end_address:
     .word .Larm_ldm_end
 .size arm_step_ldm_fixture, .-arm_step_ldm_fixture
+
+.global arm_step_ldr_pc_fixture
+.global arm_step_ldr_pc_site
+.global arm_step_ldr_pc_target
+.type arm_step_ldr_pc_fixture, %function
+arm_step_ldr_pc_fixture:
+    ldr r0, .Larm_ldr_table_address
+arm_step_ldr_pc_site:
+    ldr pc, [r0]
+    udf #9
+arm_step_ldr_pc_target:
+    bx lr
+.Larm_ldr_table:
+    .word arm_step_ldr_pc_target
+.Larm_ldr_table_address:
+    .word .Larm_ldr_table
+.size arm_step_ldr_pc_fixture, .-arm_step_ldr_pc_fixture
 
 .thumb

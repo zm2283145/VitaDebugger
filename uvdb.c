@@ -984,6 +984,25 @@ static int breakpoint_insert_step(KuKernelExceptionContext* ctx)
                                                    (target & 1) ? 2 : 4, 1);
             }
 
+            // Thumb-2 LDR.W PC, [Rn, #imm12]. Loads to PC can interwork, so
+            // choose the destination breakpoint size from the loaded bit 0.
+            if((instruction & 0xfff0) == 0xf8d0 &&
+               (second & 0xf000) == 0xf000)
+            {
+                unsigned int rn = instruction & 0xf;
+                const uint32_t* registers = &ctx->r0;
+                uintptr_t base = rn == 15
+                    ? (pc + 4) & ~(uintptr_t)3
+                    : registers[rn];
+                uintptr_t target;
+                uintptr_t load_address = base + (second & 0x0fff);
+                if(safe_memcpy((char*)&target, (const char*)load_address,
+                               sizeof(target)) != sizeof(target))
+                    return -1;
+                return breakpoint_insert_internal(target,
+                                                   (target & 1) ? 2 : 4, 1);
+            }
+
             if((instruction & 0xf800) == 0xf000 && (second & 0x8000) == 0x8000)
             {
                 // Thumb-2 B.W, BL and BLX immediate. The encoded J bits are
@@ -1095,7 +1114,30 @@ static int breakpoint_insert_step(KuKernelExceptionContext* ctx)
         if(safe_memcpy((char*)&target, (const char*)saved_pc_address,
                        sizeof(target)) != sizeof(target))
             return -1;
-        return breakpoint_insert_internal(target, 4, 1);
+        return breakpoint_insert_internal(target, (target & 1) ? 2 : 4, 1);
+    }
+
+    // ARM LDR PC, [Rn, +/-imm12] including pre- and post-index forms.
+    if((instruction & 0x0e50f000) == 0x0410f000)
+    {
+        unsigned int condition = instruction >> 28;
+        if(!arm_condition_passed(condition, ctx->SPSR))
+            return breakpoint_insert_internal(pc + 4, 4, 1);
+        unsigned int rn = (instruction >> 16) & 0xf;
+        const uint32_t* registers = &ctx->r0;
+        uintptr_t load_address = rn == 15 ? pc + 8 : registers[rn];
+        if(instruction & (1u << 24))
+        {
+            uintptr_t offset = instruction & 0x0fff;
+            load_address = instruction & (1u << 23)
+                ? load_address + offset : load_address - offset;
+        }
+        uintptr_t target;
+        if(safe_memcpy((char*)&target, (const char*)load_address,
+                       sizeof(target)) != sizeof(target))
+            return -1;
+        return breakpoint_insert_internal(target,
+                                           (target & 1) ? 2 : 4, 1);
     }
 
     // ARM BX/BLX register.
