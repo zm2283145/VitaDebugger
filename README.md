@@ -1,87 +1,424 @@
-# uvdb
+# VitaDebugger
 
-This is an intra-process GDB stub for the PSVita that should (for the most part) "just work".
+VitaDebugger is an experimental, open-source remote debugging toolkit for
+PlayStation Vita homebrew. Its current component is an application-linked GDB
+server (`libuvdb.a`) that allows a matching GDB on a development computer to
+debug a program running on real Vita hardware over a local network.
 
-The reason I created this is because [kvdb](https://github.com/DaveeFTW/kvdb) only supports firmware 3.60 (I'm using 3.65), lists hilarious bugs on its README, and is apparently not that easy to setup. On contrary, uvdb contains no kernel-mode code and uses a well-established kernel plugin (kubridge) for the heavy lifting, and thus should not cause as many stability issues.
+The project is based on
+[sleirsgoevy/vita-uvdb](https://github.com/sleirsgoevy/vita-uvdb) and is being
+hardened, documented, tested on hardware, and expanded into a general VitaSDK
+development tool. Render96ex is one of its integration and stress-test targets,
+but VitaDebugger is not a Render96-specific project.
 
-## Installation
+## Why this project exists
 
-Add [kubridge](https://github.com/bythos14/kubridge/releases) to your PSVita's ur0:tai/config.txt.
+Vita homebrew development is unusually difficult to diagnose. Community
+developers generally use the unofficial VitaSDK toolchain and ordinary retail
+Vita hardware, without access to Sony's official SDK, official debugging tools,
+or scarce development kits. A crash may provide only a dump or crash screen;
+timing problems often require manually added file logs; and repeatedly building,
+installing, launching, reproducing, and retrieving logs makes iteration slow.
 
-Replace `$VITASDK/arm-vita-eabi/kubridge.h` with the one from the above-linked repository.
+This project aims to give the homebrew community a practical workflow using
+hardware and software developers can actually obtain:
 
-Type `make` to build.
+- Stop an application before the standard crash screen takes over.
+- See the precise source line, call stack, registers, and relevant memory.
+- Set breakpoints and inspect or change state while the program is running.
+- Stream logs and diagnostic events over the network.
+- Profile CPU time, frame pacing, memory use, and eventually GPU work.
+- Integrate those capabilities into normal VitaSDK projects and familiar IDEs.
 
-(Optionally, but this will make your life easier) Copy `uvdb.h` to `$VITASDK/arm-vita-eabi/include`, and `libuvdb.a` to `$VITASDK/arm-vita-eabi/lib`.
+It is intended for legitimate homebrew development and debugging on systems the
+developer controls. It does not include or require Sony's proprietary SDK.
 
-## Usage
+## Current status
 
-Link your project with `libuvdb.a` (`-luvdb` linker flag), then call `uvdb_enter()` wherever in your code you need a software breakpoint.
+The current application-side library has been tested on real Vita hardware with:
 
-Then run `arm-vita-eabi-gdb program.elf -ex 'target remote PS.VITA.IP.ADDR:1234'` to connect GDB to the console and start debugging.
+- GDB connections over TCP.
+- Source and function breakpoints.
+- ARM and Thumb software breakpoints (`Z0` and `z0`).
+- Register, stack, and arbitrary application-memory inspection.
+- Live variable modification.
+- Source-level backtraces.
+- Basic instruction and source stepping.
+- Taken and non-taken 16-bit Thumb conditional branches.
+- Selected Thumb-2 `B.W`, conditional `B.W`, `BL`, and `BLX` instructions.
+- Catching data aborts before the standard Vita crash screen.
+- Structured fault information: exception type, signal, FSR, FAR, PC, LR, SP.
+- Reconnection at a later `uvdb_enter()` after a disconnected session.
+- A debugger-enabled Render96ex build as a larger real-world test.
 
-Working features:
+It is already useful for controlled application debugging. It is not yet a
+complete system-wide debugger; see [Current limitations](#current-limitations).
 
-* Memory reading/writing
-* Breakpoints
-* Single-stepping
-* ASLR defeat (base address of the program is resolved)
+## End goals
 
-Non-working features:
+The intended final design is a hybrid toolkit:
 
-* Watchpoints
-* `catch syscall`
-* Resolving base addresses of libraries (most Vita homebrew is single-binary anyway)
-* Probably anything else...
-
-## Bugs and caveats
-
-Unlike x86, ARM does not support proper single-stepping and hardware breakpoints. To overcome this, GDB parses the instruction itself and sets temporary (software) breakpoints at all possible branch targets. This is fine, albeit slow (unfortunately, GDB's serial debugging protocol was never designed to run over TCP), in single-threaded programs, but in multi-threaded programs you may miss some breakpoints.
-
-uvdb uses kubridge's exception handling feature to catch exceptions. If your homebrew installs its own exception handler, you will have problems. If you want to do so, register them *after* `uvdb_enter()` has been called at least once, and save and call the original handler once you determine that you can't handle the exception.
-
-Also (obviously?) uvdb does not work in kernel mode, thus you can't use it to debug kernel plugins.
-
-Anything else? Feel free to [file a bug report](https://github.com/sleirsgoevy/vita-uvdb/issues/new).
-
-## Render96 hardening branch
-
-This branch preserves the original `uvdb_enter()` entry point and adds:
-
-* Explicit configuration, state inspection, and shutdown APIs.
-* A bounded packet buffer (256 KiB by default).
-* Socket, message-pipe, allocation, and exception-handler cleanup.
-* Disconnect detection and support for reconnecting at a later debugger entry.
-* GDB `Z0`/`z0` software breakpoints for ARM and Thumb code.
-* GDB `s`/`S` single-step packets using temporary software breakpoints.
-* Branch-aware stepping for common ARM and 16-bit Thumb control flow.
-* Structured details for the most recently intercepted exception.
-* Fixes for partial stdio writes, wildcard register writes, qXfer ranges, and
-  failed safe-memory transfers.
-
-Configure the library before its first breakpoint if non-default settings are
-needed:
-
-```c
-struct uvdb_config config = {
-    .port = 1234,
-    .max_packet_buffer = 256 * 1024,
-};
-uvdb_configure(&config);
-uvdb_enter();
+```text
+GDB / IDE / profile viewer / log console
+                  |
+          local network transport
+                  |
+      application libraries and APIs
+                  |
+    optional narrow kernel companion
 ```
 
-The diagnostic ELF on the PC must match the executable running on the Vita.
-Compile application and library objects with `-g`; the packaged Vita executable
-may still be stripped by the normal VPK packaging tools.
+Planned components are:
 
-### Current limitations
+### `libvitadebug`
 
-* The debugger is process-local and requires an explicit `uvdb_enter()` call.
-* Stepping is not yet thread-aware. Another application thread can encounter a
-  temporary breakpoint first.
-* Thumb-2 32-bit branches and uncommon instructions that write to `pc` still
-  need dedicated target decoding.
-* Hardware breakpoints and watchpoints are not implemented.
-* Resuming a real memory fault without correcting its cause generally faults
-  again.
+The primary application-side library. Developers will compile it into debug
+builds to provide source-aware GDB debugging, cooperative application control,
+symbols, intentional breakpoints, exception reporting, and custom integrations.
+The current `libuvdb.a` will evolve into this component.
+
+### `vitadebug.skprx`
+
+An optional, tightly scoped kernel plugin providing operations that cannot be
+implemented reliably from a user process:
+
+- Enumerating all application threads.
+- Coherently suspending and resuming them.
+- Reading and writing registers belonging to another thread.
+- Hardware breakpoints and watchpoints.
+- Process and module discovery.
+- Eventually attaching to an application not built with `libvitadebug`.
+
+The plugin will expose a small validated interface rather than a general
+arbitrary kernel-access service. Library-only operation will remain supported.
+
+### `libvitaprofiler`
+
+A separate low-overhead profiler intended for optimized builds:
+
+- Named CPU timing zones and counters.
+- Frame-time and frame-pacing histories.
+- Per-thread CPU sampling when the kernel companion is present.
+- Vita system-memory statistics.
+- Optional VitaGL RAM/CDRAM pool statistics.
+- Draw, texture, shader, allocation, and audio-underflow counters supplied by
+  the host application or graphics/audio integrations.
+- GPU submission, wait, and completion timing where VitaGL/SceGxm permit it.
+- An in-memory event ring buffer with network and file export options.
+
+Profiling remains separate from GDB because debugger stops and debug compiler
+settings distort real-time performance measurements.
+
+### DebugNet log streaming
+
+The toolkit will eventually integrate
+[psxdev/debugnet](https://github.com/psxdev/debugnet) as an optional transport
+for continuous logs and telemetry over the network. DebugNet and GDB complement
+one another:
+
+- GDB handles breakpoints, faults, registers, stacks, memory, and control.
+- DebugNet carries non-stopping logs, profiler events, frame timing, audio
+  status, and other continuous diagnostics.
+
+The integration will be hardened for bounded messages, explicit initialization,
+disconnect handling, thread safety, and failure without crashing the host
+application. Applications will not be required to use DebugNet.
+
+### Desktop and IDE tools
+
+The end goal also includes ready-to-use GDB command files, VS Code build/deploy/
+debug configurations, a live log console, a trace viewer, and documented APIs
+that other IDE extensions can consume.
+
+## Requirements
+
+### Development computer
+
+- A working [VitaSDK](https://vitasdk.org/) installation.
+- `VITASDK` set to the SDK directory and `$VITASDK/bin` on `PATH`.
+- `arm-vita-eabi-gcc`, `arm-vita-eabi-ar`, and `arm-vita-eabi-gdb`.
+- GNU Make for the included build.
+- A Vita C or C++ homebrew project capable of linking a static library.
+- Local-network connectivity to the Vita.
+
+All application objects, the debugger library, Kubridge imports, and other
+libraries must use compatible VitaSDK ABIs.
+
+### Vita
+
+- A homebrew-capable PS Vita or Vita TV.
+- TaiHEN/Ensō or an equivalent kernel-plugin environment.
+- [Kubridge](https://github.com/bythos14/kubridge) with exception and memory-
+  protection support. The tested version is the official `v0.3.1_hotfix`
+  `exceptions_mprotect` release.
+- `kubridge.skprx` loaded from `ur0:tai/config.txt`, normally under `*KERNEL`.
+- The Vita and development computer connected to the same trusted network.
+
+Restart the Vita after changing TaiHEN configuration. A matching Kubridge
+header and import stub are also required when linking the application.
+
+### Network initialization and security
+
+The host application must initialize Vita networking before its first
+`uvdb_enter()`. Projects already using Vita socket APIs or an appropriate SDL
+network path may have done this. The included test performs a UDP socket
+operation first; otherwise follow the SceNet/SceNetCtl VitaSDK samples.
+
+The default endpoint is TCP port `1234`. The current protocol is unauthenticated
+and unencrypted. Never expose it to the internet or forward the port through a
+router. Use it only on a trusted development network.
+
+## Building
+
+Provide the Kubridge source and import-library locations:
+
+```sh
+export VITASDK=/path/to/vitasdk
+export PATH="$VITASDK/bin:$PATH"
+
+make \
+  KUBRIDGE_DIR=../kubridge \
+  KUBRIDGE_LIB_DIR=../kubridge/build-local
+```
+
+This produces `libuvdb.a`. The public header is `uvdb.h`.
+
+Build the included test VPK with:
+
+```sh
+make package \
+  KUBRIDGE_DIR=../kubridge \
+  KUBRIDGE_LIB_DIR=../kubridge/build-local
+```
+
+This creates `uvdb-test.vpk`. Retain `test.elf` for GDB.
+
+## Makefile integration
+
+Put the archive after application objects and its dependencies after the
+archive; static-library link order matters.
+
+```make
+VITA_DEBUGGER ?= 0
+VITADEBUGGER_DIR ?= ../VitaDebugger
+KUBRIDGE_DIR ?= ../kubridge
+KUBRIDGE_LIB_DIR ?= $(KUBRIDGE_DIR)/build-local
+
+ifeq ($(VITA_DEBUGGER),1)
+  CFLAGS += -Og -g3 -DVITA_GDB_DEBUGGER
+  CFLAGS += -I$(VITADEBUGGER_DIR) -I$(KUBRIDGE_DIR)
+
+  LDFLAGS += $(VITADEBUGGER_DIR)/libuvdb.a
+  LDFLAGS += -L$(KUBRIDGE_LIB_DIR) -lkubridge_stub
+  LDFLAGS += -lSceNetPs_stub -pthread
+endif
+```
+
+For C++ applications, retain the normal Vita C++ runtime link option, commonly
+`-lstdc++`, after libraries that require it.
+
+## Temporary CMake integration
+
+An exported CMake package is planned. Until then, import the archive:
+
+```cmake
+set(VITADEBUGGER_DIR "${CMAKE_SOURCE_DIR}/../VitaDebugger")
+set(KUBRIDGE_DIR "${CMAKE_SOURCE_DIR}/../kubridge")
+
+add_library(vitadebugger STATIC IMPORTED GLOBAL)
+set_target_properties(vitadebugger PROPERTIES
+    IMPORTED_LOCATION "${VITADEBUGGER_DIR}/libuvdb.a"
+    INTERFACE_INCLUDE_DIRECTORIES "${VITADEBUGGER_DIR};${KUBRIDGE_DIR}"
+)
+
+target_compile_options(my_app PRIVATE -Og -g3)
+target_compile_definitions(my_app PRIVATE VITA_GDB_DEBUGGER=1)
+target_link_directories(my_app PRIVATE "${KUBRIDGE_DIR}/build-local")
+target_link_libraries(my_app PRIVATE
+    vitadebugger
+    kubridge_stub
+    SceNetPs_stub
+    pthread
+)
+```
+
+## Application integration
+
+Call `uvdb_enter()` after networking is ready:
+
+```c
+#ifdef VITA_GDB_DEBUGGER
+#include <uvdb.h>
+#endif
+
+int main(int argc, char **argv) {
+#ifdef VITA_GDB_DEBUGGER
+    const struct uvdb_config config = {
+        .port = 1234,
+        .max_packet_buffer = 256 * 1024,
+    };
+
+    if (uvdb_configure(&config) == 0) {
+        uvdb_enter();
+    }
+#endif
+
+    return application_main(argc, argv);
+}
+```
+
+On its first successful call, `uvdb_enter()` opens the server and waits for GDB.
+Later calls while connected act as intentional software breakpoints. Calling it
+before graphics initialization normally leaves a black screen while waiting;
+this is expected.
+
+Passing `NULL` to `uvdb_configure()` restores TCP port 1234 and a 256 KiB packet
+limit. The allowed buffer range is currently 4 KiB through 16 MiB. Configuration
+must occur while the debugger is idle.
+
+### State, fault information, and shutdown
+
+```c
+enum uvdb_state state = uvdb_get_state();
+
+struct uvdb_fault_info fault;
+if (uvdb_get_last_fault(&fault) == 1) {
+    /* exception_type, signal, fault_status, fault_address, pc, lr, sp */
+}
+
+uvdb_shutdown();
+```
+
+Call `uvdb_shutdown()` only from normal application code, never from an
+exception callback. It removes debugger breakpoints and handlers, closes
+sockets, and releases debugger-owned buffers and the safe-memory message pipe.
+
+### Optional stdout/stderr forwarding
+
+After GDB connects:
+
+```c
+if (uvdb_redirect_stdio() == 0) {
+    printf("Forwarded through GDB remote file I/O.\n");
+}
+```
+
+This creates a helper thread and is suitable for light diagnostic output. Use
+the planned DebugNet integration for sustained log or profiler streaming.
+
+## Connecting with GDB
+
+Keep the exact unstripped ELF produced alongside the VPK. The packaged Vita
+executable may be stripped, but GDB must load the unstripped file from the same
+build:
+
+```sh
+arm-vita-eabi-gdb path/to/my_app.unstripped.elf
+```
+
+Then connect at the GDB prompt:
+
+```gdb
+target remote 10.1.1.93:1234
+break my_function
+continue
+```
+
+Replace the address with the Vita's IP. Connect directly: probing port 1234
+first can consume the current single-client connection.
+
+Useful commands include:
+
+```gdb
+break source_file.c:120
+info breakpoints
+backtrace
+info registers
+frame 2
+info locals
+print variable_name
+set variable variable_name = 42
+x/16wx $sp
+step
+next
+stepi
+continue
+detach
+```
+
+The stub implements executable offsets for Vita runtime placement. Symbols will
+still be incorrect if the ELF and installed VPK came from different builds.
+
+## Exception behavior
+
+The library currently registers Kubridge handlers for data aborts, prefetch
+aborts, and undefined instructions. Software breakpoints and temporary stepping
+traps use undefined instructions and are reported to GDB as `SIGTRAP`. Genuine
+undefined instructions report `SIGILL`; memory aborts report `SIGSEGV`.
+
+GDB does not automatically repair a fault. Continuing without changing the bad
+register, memory, or control flow usually triggers the same fault again.
+Applications installing their own exception handlers may conflict with the
+stub and must deliberately preserve and chain handlers.
+
+## Render96ex integration example
+
+Render96ex is a test consumer, not a dependency. Its current local build option
+uses this pattern:
+
+```sh
+make VERSION=us TARGET_VITA=1 VITA_DEBUGGER=1 \
+  VITA_UVDB_DIR=../VitaDebugger \
+  VITA_KUBRIDGE_DIR=../kubridge
+```
+
+Use a distinct Vita title ID for diagnostic packages so the optimized game can
+remain installed. Preserve the matching unstripped ELF on the computer.
+
+## Current limitations
+
+- The library must currently be compiled into the application; it cannot attach
+  to an arbitrary unmodified process.
+- Debugging is not thread-aware yet. Other threads are not coherently suspended,
+  and another thread can encounter a temporary stepping breakpoint first.
+- Reliable enumeration, suspension, resumption, and foreign-thread register
+  access require the planned kernel companion.
+- Hardware breakpoints and watchpoints are not implemented.
+- Software stepping does not decode every instruction capable of writing PC.
+  Important remaining cases include Thumb IT blocks, `POP {..., pc}`, load-
+  multiple into PC, `TBB`/`TBH`, `MOV pc`, and uncommon ARM control flow.
+- Loaded-module base-address discovery is not implemented.
+- Remote syscall catching is not implemented.
+- Kernel plugins cannot be debugged with the current application-side stub.
+- The network protocol has no authentication or encryption.
+- Long-running reconnect, shutdown, multithread, and fault stress testing is
+  still in progress.
+
+## Roadmap
+
+1. Cooperative thread registration and GDB thread-protocol support.
+2. Correct all-stop behavior backed by a minimal kernel companion.
+3. Complete ARM and Thumb-2 control-flow decoding.
+4. Hardware breakpoints and watchpoints.
+5. Reusable VitaSDK and exported CMake packages.
+6. Hardened optional DebugNet log and telemetry streaming.
+7. VS Code build, deployment, IntelliSense, and GDB configurations.
+8. A separate optimized profiler library and desktop trace viewer.
+9. Optional attachment to applications not compiled with the library.
+
+## Repository layout
+
+- `uvdb.c`: protocol server, safe memory access, breakpoints, stepping, and
+  exception handling.
+- `uvdb.h`: public application API.
+- `stdio_redirect.c`: optional newlib stdout/stderr forwarding.
+- `test.c`: Vita hardware test program.
+- `tests/`: focused instruction fixtures.
+- `Makefile`: static library and test-package build.
+
+## Attribution
+
+VitaDebugger derives from
+[sleirsgoevy/vita-uvdb](https://github.com/sleirsgoevy/vita-uvdb). Kubridge and
+DebugNet are separate projects maintained by their respective authors. Consult
+this repository's license and each dependency's license before redistribution.
