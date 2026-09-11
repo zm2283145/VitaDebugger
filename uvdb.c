@@ -7,6 +7,7 @@
 #include <netinet/tcp.h>
 #include <psp2/net/net_syscalls.h>
 #include <psp2/kernel/threadmgr/msgpipe.h>
+#include <psp2/kernel/threadmgr/thread.h>
 #include <kubridge.h>
 #include "uvdb.h"
 
@@ -21,6 +22,21 @@ int _sceKernelSendMsgPipeVector(SceUID, const SceKernelAddrPair*, unsigned int, 
 int _sceKernelReceiveMsgPipeVector(SceUID, const SceKernelAddrPair*, unsigned int, uint32_t* rest);
 extern char __executable_start[];
 extern char __init_array_start[];
+
+#define UVDB_MAX_THREADS 32
+#define UVDB_THREAD_NAME_MAX 32
+
+struct uvdb_thread_entry
+{
+    SceUID id;
+    char name[UVDB_THREAD_NAME_MAX];
+    uint8_t active;
+};
+
+static struct uvdb_thread_entry uvdb_threads[UVDB_MAX_THREADS];
+static volatile SceUID uvdb_stopped_thread = -1;
+static SceUID uvdb_general_thread = -1;
+static SceUID uvdb_continue_thread = -1;
 
 static int uvdb_lock_state;
 
@@ -37,6 +53,51 @@ static void uvdb_lock(void)
 static void uvdb_unlock(void)
 {
     __atomic_store_n(&uvdb_lock_state, 0, __ATOMIC_SEQ_CST);
+}
+
+static struct uvdb_thread_entry* uvdb_find_thread(SceUID id)
+{
+    for(size_t i = 0; i < UVDB_MAX_THREADS; ++i)
+        if(uvdb_threads[i].active && uvdb_threads[i].id == id)
+            return &uvdb_threads[i];
+    return NULL;
+}
+
+int uvdb_register_thread(const char* name)
+{
+    SceUID id = sceKernelGetThreadId();
+    uvdb_lock();
+    struct uvdb_thread_entry* entry = uvdb_find_thread(id);
+    if(!entry)
+    {
+        for(size_t i = 0; i < UVDB_MAX_THREADS; ++i)
+            if(!uvdb_threads[i].active)
+            {
+                entry = &uvdb_threads[i];
+                memset(entry, 0, sizeof(*entry));
+                entry->id = id;
+                entry->active = 1;
+                break;
+            }
+    }
+    if(entry && name)
+    {
+        strncpy(entry->name, name, sizeof(entry->name) - 1);
+        entry->name[sizeof(entry->name) - 1] = 0;
+    }
+    uvdb_unlock();
+    return entry ? 0 : -1;
+}
+
+int uvdb_unregister_thread(void)
+{
+    SceUID id = sceKernelGetThreadId();
+    uvdb_lock();
+    struct uvdb_thread_entry* entry = uvdb_find_thread(id);
+    if(entry)
+        memset(entry, 0, sizeof(*entry));
+    uvdb_unlock();
+    return entry ? 0 : -1;
 }
 
 static int uvdb_socket = -1;
@@ -266,6 +327,10 @@ void uvdb_shutdown(void)
     }
     buffer_release(&in_buf);
     buffer_release(&out_buf);
+    memset(uvdb_threads, 0, sizeof(uvdb_threads));
+    uvdb_stopped_thread = -1;
+    uvdb_general_thread = -1;
+    uvdb_continue_thread = -1;
     uvdb_io_failed = 0;
     uvdb_state = UVDB_STATE_IDLE;
     uvdb_unlock();
@@ -444,6 +509,32 @@ static void write_x(size_t sz)
 {
     while(sz--)
         buffer_write(&out_buf, "xx", 2);
+}
+
+static void write_hex_uint32(uint32_t value)
+{
+    char digits[8];
+    size_t count = 0;
+    do
+    {
+        digits[count++] = int2hex(value & 15);
+        value >>= 4;
+    }
+    while(value && count < sizeof(digits));
+    while(count)
+        buffer_write(&out_buf, &digits[--count], 1);
+}
+
+static SceUID parse_thread_id(char* text)
+{
+    if(!strcmp(text, "-1"))
+        return -1;
+    return (SceUID)parse_hex(&text);
+}
+
+static int uvdb_thread_is_visible(SceUID id)
+{
+    return id == uvdb_stopped_thread || uvdb_find_thread(id) != NULL;
 }
 
 static size_t safe_memcpy(char* dst, const char* src, size_t sz);
@@ -734,12 +825,85 @@ static void uvdb_main_loop(KuKernelExceptionContext* ctx, int stop_signal)
         {
             uint8_t pkt[3] = {'T', int2hex(stop_signal>>4), int2hex(stop_signal&15)};
             buffer_write(&out_buf, pkt, 3);
+            buffer_write(&out_buf, STRING("thread:"));
+            write_hex_uint32((uint32_t)uvdb_stopped_thread);
+            buffer_write(&out_buf, STRING(";"));
+        }
+        else if(IS("qfThreadInfo"))
+        {
+            int first = 1;
+            buffer_write(&out_buf, STRING("m"));
+            for(size_t i = 0; i < UVDB_MAX_THREADS; ++i)
+                if(uvdb_threads[i].active)
+                {
+                    if(!first)
+                        buffer_write(&out_buf, STRING(","));
+                    write_hex_uint32((uint32_t)uvdb_threads[i].id);
+                    first = 0;
+                }
+            if(uvdb_stopped_thread >= 0 && !uvdb_find_thread(uvdb_stopped_thread))
+            {
+                if(!first)
+                    buffer_write(&out_buf, STRING(","));
+                write_hex_uint32((uint32_t)uvdb_stopped_thread);
+                first = 0;
+            }
+            if(first)
+            {
+                out_buf.size--;
+                buffer_write(&out_buf, STRING("l"));
+            }
+        }
+        else if(IS("qsThreadInfo"))
+            buffer_write(&out_buf, STRING("l"));
+        else if(IS("qC"))
+        {
+            buffer_write(&out_buf, STRING("QC"));
+            write_hex_uint32((uint32_t)uvdb_stopped_thread);
+        }
+        else if(IS("qAttached"))
+            buffer_write(&out_buf, STRING("1"));
+        else if(STARTSWITH("qThreadExtraInfo,"))
+        {
+            SceUID id = parse_thread_id(pkt + sizeof("qThreadExtraInfo,") - 1);
+            struct uvdb_thread_entry* entry = uvdb_find_thread(id);
+            if(entry && entry->name[0])
+                write_hex(entry->name, strlen(entry->name));
+            else if(id == uvdb_stopped_thread)
+                write_hex("stopped thread", sizeof("stopped thread") - 1);
+            else
+                buffer_write(&out_buf, STRING("E16"));
+        }
+        else if(sz >= 2 && pkt[0] == 'H' && (pkt[1] == 'g' || pkt[1] == 'c'))
+        {
+            SceUID id = parse_thread_id(pkt + 2);
+            if(id != 0 && id != -1 && !uvdb_thread_is_visible(id))
+                buffer_write(&out_buf, STRING("E16"));
+            else
+            {
+                if(pkt[1] == 'g')
+                    uvdb_general_thread = id;
+                else
+                    uvdb_continue_thread = id;
+                buffer_write(&out_buf, STRING("OK"));
+            }
+        }
+        else if(sz > 1 && pkt[0] == 'T')
+        {
+            SceUID id = parse_thread_id(pkt + 1);
+            buffer_write(&out_buf, uvdb_thread_is_visible(id) ? "OK" : "E16",
+                         uvdb_thread_is_visible(id) ? 2 : 3);
         }
         else if(IS("g"))
         {
-            write_hex((void*)ctx, 16*4);
-            write_x(25*4);
-            write_hex((void*)&ctx->SPSR, 4);
+            if(uvdb_general_thread > 0 && uvdb_general_thread != uvdb_stopped_thread)
+                buffer_write(&out_buf, STRING("E16"));
+            else
+            {
+                write_hex((void*)ctx, 16*4);
+                write_x(25*4);
+                write_hex((void*)&ctx->SPSR, 4);
+            }
         }
         else if(STARTSWITH("m"))
         {
@@ -762,11 +926,16 @@ static void uvdb_main_loop(KuKernelExceptionContext* ctx, int stop_signal)
         }
         else if(STARTSWITH("G"))
         {
-            char* p = pkt + 1;
-            read_hex(&p, (void*)ctx, 16*4);
-            skip_hex(&p, 25*4);
-            read_hex(&p, (void*)&ctx->SPSR, 4);
-            buffer_write(&out_buf, "OK", 2);
+            if(uvdb_general_thread > 0 && uvdb_general_thread != uvdb_stopped_thread)
+                buffer_write(&out_buf, STRING("E16"));
+            else
+            {
+                char* p = pkt + 1;
+                read_hex(&p, (void*)ctx, 16*4);
+                skip_hex(&p, 25*4);
+                read_hex(&p, (void*)&ctx->SPSR, 4);
+                buffer_write(&out_buf, "OK", 2);
+            }
         }
         else if(STARTSWITH("M"))
         {
@@ -880,6 +1049,9 @@ static __attribute__((naked)) void uvdb_trap_pc(void)
 
 static void exception_handler(KuKernelExceptionContext* ctx)
 {
+    uvdb_stopped_thread = sceKernelGetThreadId();
+    if(uvdb_general_thread <= 0 || !uvdb_thread_is_visible(uvdb_general_thread))
+        uvdb_general_thread = uvdb_stopped_thread;
     int signal = SIGSEGV;
     if(ctx->exceptionType == KU_KERNEL_EXCEPTION_TYPE_UNDEFINED_INSTRUCTION)
         signal = SIGILL;
@@ -956,6 +1128,7 @@ static __attribute__((used)) uint64_t real_uvdb_enter(uintptr_t lr)
 {
     uint64_t no_trap = (uint64_t)lr << 32 | lr;
     uint64_t trap = (uint64_t)(uint32_t)uvdb_trap_pc << 32 | lr;
+    uvdb_register_thread(NULL);
     uvdb_lock();
     if(uvdb_socket >= 0)
     {

@@ -2,11 +2,26 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <unistd.h>
+#include <pthread.h>
 #include "debugScreen.h"
 #include "uvdb.h"
 
 static volatile int test_value;
 volatile int trigger_fault;
+static volatile int worker_values[2];
+
+static void* worker_main(void* argument)
+{
+    intptr_t index = (intptr_t)argument;
+    uvdb_register_thread(index == 0 ? "test worker 0" : "test worker 1");
+    for(;;)
+    {
+        worker_values[index]++;
+        usleep(20000 + (unsigned int)index * 10000);
+    }
+    uvdb_unregister_thread();
+    return NULL;
+}
 
 __attribute__((noinline)) static int step_target(int value)
 {
@@ -35,6 +50,10 @@ int main(void)
     memcpy(addr, &sin.sin_addr.s_addr, 4);
     psvDebugScreenPrintf("Run the following command on your PC:\n");
     psvDebugScreenPrintf("$ gdb test.elf -ex 'target remote %hhu.%hhu.%hhu.%hhu:1234'\n", addr[0], addr[1], addr[2], addr[3]);
+    uvdb_register_thread("test main");
+    pthread_t workers[2];
+    pthread_create(&workers[0], NULL, worker_main, (void*)0);
+    pthread_create(&workers[1], NULL, worker_main, (void*)1);
     uvdb_enter();
     psvDebugScreenPrintf("Debugger connected. Running quiet step target.\n");
     for(int i = 0;; i++)

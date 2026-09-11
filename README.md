@@ -49,6 +49,8 @@ The current application-side library has been tested on real Vita hardware with:
 - Catching data aborts before the standard Vita crash screen.
 - Structured fault information: exception type, signal, FSR, FAR, PC, LR, SP.
 - Reconnection at a later `uvdb_enter()` after a disconnected session.
+- Build-tested cooperative registration and GDB discovery of named application
+  threads; hardware validation of this new path is in progress.
 - A debugger-enabled Render96ex build as a larger real-world test.
 
 It is already useful for controlled application debugging. It is not yet a
@@ -306,6 +308,25 @@ if (uvdb_redirect_stdio() == 0) {
 This creates a helper thread and is suitable for light diagnostic output. Use
 the planned DebugNet integration for sustained log or profiler streaming.
 
+### Cooperative thread registration
+
+Application threads can register a stable name for GDB discovery:
+
+```c
+static void *worker(void *argument) {
+    uvdb_register_thread("asset worker");
+    run_worker(argument);
+    uvdb_unregister_thread();
+    return NULL;
+}
+```
+
+The current user-mode implementation supports GDB thread listing, names,
+liveness checks, selection, and identification of the thread that entered the
+exception handler. It intentionally rejects register access for a selected
+thread that is not stopped, because it does not yet possess a valid saved
+context for that thread. Registration alone does not suspend the thread.
+
 ## Connecting with GDB
 
 Keep the exact unstripped ELF produced alongside the VPK. The packaged Vita
@@ -379,8 +400,9 @@ remain installed. Preserve the matching unstripped ELF on the computer.
 
 - The library must currently be compiled into the application; it cannot attach
   to an arbitrary unmodified process.
-- Debugging is not thread-aware yet. Other threads are not coherently suspended,
-  and another thread can encounter a temporary stepping breakpoint first.
+- Initial cooperative GDB thread discovery is implemented, but other threads
+  are not yet coherently suspended and another thread can encounter a temporary
+  stepping breakpoint first.
 - Reliable enumeration, suspension, resumption, and foreign-thread register
   access require the planned kernel companion.
 - Hardware breakpoints and watchpoints are not implemented.

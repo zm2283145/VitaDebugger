@@ -18,6 +18,12 @@ struct uvdb_config {
     size_t max_packet_buffer;
 };
 
+// Register the calling thread so it is visible to GDB. Registration is
+// cooperative in the application-only library; complete thread suspension and
+// foreign-thread register access require the planned kernel companion.
+int uvdb_register_thread(const char* name);
+int uvdb_unregister_thread(void);
+
 enum uvdb_exception_type {
     UVDB_EXCEPTION_DATA_ABORT = 0,
     UVDB_EXCEPTION_PREFETCH_ABORT = 1,
