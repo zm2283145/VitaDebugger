@@ -721,6 +721,27 @@ static void breakpoint_remove_temporary(void)
             breakpoint_remove(uvdb_breakpoints[i].address);
 }
 
+static int arm_condition_passed(unsigned int condition, uint32_t cpsr)
+{
+    int n = (cpsr >> 31) & 1;
+    int z = (cpsr >> 30) & 1;
+    int c = (cpsr >> 29) & 1;
+    int v = (cpsr >> 28) & 1;
+    int passed;
+    switch(condition >> 1)
+    {
+        case 0: passed = z; break;
+        case 1: passed = c; break;
+        case 2: passed = n; break;
+        case 3: passed = v; break;
+        case 4: passed = c && !z; break;
+        case 5: passed = n == v; break;
+        case 6: passed = !z && n == v; break;
+        default: passed = condition == 14; break;
+    }
+    return (condition & 1) && condition != 15 ? !passed : passed;
+}
+
 static int breakpoint_insert_step(KuKernelExceptionContext* ctx)
 {
     uintptr_t pc = ctx->pc;
@@ -731,6 +752,35 @@ static int breakpoint_insert_step(KuKernelExceptionContext* ctx)
             return -1;
         unsigned int prefix = instruction >> 11;
         size_t instruction_size = (prefix == 0x1d || prefix == 0x1e || prefix == 0x1f) ? 4 : 2;
+
+        // IT blocks conditionally execute up to four following instructions.
+        // Decode the saved flags and stop at the first instruction that will
+        // execute, or immediately after the block if every slot is skipped.
+        if((instruction & 0xff00) == 0xbf00 &&
+           (instruction & 0x000f) != 0 &&
+           (instruction & 0x00f0) != 0x00f0)
+        {
+            unsigned int itstate = instruction & 0xff;
+            uintptr_t next = pc + 2;
+            for(int slot = 0; slot < 4; ++slot)
+            {
+                if(arm_condition_passed(itstate >> 4, ctx->SPSR))
+                    return breakpoint_insert_internal(next, 2, 1);
+
+                uint16_t skipped;
+                if(safe_memcpy((char*)&skipped, (const char*)next,
+                               sizeof(skipped)) != sizeof(skipped))
+                    return -1;
+                unsigned int skipped_prefix = skipped >> 11;
+                next += (skipped_prefix == 0x1d ||
+                         skipped_prefix == 0x1e ||
+                         skipped_prefix == 0x1f) ? 4 : 2;
+                if((itstate & 7) == 0)
+                    break;
+                itstate = (itstate & 0xe0) | ((itstate << 1) & 0x1f);
+            }
+            return breakpoint_insert_internal(next, 2, 1);
+        }
 
         // 16-bit conditional branch. Plant traps on both possible paths so the
         // CPU's condition flags, rather than the debugger, choose the result.
@@ -853,6 +903,24 @@ static int breakpoint_insert_step(KuKernelExceptionContext* ctx)
                 uintptr_t saved_pc_address = registers[rn] +
                     lower_count * sizeof(uint32_t);
                 uintptr_t target;
+                if(safe_memcpy((char*)&target,
+                               (const char*)saved_pc_address,
+                               sizeof(target)) != sizeof(target))
+                    return -1;
+                return breakpoint_insert_internal(target,
+                                                   (target & 1) ? 2 : 4, 1);
+            }
+
+            // Thumb-2 LDMDB restoring PC. Since PC is the highest register,
+            // its saved word is immediately below the original base address.
+            if((instruction & 0xffd0) == 0xe910 && (second & 0x8000))
+            {
+                unsigned int rn = instruction & 0xf;
+                if(rn == 15)
+                    return -1;
+                const uint32_t* registers = &ctx->r0;
+                uintptr_t target;
+                uintptr_t saved_pc_address = registers[rn] - sizeof(uint32_t);
                 if(safe_memcpy((char*)&target,
                                (const char*)saved_pc_address,
                                sizeof(target)) != sizeof(target))

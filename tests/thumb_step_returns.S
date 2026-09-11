@@ -93,3 +93,40 @@ thumb_step_ldm_target:
 .Lldm_table_address:
     .word .Lldm_table
 .size thumb_step_ldm_fixture, .-thumb_step_ldm_fixture
+
+.global thumb_step_it_fixture
+.global thumb_step_it_site
+.global thumb_step_it_target
+.type thumb_step_it_fixture, %function
+.thumb_func
+thumb_step_it_fixture:
+    movs r0, #0
+    cmp r0, #1
+thumb_step_it_site:
+    itt eq
+    moveq r2, #1
+    moveq r2, #2
+thumb_step_it_target:
+    bx lr
+.size thumb_step_it_fixture, .-thumb_step_it_fixture
+
+.global thumb_step_ldmdb_fixture
+.global thumb_step_ldmdb_site
+.global thumb_step_ldmdb_target
+.type thumb_step_ldmdb_fixture, %function
+.thumb_func
+thumb_step_ldmdb_fixture:
+    ldr r0, .Lldmdb_end_address
+thumb_step_ldmdb_site:
+    ldmdb r0!, {r4, pc}
+    udf #5
+thumb_step_ldmdb_target:
+    bx lr
+    .balign 4
+.Lldmdb_table:
+    .word 0x8899aabb
+    .word thumb_step_ldmdb_target + 1
+.Lldmdb_end:
+.Lldmdb_end_address:
+    .word .Lldmdb_end
+.size thumb_step_ldmdb_fixture, .-thumb_step_ldmdb_fixture
