@@ -6,7 +6,7 @@
 extern "C" {
 #endif
 
-#define VD_KERNEL_ABI_VERSION 0x00010005u
+#define VD_KERNEL_ABI_VERSION 0x00010006u
 #define VD_KERNEL_MAX_THREADS 64
 
 enum vd_kernel_capability {
@@ -14,6 +14,7 @@ enum vd_kernel_capability {
     VD_KERNEL_CAP_THREAD_CONTROL = 1u << 1,
     VD_KERNEL_CAP_THREAD_REGISTERS = 1u << 2,
     VD_KERNEL_CAP_STOP_RECONCILE = 1u << 3,
+    VD_KERNEL_CAP_HW_DEBUG_DISCOVERY = 1u << 4,
     VD_KERNEL_CAP_PROBE_SUSPEND = 1u << 31,
 };
 
@@ -53,8 +54,19 @@ struct vd_kernel_status {
     unsigned int reserved;
 };
 
+struct vd_kernel_hw_debug_info {
+    unsigned int raw_didr;
+    unsigned int breakpoint_count;
+    unsigned int watchpoint_count;
+    unsigned int context_breakpoint_count;
+};
+
 // Copy the companion ABI and supported capability bits to user memory.
 int vdKernelGetStatus(struct vd_kernel_status* status);
+
+// Read the current CPU's architected debug identification register. This does
+// not enable monitor mode or alter any breakpoint/watchpoint comparator.
+int vdKernelGetHardwareDebugInfo(struct vd_kernel_hw_debug_info* info);
 
 // Enumerate only threads owned by the calling process. Kernel-global thread
 // IDs are translated to process-visible user IDs before being returned.

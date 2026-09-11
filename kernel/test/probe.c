@@ -55,6 +55,20 @@ int main(void)
                  (status.capabilities & VD_KERNEL_CAP_THREAD_LIST) != 0);
     report_check("thread limit", status.max_threads == VD_KERNEL_MAX_THREADS);
 
+    struct vd_kernel_hw_debug_info hw_debug = {0};
+    result = vdKernelGetHardwareDebugInfo(&hw_debug);
+    report_check("hardware debug discovery", result >= 0);
+    report_check("breakpoint comparator count",
+                 hw_debug.breakpoint_count > 0 &&
+                 hw_debug.breakpoint_count <= 16);
+    report_check("watchpoint comparator count",
+                 hw_debug.watchpoint_count > 0 &&
+                 hw_debug.watchpoint_count <= 16);
+    psvDebugScreenPrintf("  didr=%08X break=%u watch=%u context=%u\n",
+                         hw_debug.raw_didr, hw_debug.breakpoint_count,
+                         hw_debug.watchpoint_count,
+                         hw_debug.context_breakpoint_count);
+
     int copied = -1;
     int total = -1;
     result = vdKernelGetThreadList(NULL, 0, &copied, &total);

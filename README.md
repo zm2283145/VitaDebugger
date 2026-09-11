@@ -71,6 +71,8 @@ The current application-side library has been tested on real Vita hardware with:
   threads owned by an active stop session, including symbolized stack frames.
 - Hardware-tested stop-session reconciliation: threads created after the
   initial snapshot are discovered and suspended by the next lease renewal.
+- Hardware-tested read-only ARM debug-resource discovery reporting six
+  breakpoint, four watchpoint, and two context-aware breakpoint comparators.
 - A debugger-enabled Render96ex build as a larger real-world test.
 
 It is already useful for controlled application debugging. It is not yet a
@@ -89,6 +91,7 @@ hardware. These unedited Vita screenshots record the completed probe results:
 | v4 | [Lease-keeper exemption](docs/hardware/kernel-probe-v4-lease-exemption.jpg) | A validated exempt thread remains active to renew long GDB stop sessions |
 | v5 | [Saved register banks](docs/hardware/kernel-probe-v5-register-banks.jpg) | Session ownership checks and both raw ARM banks; bank 1 contains the saved user-mode PC, SP, CPSR, and general registers |
 | v6 | [Late-thread reconciliation](docs/hardware/kernel-probe-v6-late-thread-reconcile.jpg) | A thread created after stop begins is discovered on renewal, suspended, tracked, and resumed with the session |
+| v7 | [Hardware-debug discovery](docs/hardware/kernel-probe-v7-hw-debug-discovery.jpg) | Read-only CP14 identification and the Vita's six breakpoint, four watchpoint, and two context-aware comparator counts |
 
 Every displayed probe check passed. These images document controlled test
 coverage; they do not claim that arbitrary applications or every firmware and

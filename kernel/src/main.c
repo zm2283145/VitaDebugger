@@ -139,6 +139,7 @@ int vdKernelGetStatus(struct vd_kernel_status* status)
                         VD_KERNEL_CAP_THREAD_CONTROL |
                         VD_KERNEL_CAP_THREAD_REGISTERS |
                         VD_KERNEL_CAP_STOP_RECONCILE |
+                        VD_KERNEL_CAP_HW_DEBUG_DISCOVERY |
                         VD_KERNEL_CAP_PROBE_SUSPEND,
         .max_threads = VD_KERNEL_MAX_THREADS,
         .reserved = 0,
@@ -146,6 +147,30 @@ int vdKernelGetStatus(struct vd_kernel_status* status)
     int result = ksceKernelMemcpyKernelToUser(status, &kernel_status,
                                                sizeof(kernel_status));
 
+    EXIT_SYSCALL(syscall_state);
+    return result;
+}
+
+int vdKernelGetHardwareDebugInfo(struct vd_kernel_hw_debug_info* info)
+{
+    uint32_t syscall_state;
+    ENTER_SYSCALL(syscall_state);
+    if(!info)
+    {
+        EXIT_SYSCALL(syscall_state);
+        return -1;
+    }
+
+    unsigned int didr;
+    __asm__ volatile("mrc p14, 0, %0, c0, c0, 0" : "=r"(didr));
+    const struct vd_kernel_hw_debug_info kernel_info = {
+        .raw_didr = didr,
+        .breakpoint_count = ((didr >> 24) & 0xf) + 1,
+        .watchpoint_count = ((didr >> 28) & 0xf) + 1,
+        .context_breakpoint_count = ((didr >> 20) & 0xf) + 1,
+    };
+    int result = ksceKernelMemcpyKernelToUser(info, &kernel_info,
+                                               sizeof(kernel_info));
     EXIT_SYSCALL(syscall_state);
     return result;
 }
