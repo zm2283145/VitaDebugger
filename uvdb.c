@@ -778,6 +778,35 @@ static int breakpoint_insert_step(KuKernelExceptionContext* ctx)
             return breakpoint_insert_internal(target, (target & 1) ? 2 : 4, 1);
         }
 
+        // MOV PC, Rm (high-register form). This remains in Thumb state.
+        if((instruction & 0xff00) == 0x4600)
+        {
+            unsigned int rd = (instruction & 7) |
+                              ((instruction >> 4) & 8);
+            if(rd == 15)
+            {
+                unsigned int rm = (instruction >> 3) & 0xf;
+                const uint32_t* registers = &ctx->r0;
+                return breakpoint_insert_internal(registers[rm], 2, 1);
+            }
+        }
+
+        // POP {..., PC}. The saved PC follows each selected low register on
+        // the current stack; read it without directly dereferencing user RAM.
+        if((instruction & 0xff00) == 0xbd00)
+        {
+            unsigned int register_count =
+                (unsigned int)__builtin_popcount(instruction & 0xff);
+            uintptr_t target;
+            const char* saved_pc = (const char*)(uintptr_t)
+                (ctx->sp + register_count * sizeof(uint32_t));
+            if(safe_memcpy((char*)&target, saved_pc, sizeof(target)) !=
+               sizeof(target))
+                return -1;
+            return breakpoint_insert_internal(target,
+                                               (target & 1) ? 2 : 4, 1);
+        }
+
         if(instruction_size == 4)
         {
             uint16_t second;

@@ -1,7 +1,7 @@
 all: libuvdb.a
 
 clean:
-	rm -f *.o *.a *.elf *.velf eboot.bin param.sfo *.vpk *.psp2dmp
+	rm -f *.o tests/*.o *.a *.elf *.velf eboot.bin param.sfo *.vpk *.psp2dmp
 
 package: uvdb-test.vpk
 
@@ -35,10 +35,13 @@ test.o: test.c *.h
 psvDebugScreen.o: $(VITASDK)/share/gcc-arm-vita-eabi/samples/common/debugScreen.c
 	arm-vita-eabi-gcc $< $(CFLAGS) $(EXTRA_CFLAGS) -c -o $@
 
+tests/thumb_step_returns.o: tests/thumb_step_returns.S
+	arm-vita-eabi-gcc $< $(CFLAGS) -c -o $@
+
 libuvdb.a: uvdb.o stdio_redirect.o
 	arm-vita-eabi-ar rcs $@ $^
 
-test.elf: psvDebugScreen.o test.o libuvdb.a
+test.elf: psvDebugScreen.o test.o tests/thumb_step_returns.o libuvdb.a
 	arm-vita-eabi-gcc $^ $(LDFLAGS) $(EXTRA_LDFLAGS) -o $@
 
 param.sfo:

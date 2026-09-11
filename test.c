@@ -10,6 +10,9 @@ static volatile int test_value;
 volatile int trigger_fault;
 static volatile int worker_values[2];
 
+void thumb_step_pop_fixture(void);
+void thumb_step_mov_fixture(void);
+
 static void* worker_main(void* argument)
 {
     intptr_t index = (intptr_t)argument;
@@ -66,6 +69,8 @@ int main(void)
         if(trigger_fault)
             *(volatile unsigned int*)0 = 0x55464442;
         test_value = step_target(i);
+        thumb_step_pop_fixture();
+        thumb_step_mov_fixture();
         if((i % 10) == 0)
             psvDebugScreenPrintf("alive: i=%d value=%d\n", i, test_value);
         usleep(100000);
