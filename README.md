@@ -55,8 +55,9 @@ The current application-side library has been tested on real Vita hardware with:
   application threads.
 - Hardware-tested persistent attachment, Ctrl-C interruption, clean detach,
   immediate reattachment, and recovery after abrupt client termination.
-- A build-tested, non-destructive first kernel-companion slice providing ABI
-  discovery and caller-process-only thread enumeration.
+- A hardware-tested kernel companion providing ABI discovery,
+  caller-process-only thread enumeration, tokenized stop/resume sessions, and
+  watchdog recovery from an abandoned session.
 - A debugger-enabled Render96ex build as a larger real-world test.
 
 It is already useful for controlled application debugging. It is not yet a
@@ -99,9 +100,12 @@ implemented reliably from a user process:
 
 The plugin will expose a small validated interface rather than a general
 arbitrary kernel-access service. Library-only operation will remain supported.
-The initial implementation deliberately exposes only status and enumeration.
-Suspend/resume and register access will stay disabled until process ownership,
-debugger-thread exclusion, rollback, and failure recovery have hardware tests.
+The current implementation derives process ownership in kernel context,
+excludes the calling debugger thread, records only threads it successfully
+suspends, rolls back partial failures, requires a process-owned session token,
+and automatically resumes an abandoned session when its short lease expires.
+Foreign-thread register access remains disabled until its representation is
+validated on hardware.
 
 ### `libvitaprofiler`
 
@@ -215,16 +219,16 @@ cmake --build kernel/build
 ```
 
 This produces `vitadebug.skprx` plus strong and weak user import libraries.
-The current companion provides only ABI/capability queries and caller-process
-thread enumeration. It does not yet suspend threads or access their registers.
-Do not add it to a permanent taiHEN configuration until the matching hardware
-probe and unload/recovery tests have passed.
+The current companion provides ABI/capability queries, caller-process thread
+enumeration, and lease-protected stop sessions. It does not yet expose foreign
+thread registers. Keep a known-good taiHEN configuration backup while testing
+kernel builds.
 
-The same build produces `vitadebug-kernel-probe.vpk`. After the plugin has been
-loaded in a controlled test configuration, the probe checks the ABI, capability
-bits, main/worker thread visibility, count-only enumeration, and rejection of
-invalid capacities and NULL output arguments. Any failed boundary check is
-shown as a `FAIL` line on screen.
+The same build produces `vitadebug-kernel-probe.vpk`. The probe checks the ABI,
+capability bits, main/worker thread visibility, invalid argument rejection, a
+normal tokenized stop/end sequence, and automatic watchdog resumption after an
+intentionally abandoned lease. Any failed boundary check is shown as a `FAIL`
+line on screen.
 
 ## Makefile integration
 

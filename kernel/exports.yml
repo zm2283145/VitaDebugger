@@ -12,3 +12,7 @@ vitadebug_kernel:
       functions:
         - vdKernelGetStatus: 0x76A3D001
         - vdKernelGetThreadList: 0x76A3D002
+        - vdKernelProbeSuspendThread: 0x76A3D003
+        - vdKernelBeginStop: 0x76A3D004
+        - vdKernelRenewStop: 0x76A3D005
+        - vdKernelEndStop: 0x76A3D006

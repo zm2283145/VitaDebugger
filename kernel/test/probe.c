@@ -5,13 +5,17 @@
 #include "vitadebug_kernel.h"
 
 static volatile int keep_worker_running = 1;
+static volatile unsigned int worker_ticks;
 
 static int probe_worker(SceSize args, void* argp)
 {
     (void)args;
     (void)argp;
     while(keep_worker_running)
+    {
+        worker_ticks++;
         sceKernelDelayThread(10000);
+    }
     return 0;
 }
 
@@ -75,6 +79,55 @@ int main(void)
                  vdKernelGetThreadList(ids, 1, NULL, &total) < 0);
     report_check("reject NULL total count",
                  vdKernelGetThreadList(ids, 1, &copied, NULL) < 0);
+
+    if(worker_started &&
+       (status.capabilities & VD_KERNEL_CAP_PROBE_SUSPEND) != 0)
+    {
+        sceKernelDelayThread(50000);
+        unsigned int before = worker_ticks;
+        struct vd_kernel_probe_suspend_result suspend_result;
+        result = vdKernelProbeSuspendThread(worker, 200000, &suspend_result);
+        unsigned int stopped_delta = worker_ticks - before;
+        sceKernelDelayThread(100000);
+        unsigned int resumed_delta = worker_ticks - before - stopped_delta;
+
+        report_check("probe suspend syscall", result >= 0);
+        report_check("worker stayed suspended", stopped_delta <= 2);
+        report_check("worker resumed", resumed_delta >= 5);
+        report_check("kernel suspend result", suspend_result.suspend_result >= 0);
+        report_check("kernel resume result", suspend_result.resume_result >= 0);
+        psvDebugScreenPrintf("  states: during=%d after=%d recovery=%d\n",
+                             suspend_result.state_while_suspended,
+                             suspend_result.state_after_resume,
+                             suspend_result.recovery_result);
+    }
+
+    if(worker_started &&
+       (status.capabilities & VD_KERNEL_CAP_THREAD_CONTROL) != 0)
+    {
+        struct vd_kernel_stop_result stop_result;
+        unsigned int before = worker_ticks;
+        result = vdKernelBeginStop(1000, &stop_result);
+        sceKernelDelayThread(150000);
+        unsigned int stopped_delta = worker_ticks - before;
+        int resumed_count = -1;
+        int end_result = result >= 0
+            ? vdKernelEndStop(stop_result.token, &resumed_count)
+            : result;
+        sceKernelDelayThread(100000);
+        unsigned int resumed_delta = worker_ticks - before - stopped_delta;
+        report_check("begin stop session", result >= 0 && stop_result.token != 0);
+        report_check("session stopped worker", stopped_delta <= 2);
+        report_check("end stop session", end_result >= 0 && resumed_count >= 1);
+        report_check("session resumed worker", resumed_delta >= 5);
+
+        before = worker_ticks;
+        result = vdKernelBeginStop(250, &stop_result);
+        sceKernelDelayThread(450000);
+        unsigned int watchdog_delta = worker_ticks - before;
+        report_check("begin watchdog session", result >= 0);
+        report_check("watchdog auto-resume", watchdog_delta >= 10);
+    }
 
     psvDebugScreenPrintf("\nLeave this screen open and report any FAIL line.\n");
     for(;;)
