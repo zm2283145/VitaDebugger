@@ -6,7 +6,7 @@
 extern "C" {
 #endif
 
-#define VD_KERNEL_ABI_VERSION 0x00010002u
+#define VD_KERNEL_ABI_VERSION 0x00010003u
 #define VD_KERNEL_MAX_THREADS 64
 
 enum vd_kernel_capability {
@@ -60,7 +60,7 @@ int vdKernelProbeSuspendThread(
 // always excluded so it can service GDB and end or renew the session. A lease
 // between 250 and 5000 ms is required; expiration automatically resumes every
 // thread owned by this session.
-int vdKernelBeginStop(unsigned int lease_ms,
+int vdKernelBeginStop(unsigned int lease_ms, SceUID exempt_user_thread,
                       struct vd_kernel_stop_result* stop_result);
 
 // Extend an active session owned by the calling process.

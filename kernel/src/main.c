@@ -265,7 +265,7 @@ static int valid_lease(unsigned int lease_ms)
     return lease_ms >= VD_MIN_LEASE_MS && lease_ms <= VD_MAX_LEASE_MS;
 }
 
-int vdKernelBeginStop(unsigned int lease_ms,
+int vdKernelBeginStop(unsigned int lease_ms, SceUID exempt_user_thread,
                       struct vd_kernel_stop_result* stop_result)
 {
     uint32_t syscall_state;
@@ -286,6 +286,16 @@ int vdKernelBeginStop(unsigned int lease_ms,
     };
     SceUID caller_pid = ksceKernelGetProcessId();
     SceUID caller_thread = ksceKernelGetThreadId();
+    SceUID exempt_thread = -1;
+    if(exempt_user_thread >= 0)
+    {
+        exempt_thread = find_caller_thread_guid(exempt_user_thread);
+        if(exempt_thread < 0)
+        {
+            kernel_result.failure_code = -3;
+            goto copy_result;
+        }
+    }
     SceUID threads[VD_KERNEL_MAX_THREADS];
     int copied = 0;
     int total = ksceKernelGetThreadIdList(caller_pid, threads,
@@ -308,7 +318,7 @@ int vdKernelBeginStop(unsigned int lease_ms,
     stop_session.suspended_count = 0;
     for(int i = 0; i < copied; ++i)
     {
-        if(threads[i] == caller_thread)
+        if(threads[i] == caller_thread || threads[i] == exempt_thread)
             continue;
         int state = ksceKernelIsThreadDebugSuspended(threads[i]);
         if(state > 0)

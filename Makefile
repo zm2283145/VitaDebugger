@@ -13,9 +13,16 @@ fetch_dumps:
 
 KUBRIDGE_DIR ?= ../kubridge-review
 KUBRIDGE_LIB_DIR ?= $(KUBRIDGE_DIR)/build-local
+VITADEBUG_KERNEL_DIR ?= kernel
+VITADEBUG_KERNEL_BUILD_DIR ?= $(VITADEBUG_KERNEL_DIR)/build-short
 
 EXTRA_CFLAGS := -O0 -g -Wall -Wextra -I $(VITASDK)/share/gcc-arm-vita-eabi/samples/common -I $(KUBRIDGE_DIR)
 EXTRA_LDFLAGS := $(CFLAGS) -Wl,-q -L $(KUBRIDGE_LIB_DIR) -lSceDisplay_stub -lSceNetPs_stub -lkubridge_stub -pthread
+
+ifeq ($(UVDB_KERNEL_THREAD_CONTROL),1)
+override CFLAGS += -DUVDB_KERNEL_THREAD_CONTROL -I $(VITADEBUG_KERNEL_DIR)/include
+EXTRA_LDFLAGS += $(VITADEBUG_KERNEL_BUILD_DIR)/vitadebug_stubs/libvitadebug_kernel_stub.a
+endif
 
 override CFLAGS += -I $(KUBRIDGE_DIR) -Wall -Wextra -g
 

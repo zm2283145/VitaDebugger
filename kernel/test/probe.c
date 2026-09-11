@@ -107,7 +107,7 @@ int main(void)
     {
         struct vd_kernel_stop_result stop_result;
         unsigned int before = worker_ticks;
-        result = vdKernelBeginStop(1000, &stop_result);
+        result = vdKernelBeginStop(1000, -1, &stop_result);
         sceKernelDelayThread(150000);
         unsigned int stopped_delta = worker_ticks - before;
         int resumed_count = -1;
@@ -122,11 +122,22 @@ int main(void)
         report_check("session resumed worker", resumed_delta >= 5);
 
         before = worker_ticks;
-        result = vdKernelBeginStop(250, &stop_result);
+        result = vdKernelBeginStop(250, -1, &stop_result);
         sceKernelDelayThread(450000);
         unsigned int watchdog_delta = worker_ticks - before;
         report_check("begin watchdog session", result >= 0);
         report_check("watchdog auto-resume", watchdog_delta >= 10);
+
+        before = worker_ticks;
+        result = vdKernelBeginStop(500, worker, &stop_result);
+        sceKernelDelayThread(150000);
+        unsigned int exempt_delta = worker_ticks - before;
+        end_result = result >= 0
+            ? vdKernelEndStop(stop_result.token, &resumed_count)
+            : result;
+        report_check("begin exempt session", result >= 0);
+        report_check("exempt worker kept running", exempt_delta >= 8);
+        report_check("end exempt session", end_result >= 0);
     }
 
     psvDebugScreenPrintf("\nLeave this screen open and report any FAIL line.\n");

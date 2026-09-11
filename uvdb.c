@@ -10,6 +10,9 @@
 #include <psp2/kernel/threadmgr/thread.h>
 #include <kubridge.h>
 #include "uvdb.h"
+#ifdef UVDB_KERNEL_THREAD_CONTROL
+#include "vitadebug_kernel.h"
+#endif
 
 #define UVDB_DEFAULT_PORT 1234
 #define UVDB_DEFAULT_MAX_BUFFER (256 * 1024)
@@ -112,12 +115,20 @@ static volatile int uvdb_target_stopped;
 static volatile int uvdb_async_stop_pending;
 static volatile int uvdb_server_stop;
 static SceUID uvdb_server_thread = -1;
+#ifdef UVDB_KERNEL_THREAD_CONTROL
+static volatile int uvdb_lease_stop;
+static volatile unsigned int uvdb_stop_token;
+static SceUID uvdb_lease_thread = -1;
+#endif
 static struct uvdb_fault_info uvdb_last_fault = {
     .exception_type = UVDB_EXCEPTION_NONE,
 };
 
 static void breakpoint_remove_all(void);
 static int uvdb_server_main(SceSize args, void* argp);
+#ifdef UVDB_KERNEL_THREAD_CONTROL
+static int uvdb_lease_main(SceSize args, void* argp);
+#endif
 
 struct buffer
 {
@@ -321,23 +332,54 @@ int uvdb_get_last_fault(struct uvdb_fault_info* info)
 int uvdb_stop_server(void)
 {
     SceUID thread = uvdb_server_thread;
-    if(thread < 0)
+    #ifdef UVDB_KERNEL_THREAD_CONTROL
+    SceUID lease_thread = uvdb_lease_thread;
+    #endif
+    if(thread < 0
+       #ifdef UVDB_KERNEL_THREAD_CONTROL
+       && lease_thread < 0
+       #endif
+       )
         return 0;
-    if(thread == sceKernelGetThreadId())
+    SceUID caller = sceKernelGetThreadId();
+    if(thread == caller
+       #ifdef UVDB_KERNEL_THREAD_CONTROL
+       || lease_thread == caller
+       #endif
+       )
         return -1;
 
     __atomic_store_n(&uvdb_server_stop, 1, __ATOMIC_SEQ_CST);
+    #ifdef UVDB_KERNEL_THREAD_CONTROL
+    __atomic_store_n(&uvdb_lease_stop, 1, __ATOMIC_SEQ_CST);
+    #endif
     // Closing a socket is what wakes a service thread blocked in accept/recv.
     // Do not take uvdb_lock here: the blocked service or exception path may be
     // holding it while waiting for network input.
     uvdb_close_socket(&uvdb_socket);
     uvdb_close_socket(&uvdb_listen_socket);
 
-    int status = 0;
-    int result = sceKernelWaitThreadEnd(thread, &status, NULL);
-    if(result >= 0)
-        result = sceKernelDeleteThread(thread);
+    int result = 0;
+    if(thread >= 0)
+    {
+        int status = 0;
+        result = sceKernelWaitThreadEnd(thread, &status, NULL);
+        if(result >= 0)
+            result = sceKernelDeleteThread(thread);
+    }
     uvdb_server_thread = -1;
+    #ifdef UVDB_KERNEL_THREAD_CONTROL
+    if(lease_thread >= 0)
+    {
+        int status = 0;
+        int lease_result = sceKernelWaitThreadEnd(lease_thread, &status, NULL);
+        if(lease_result >= 0)
+            lease_result = sceKernelDeleteThread(lease_thread);
+        if(result >= 0 && lease_result < 0)
+            result = lease_result;
+    }
+    uvdb_lease_thread = -1;
+    #endif
     return result < 0 ? -1 : 0;
 }
 
@@ -364,6 +406,10 @@ void uvdb_shutdown(void)
     uvdb_target_stopped = 0;
     uvdb_async_stop_pending = 0;
     uvdb_server_stop = 0;
+    #ifdef UVDB_KERNEL_THREAD_CONTROL
+    uvdb_lease_stop = 0;
+    uvdb_stop_token = 0;
+    #endif
     uvdb_state = UVDB_STATE_IDLE;
     uvdb_unlock();
 }
@@ -842,6 +888,34 @@ static int send_stop_reply(int signal)
     return send_packet();
 }
 
+#ifdef UVDB_KERNEL_THREAD_CONTROL
+static int uvdb_kernel_begin_stop(void)
+{
+    if(__atomic_load_n(&uvdb_stop_token, __ATOMIC_SEQ_CST))
+        return 0;
+    struct vd_kernel_stop_result result;
+    int status = vdKernelBeginStop(2000, uvdb_lease_thread, &result);
+    if(status < 0 || !result.token)
+        return -1;
+    __atomic_store_n(&uvdb_stop_token, result.token, __ATOMIC_SEQ_CST);
+    return 0;
+}
+
+static void uvdb_kernel_end_stop(void)
+{
+    unsigned int token = __atomic_exchange_n(&uvdb_stop_token, 0,
+                                              __ATOMIC_SEQ_CST);
+    if(token)
+    {
+        int resumed = 0;
+        vdKernelEndStop(token, &resumed);
+    }
+}
+#else
+static int uvdb_kernel_begin_stop(void) { return 0; }
+static void uvdb_kernel_end_stop(void) { }
+#endif
+
 static void uvdb_main_loop(KuKernelExceptionContext* ctx, int stop_signal)
 {
     for(;;)
@@ -850,6 +924,7 @@ static void uvdb_main_loop(KuKernelExceptionContext* ctx, int stop_signal)
         size_t sz = recv_packet(&pkt);
         if(uvdb_io_failed)
         {
+            uvdb_kernel_end_stop();
             breakpoint_remove_all();
             uvdb_close_socket(&uvdb_socket);
             uvdb_state = UVDB_STATE_ERROR;
@@ -1021,6 +1096,7 @@ static void uvdb_main_loop(KuKernelExceptionContext* ctx, int stop_signal)
             _sceKernelExitProcessForUser(1);
         else if(IS("D"))
         {
+            uvdb_kernel_end_stop();
             buffer_write(&out_buf, STRING("OK"));
             discard_packet(pkt, sz);
             send_packet();
@@ -1053,6 +1129,7 @@ static void uvdb_main_loop(KuKernelExceptionContext* ctx, int stop_signal)
                 send_packet();
                 continue;
             }
+            uvdb_kernel_end_stop();
             memcpy(pkt, "?#3f", 4); //next invocation of uvdb_main_loop will parse it and respond with the status
             out_buf.size--; //undo buffer_start_packet
             buffer_flush(&out_buf); //see the comment in recv_packet
@@ -1069,6 +1146,7 @@ static void uvdb_main_loop(KuKernelExceptionContext* ctx, int stop_signal)
                 pkt[i+3] = 0;
             out_buf.size--;
             buffer_flush(&out_buf);
+            uvdb_kernel_end_stop();
             return;
         }
         else if(IS("qOffsets"))
@@ -1085,6 +1163,7 @@ static void uvdb_main_loop(KuKernelExceptionContext* ctx, int stop_signal)
         discard_packet(pkt, sz);
         if(send_packet() < 0)
         {
+            uvdb_kernel_end_stop();
             breakpoint_remove_all();
             uvdb_close_socket(&uvdb_socket);
             uvdb_state = UVDB_STATE_ERROR;
@@ -1142,10 +1221,13 @@ static void exception_handler(KuKernelExceptionContext* ctx)
     uvdb_last_fault.sp = ctx->sp;
     breakpoint_remove_temporary();
     uvdb_lock();
+    if(uvdb_kernel_begin_stop() < 0)
+        uvdb_state = UVDB_STATE_ERROR;
     if(__atomic_exchange_n(&uvdb_async_stop_pending, 0, __ATOMIC_SEQ_CST))
     {
         if(send_stop_reply(signal) < 0)
         {
+            uvdb_kernel_end_stop();
             breakpoint_remove_all();
             uvdb_close_socket(&uvdb_socket);
             uvdb_state = UVDB_STATE_ERROR;
@@ -1371,12 +1453,55 @@ static int uvdb_server_main(SceSize args, void* argp)
     return 0;
 }
 
+#ifdef UVDB_KERNEL_THREAD_CONTROL
+static int uvdb_lease_main(SceSize args, void* argp)
+{
+    (void)args;
+    (void)argp;
+    uvdb_register_thread("uvdb lease keeper");
+    while(!__atomic_load_n(&uvdb_lease_stop, __ATOMIC_SEQ_CST))
+    {
+        unsigned int token = __atomic_load_n(&uvdb_stop_token,
+                                              __ATOMIC_SEQ_CST);
+        if(token && vdKernelRenewStop(token, 2000) < 0)
+        {
+            unsigned int expected = token;
+            __atomic_compare_exchange_n(&uvdb_stop_token, &expected, 0, 0,
+                                         __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
+        }
+        sceKernelDelayThread(500000);
+    }
+    uvdb_unregister_thread();
+    return 0;
+}
+#endif
+
 int uvdb_start_server(void)
 {
     if(uvdb_server_thread >= 0)
         return 0;
 
     __atomic_store_n(&uvdb_server_stop, 0, __ATOMIC_SEQ_CST);
+    #ifdef UVDB_KERNEL_THREAD_CONTROL
+    __atomic_store_n(&uvdb_lease_stop, 0, __ATOMIC_SEQ_CST);
+    SceUID lease_thread = sceKernelCreateThread(
+        "uvdb lease keeper",
+        uvdb_lease_main,
+        0x10000100,
+        16 * 1024,
+        0,
+        0,
+        NULL);
+    if(lease_thread < 0)
+        return -1;
+    uvdb_lease_thread = lease_thread;
+    if(sceKernelStartThread(lease_thread, 0, NULL) < 0)
+    {
+        sceKernelDeleteThread(lease_thread);
+        uvdb_lease_thread = -1;
+        return -1;
+    }
+    #endif
     SceUID thread = sceKernelCreateThread(
         "uvdb server",
         uvdb_server_main,
@@ -1386,13 +1511,29 @@ int uvdb_start_server(void)
         0,
         NULL);
     if(thread < 0)
+    {
+        #ifdef UVDB_KERNEL_THREAD_CONTROL
+        __atomic_store_n(&uvdb_lease_stop, 1, __ATOMIC_SEQ_CST);
+        int lease_status = 0;
+        sceKernelWaitThreadEnd(uvdb_lease_thread, &lease_status, NULL);
+        sceKernelDeleteThread(uvdb_lease_thread);
+        uvdb_lease_thread = -1;
+        #endif
         return -1;
+    }
 
     uvdb_server_thread = thread;
     if(sceKernelStartThread(thread, 0, NULL) < 0)
     {
         sceKernelDeleteThread(thread);
         uvdb_server_thread = -1;
+        #ifdef UVDB_KERNEL_THREAD_CONTROL
+        __atomic_store_n(&uvdb_lease_stop, 1, __ATOMIC_SEQ_CST);
+        int lease_status = 0;
+        sceKernelWaitThreadEnd(uvdb_lease_thread, &lease_status, NULL);
+        sceKernelDeleteThread(uvdb_lease_thread);
+        uvdb_lease_thread = -1;
+        #endif
         return -1;
     }
     return 0;

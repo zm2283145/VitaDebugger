@@ -58,10 +58,29 @@ The current application-side library has been tested on real Vita hardware with:
 - A hardware-tested kernel companion providing ABI discovery,
   caller-process-only thread enumeration, tokenized stop/resume sessions, and
   watchdog recovery from an abandoned session.
+- Hardware-tested GDB all-stop integration: initial attach, live Ctrl-C,
+  lease renewal during long stops, continue, detach, reconnect, and recovery
+  after forced client termination.
 - A debugger-enabled Render96ex build as a larger real-world test.
 
 It is already useful for controlled application debugging. It is not yet a
 complete system-wide debugger; see [Current limitations](#current-limitations).
+
+## Hardware validation
+
+The kernel boundary is being introduced in deliberately small stages on retail
+hardware. These unedited Vita screenshots record the completed probe results:
+
+| Milestone | Hardware evidence | What it validates |
+| --- | --- | --- |
+| v1 | [Thread enumeration](docs/hardware/kernel-probe-v1-enumeration.jpg) | ABI discovery, caller-process thread IDs, bounds and NULL rejection |
+| v2 | [Single-thread suspend](docs/hardware/kernel-probe-v2-single-thread-suspend.jpg) | `0x1002` suspended state, normal resume to state 0, disposable worker behavior |
+| v3 | [Stop session and watchdog](docs/hardware/kernel-probe-v3-stop-session-watchdog.jpg) | Tokenized process stop/end and automatic recovery of an abandoned lease |
+| v4 | [Lease-keeper exemption](docs/hardware/kernel-probe-v4-lease-exemption.jpg) | A validated exempt thread remains active to renew long GDB stop sessions |
+
+Every displayed probe check passed. These images document controlled test
+coverage; they do not claim that arbitrary applications or every firmware and
+plugin combination are already supported.
 
 ## End goals
 
@@ -208,6 +227,18 @@ make package \
 
 This creates `uvdb-test.vpk`. Retain `test.elf` for GDB.
 
+After building and installing the matching kernel companion, enable integrated
+all-stop in the test build with:
+
+```sh
+make package UVDB_KERNEL_THREAD_CONTROL=1
+```
+
+Application builds must add `-DUVDB_KERNEL_THREAD_CONTROL`, include
+`kernel/include`, and link the generated
+`libvitadebug_kernel_stub.a`. Keep the application library and plugin ABI from
+the same VitaDebugger revision.
+
 ### Building the experimental kernel companion
 
 The kernel companion is an independent CMake project. Build it from a path
@@ -323,12 +354,13 @@ for GDB's Ctrl-C interrupt byte while the application is running. Call
 `uvdb_stop_server()` during orderly teardown, or let `uvdb_shutdown()` stop it
 and release all debugger resources.
 
-This is an experimental application-side stop rather than complete all-stop
-debugging. Ctrl-C currently stops the debugger service thread; registered
-application threads remain active and their registers remain unavailable.
-Do not use it to inspect state that other threads are actively changing. The
-planned kernel companion will provide validated process-wide suspension and
-foreign-thread register capture.
+Without kernel integration, this remains an application-side stop: Ctrl-C stops
+the debugger service thread while other application threads continue. Builds
+compiled with `UVDB_KERNEL_THREAD_CONTROL=1` and linked to the matching kernel
+stub use lease-protected process all-stop. A dedicated exempt keeper renews the
+lease while GDB is stopped; continue, detach, shutdown, and I/O failure end the
+session, while the kernel watchdog recovers an abandoned client. Foreign-thread
+register capture is still pending.
 Later calls while connected act as intentional software breakpoints. Calling it
 before graphics initialization normally leaves a black screen while waiting;
 this is expected.
@@ -380,11 +412,11 @@ static void *worker(void *argument) {
 }
 ```
 
-The current user-mode implementation supports GDB thread listing, names,
-liveness checks, selection, and identification of the thread that entered the
-exception handler. It intentionally rejects register access for a selected
-thread that is not stopped, because it does not yet possess a valid saved
-context for that thread. Registration alone does not suspend the thread.
+The implementation supports GDB thread listing, names, liveness checks,
+selection, and identification of the thread that entered the exception
+handler. Kernel-integrated builds now suspend the other process threads
+coherently, but GDB still reports their registers as unavailable until foreign
+saved-context selection is validated and connected to register packets.
 
 ## Connecting with GDB
 
@@ -459,14 +491,12 @@ remain installed. Preserve the matching unstripped ELF on the computer.
 
 - The library must currently be compiled into the application; it cannot attach
   to an arbitrary unmodified process.
-- Initial cooperative GDB thread discovery is implemented, but other threads
-  are not yet coherently suspended and another thread can encounter a temporary
-  stepping breakpoint first.
-- The persistent server can receive Ctrl-C and reconnect after clean detach,
-  but its application-side stop does not freeze other threads. Abrupt network
-  loss recovery and repeated stop/resume stress testing remain experimental.
-- Reliable enumeration, suspension, resumption, and foreign-thread register
-  access require the planned kernel companion.
+- Kernel all-stop is opt-in and requires the matching `vitadebug.skprx` ABI;
+  library-only builds continue to provide application-side stopping.
+- Threads created after a stop-session snapshot are not yet folded into the
+  active session.
+- Foreign-thread register access is not implemented, even though those threads
+  are suspended in kernel-integrated builds.
 - Hardware breakpoints and watchpoints are not implemented.
 - Software stepping does not decode every instruction capable of writing PC.
   Important remaining cases include Thumb IT blocks, `POP {..., pc}`, load-
@@ -480,8 +510,8 @@ remain installed. Preserve the matching unstripped ELF on the computer.
 
 ## Roadmap
 
-1. Persistent application-side connection, reattachment, and Ctrl-C handling.
-2. Correct all-stop behavior backed by a minimal kernel companion.
+1. Foreign-thread register and VFP-context validation and GDB integration.
+2. Fold newly created threads into an active all-stop session.
 3. Complete ARM and Thumb-2 control-flow decoding.
 4. Hardware breakpoints and watchpoints.
 5. Reusable VitaSDK and exported CMake packages.
