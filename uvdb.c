@@ -587,6 +587,60 @@ static int breakpoint_insert_step(KuKernelExceptionContext* ctx)
             return breakpoint_insert_internal(target, (target & 1) ? 2 : 4, 1);
         }
 
+        if(instruction_size == 4)
+        {
+            uint16_t second;
+            if(safe_memcpy((char*)&second, (const char*)(pc + 2), sizeof(second)) != sizeof(second))
+                return -1;
+
+            if((instruction & 0xf800) == 0xf000 && (second & 0x8000) == 0x8000)
+            {
+                // Thumb-2 B.W, BL and BLX immediate. The encoded J bits are
+                // complements of I1/I2 XOR the sign bit.
+                if((second & 0x1000) != 0 || (second & 0xd001) == 0xc000)
+                {
+                    uint32_t sign = (instruction >> 10) & 1;
+                    uint32_t j1 = (second >> 13) & 1;
+                    uint32_t j2 = (second >> 11) & 1;
+                    uint32_t i1 = !(j1 ^ sign);
+                    uint32_t i2 = !(j2 ^ sign);
+                    uint32_t encoded = (sign << 24) | (i1 << 23) | (i2 << 22) |
+                                       ((instruction & 0x03ff) << 12) |
+                                       ((second & 0x07ff) << 1);
+                    int32_t offset = (int32_t)(encoded << 7) >> 7;
+                    uintptr_t target = pc + 4 + offset;
+                    if((second & 0x1000) == 0)
+                        target &= ~(uintptr_t)3;
+                    return breakpoint_insert_internal(target, (second & 0x1000) ? 2 : 4, 1);
+                }
+
+                // Thumb-2 conditional B.W. Plant both targets and let CPSR
+                // choose which path executes.
+                if((second & 0xd000) == 0x8000 && (instruction & 0x0380) != 0x0380)
+                {
+                    uint32_t encoded = (((instruction >> 10) & 1) << 20) |
+                                       (((second >> 11) & 1) << 19) |
+                                       (((second >> 13) & 1) << 18) |
+                                       ((instruction & 0x003f) << 12) |
+                                       ((second & 0x07ff) << 1);
+                    int32_t offset = (int32_t)(encoded << 11) >> 11;
+                    uintptr_t target = pc + 4 + offset;
+                    if(breakpoint_insert_internal(pc + 4, 2, 1) < 0 ||
+                       breakpoint_insert_internal(target, 2, 1) < 0)
+                    {
+                        breakpoint_remove_temporary();
+                        return -1;
+                    }
+                    return 0;
+                }
+            }
+
+            // SUBS PC, LR, #imm8 exception return form.
+            if(instruction == 0xf3de && (second & 0xff00) == 0x3f00)
+                return breakpoint_insert_internal(ctx->lr - (second & 0xff),
+                                                  (ctx->lr & 1) ? 2 : 4, 1);
+        }
+
         return breakpoint_insert_internal(pc + instruction_size, 2, 1);
     }
 
