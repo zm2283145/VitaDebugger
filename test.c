@@ -3,6 +3,7 @@
 #include <netinet/in.h>
 #include <unistd.h>
 #include <pthread.h>
+#include <psp2/kernel/modulemgr.h>
 #include "debugScreen.h"
 #include "uvdb.h"
 
@@ -56,6 +57,21 @@ int main(void)
     getsockname(sock, (void*)&sin, &l);
     close(sock);
     psvDebugScreenInit();
+    SceUID modules[128];
+    SceSize module_count = sizeof(modules) / sizeof(modules[0]);
+    int module_result = sceKernelGetModuleList(0xff, modules, &module_count);
+    psvDebugScreenPrintf("modules: result=%08X count=%u\n",
+                         module_result, (unsigned int)module_count);
+    SceSize displayed_modules = module_count < 3 ? module_count : 3;
+    for(SceSize i = 0; module_result >= 0 && i < displayed_modules; ++i)
+    {
+        SceKernelModuleInfo info = {.size = sizeof(info)};
+        int info_result = sceKernelGetModuleInfo(modules[i], &info);
+        psvDebugScreenPrintf("  %s info=%08X base=%08X size=%08X\n",
+                             info.module_name, info_result,
+                             (unsigned int)(uintptr_t)info.segments[0].vaddr,
+                             (unsigned int)info.segments[0].memsz);
+    }
     uint8_t addr[4];
     memcpy(addr, &sin.sin_addr.s_addr, 4);
     psvDebugScreenPrintf("Run the following command on your PC:\n");

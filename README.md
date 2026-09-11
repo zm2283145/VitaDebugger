@@ -73,6 +73,8 @@ The current application-side library has been tested on real Vita hardware with:
   initial snapshot are discovered and suspended by the next lease renewal.
 - Hardware-tested read-only ARM debug-resource discovery reporting six
   breakpoint, four watchpoint, and two context-aware breakpoint comparators.
+- GDB loaded-module discovery through chunk-safe `qXfer:libraries:read`,
+  hardware-tested with 14 executable and system modules.
 - A debugger-enabled Render96ex build as a larger real-world test.
 
 It is already useful for controlled application debugging. It is not yet a
@@ -233,6 +235,9 @@ make \
 ```
 
 This produces `libuvdb.a`. The public header is `uvdb.h`.
+
+Applications using module discovery must also link
+`SceKernelModulemgr_stub`; the included test Makefile does this automatically.
 
 Build the included test VPK with:
 
@@ -522,7 +527,8 @@ remain installed. Preserve the matching unstripped ELF on the computer.
 - Software stepping does not decode every instruction capable of writing PC.
   Important remaining cases are concentrated in shifted PC-writing data-
   processing forms, PC loads, and uncommon ARM/Thumb control flow.
-- Loaded-module base-address discovery is not implemented.
+- GDB receives module segment bases, but automatic symbol loading still
+  requires matching unstripped module files and a configured solib search path.
 - Remote syscall catching is not implemented.
 - Kernel plugins cannot be debugged with the current application-side stub.
 - The network protocol has no authentication or encryption.

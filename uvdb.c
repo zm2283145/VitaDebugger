@@ -8,6 +8,7 @@
 #include <psp2/net/net_syscalls.h>
 #include <psp2/kernel/threadmgr/msgpipe.h>
 #include <psp2/kernel/threadmgr/thread.h>
+#include <psp2/kernel/modulemgr.h>
 #include <kubridge.h>
 #include "uvdb.h"
 #ifdef UVDB_KERNEL_THREAD_CONTROL
@@ -485,6 +486,8 @@ struct stream
     uint64_t cur;
     uint64_t start;
     uint64_t end;
+    size_t marker_index;
+    int wrote;
 };
 
 #define PARSE_HEX(type, name, cond) static type name(char** s)\
@@ -515,6 +518,7 @@ PARSE_HEX(uint8_t, parse_hex_byte, int c = 0; c < 2; c++)
 static struct stream parse_stream(char* s)
 {
     struct stream ans = {};
+    ans.marker_index = SIZE_MAX;
     ans.start = parse_hex(&s);
     uint64_t length = parse_hex(&s);
     ans.end = ans.start + length;
@@ -525,31 +529,82 @@ static struct stream parse_stream(char* s)
 
 static void stream_write(struct stream* st, char* buf, size_t sz)
 {
-    if(st->cur < st->start)
+    uint64_t chunk_start = st->cur;
+    uint64_t chunk_end = chunk_start + sz;
+    if(chunk_end < chunk_start)
+        chunk_end = UINT64_MAX;
+    st->cur = chunk_end;
+    uint64_t copy_start = chunk_start < st->start ? st->start : chunk_start;
+    uint64_t copy_end = chunk_end > st->end ? st->end : chunk_end;
+    if(copy_start >= copy_end)
+        return;
+    if(!st->wrote)
     {
-        size_t chk = st->start - st->cur;
-        if(sz <= chk)
-        {
-            st->cur += sz;
-            return;
-        }
+        st->marker_index = out_buf.size;
+        buffer_write(&out_buf, "m", 1);
+        st->wrote = 1;
     }
-    if(st->cur < st->end)
-    {
-        size_t chk = st->end - st->cur;
-        if(sz < chk)
-            chk = sz;
-        if(chk && st->cur == st->start)
-            buffer_write(&out_buf, "m", 1);
-        buffer_write(&out_buf, buf, chk);
-        st->cur += chk;
-    }
+    size_t offset = (size_t)(copy_start - chunk_start);
+    size_t count = (size_t)(copy_end - copy_start);
+    buffer_write(&out_buf, buf + offset, count);
 }
 
 static void stream_close(struct stream* st)
 {
-    if(st->cur <= st->start)
+    if(!st->wrote)
         buffer_write(&out_buf, "l", 1);
+    else if(st->cur <= st->end)
+        out_buf.buf[st->marker_index] = 'l';
+}
+
+static void stream_write_hex32(struct stream* st, uint32_t value)
+{
+    char text[] = "0x00000000";
+    for(int i = 0; i < 8; ++i)
+        text[9 - i] = int2hex((value >> (i * 4)) & 0xf);
+    stream_write(st, text, sizeof(text) - 1);
+}
+
+static void stream_write_module_name(struct stream* st, const char* name,
+                                     size_t capacity)
+{
+    for(size_t i = 0; i < capacity && name[i]; ++i)
+    {
+        char c = name[i];
+        if(c == '&' || c == '<' || c == '>' || c == '\'' || c == '"')
+            c = '_';
+        stream_write(st, &c, 1);
+    }
+}
+
+static void stream_write_libraries(struct stream* st)
+{
+    stream_write(st, STRING("<library-list version=\"1.0\">"));
+    SceUID modules[128];
+    SceSize count = sizeof(modules) / sizeof(modules[0]);
+    if(sceKernelGetModuleList(0xff, modules, &count) >= 0)
+        for(SceSize i = 0; i < count; ++i)
+        {
+            SceKernelModuleInfo info = {.size = sizeof(info)};
+            if(sceKernelGetModuleInfo(modules[i], &info) < 0)
+                continue;
+            stream_write(st, STRING("<library name=\""));
+            stream_write_module_name(st, info.module_name,
+                                     sizeof(info.module_name));
+            stream_write(st, STRING("\">"));
+            for(size_t segment = 0; segment < 4; ++segment)
+                if(info.segments[segment].vaddr &&
+                   info.segments[segment].memsz)
+                {
+                    stream_write(st, STRING("<segment address=\""));
+                    stream_write_hex32(st, (uint32_t)(uintptr_t)
+                                       info.segments[segment].vaddr);
+                    stream_write(st, STRING("\"/>"));
+                }
+            stream_write(st, STRING("</library>"));
+        }
+    stream_write(st, STRING("</library-list>"));
+    stream_close(st);
 }
 
 static void write_hex(char* start, size_t sz)
@@ -1142,12 +1197,18 @@ static void uvdb_main_loop(KuKernelExceptionContext* ctx, int stop_signal)
         }
         buffer_start_packet(&out_buf);
         if(STARTSWITH("qSupported:"))
-            buffer_write(&out_buf, STRING("qXfer:features:read+"));
+            buffer_write(&out_buf, STRING("qXfer:features:read+;qXfer:libraries:read+"));
         else if(STARTSWITH("qXfer:features:read:target.xml:"))
         {
             struct stream st = parse_stream(pkt + sizeof("qXfer:features:read:target.xml:") - 1);
             stream_write(&st, STRING("<?xml version=\"1.0\"?>\n<!DOCTYPE target SYSTEM \"gdb-target.dtd\">\n<target>\n<architecture>armv7</architecture>\n<osabi>GNU/Linux</osabi>\n</target>\n"));
             stream_close(&st);
+        }
+        else if(STARTSWITH("qXfer:libraries:read::"))
+        {
+            struct stream st = parse_stream(
+                pkt + sizeof("qXfer:libraries:read::") - 1);
+            stream_write_libraries(&st);
         }
         else if(IS("?"))
         {
