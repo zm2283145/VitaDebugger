@@ -51,8 +51,12 @@ The current application-side library has been tested on real Vita hardware with:
 - Reconnection at a later `uvdb_enter()` after a disconnected session.
 - Opt-in persistent server thread for clean reattachment and experimental
   Ctrl-C interruption while the application is running.
-- Build-tested cooperative registration and GDB discovery of named application
-  threads; hardware validation of this new path is in progress.
+- Hardware-tested cooperative registration and GDB discovery of named
+  application threads.
+- Hardware-tested persistent attachment, Ctrl-C interruption, clean detach,
+  immediate reattachment, and recovery after abrupt client termination.
+- A build-tested, non-destructive first kernel-companion slice providing ABI
+  discovery and caller-process-only thread enumeration.
 - A debugger-enabled Render96ex build as a larger real-world test.
 
 It is already useful for controlled application debugging. It is not yet a
@@ -95,6 +99,9 @@ implemented reliably from a user process:
 
 The plugin will expose a small validated interface rather than a general
 arbitrary kernel-access service. Library-only operation will remain supported.
+The initial implementation deliberately exposes only status and enumeration.
+Suspend/resume and register access will stay disabled until process ownership,
+debugger-thread exclusion, rollback, and failure recovery have hardware tests.
 
 ### `libvitaprofiler`
 
@@ -196,6 +203,28 @@ make package \
 ```
 
 This creates `uvdb-test.vpk`. Retain `test.elf` for GDB.
+
+### Building the experimental kernel companion
+
+The kernel companion is an independent CMake project. Build it from a path
+without spaces because current VitaSDK SELF-generation tools may split paths:
+
+```sh
+cmake -S kernel -B kernel/build -G "Unix Makefiles"
+cmake --build kernel/build
+```
+
+This produces `vitadebug.skprx` plus strong and weak user import libraries.
+The current companion provides only ABI/capability queries and caller-process
+thread enumeration. It does not yet suspend threads or access their registers.
+Do not add it to a permanent taiHEN configuration until the matching hardware
+probe and unload/recovery tests have passed.
+
+The same build produces `vitadebug-kernel-probe.vpk`. After the plugin has been
+loaded in a controlled test configuration, the probe checks the ABI, capability
+bits, main/worker thread visibility, count-only enumeration, and rejection of
+invalid capacities and NULL output arguments. Any failed boundary check is
+shown as a `FAIL` line on screen.
 
 ## Makefile integration
 
@@ -465,6 +494,7 @@ remain installed. Preserve the matching unstripped ELF on the computer.
 - `stdio_redirect.c`: optional newlib stdout/stderr forwarding.
 - `test.c`: Vita hardware test program.
 - `tests/`: focused instruction fixtures.
+- `kernel/`: narrow kernel companion, generated user stubs, and boundary probe.
 - `Makefile`: static library and test-package build.
 
 ## Attribution

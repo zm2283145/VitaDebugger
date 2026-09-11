@@ -6,4 +6,5 @@
 *.psp2dmp
 eboot.bin
 param.sfo
-
+kernel/build/
+kernel/build-short/

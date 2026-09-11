@@ -1,0 +1,14 @@
+vitadebug_kernel:
+  attributes: 0
+  version:
+    major: 1
+    minor: 0
+  main:
+    start: module_start
+    stop: module_stop
+  libraries:
+    vitadebug_kernel:
+      syscall: true
+      functions:
+        - vdKernelGetStatus: 0x76A3D001
+        - vdKernelGetThreadList: 0x76A3D002
