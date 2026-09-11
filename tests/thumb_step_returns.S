@@ -73,3 +73,23 @@ thumb_step_tbh_target:
 .Ltbh_table_address:
     .word .Ltbh_table
 .size thumb_step_tbh_fixture, .-thumb_step_tbh_fixture
+
+.global thumb_step_ldm_fixture
+.global thumb_step_ldm_site
+.global thumb_step_ldm_target
+.type thumb_step_ldm_fixture, %function
+.thumb_func
+thumb_step_ldm_fixture:
+    ldr r0, .Lldm_table_address
+thumb_step_ldm_site:
+    ldmia.w r0!, {r4, pc}
+    udf #4
+thumb_step_ldm_target:
+    bx lr
+    .balign 4
+.Lldm_table:
+    .word 0x44556677
+    .word thumb_step_ldm_target + 1
+.Lldm_table_address:
+    .word .Lldm_table
+.size thumb_step_ldm_fixture, .-thumb_step_ldm_fixture

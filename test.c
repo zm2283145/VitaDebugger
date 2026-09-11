@@ -14,6 +14,7 @@ void thumb_step_pop_fixture(void);
 void thumb_step_mov_fixture(void);
 void thumb_step_tbb_fixture(void);
 void thumb_step_tbh_fixture(void);
+void thumb_step_ldm_fixture(void);
 
 static void* worker_main(void* argument)
 {
@@ -75,6 +76,7 @@ int main(void)
         thumb_step_mov_fixture();
         thumb_step_tbb_fixture();
         thumb_step_tbh_fixture();
+        thumb_step_ldm_fixture();
         if((i % 10) == 0)
             psvDebugScreenPrintf("alive: i=%d value=%d\n", i, test_value);
         usleep(100000);

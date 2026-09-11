@@ -840,6 +840,27 @@ static int breakpoint_insert_step(KuKernelExceptionContext* ctx)
                 return breakpoint_insert_internal(target, 2, 1);
             }
 
+            // Thumb-2 LDMIA/POP.W restoring PC. PC is stored after every
+            // lower-numbered register selected by the register list.
+            if((instruction & 0xffd0) == 0xe890 && (second & 0x8000))
+            {
+                unsigned int rn = instruction & 0xf;
+                if(rn == 15)
+                    return -1;
+                const uint32_t* registers = &ctx->r0;
+                unsigned int lower_count =
+                    (unsigned int)__builtin_popcount(second & 0x7fff);
+                uintptr_t saved_pc_address = registers[rn] +
+                    lower_count * sizeof(uint32_t);
+                uintptr_t target;
+                if(safe_memcpy((char*)&target,
+                               (const char*)saved_pc_address,
+                               sizeof(target)) != sizeof(target))
+                    return -1;
+                return breakpoint_insert_internal(target,
+                                                   (target & 1) ? 2 : 4, 1);
+            }
+
             if((instruction & 0xf800) == 0xf000 && (second & 0x8000) == 0x8000)
             {
                 // Thumb-2 B.W, BL and BLX immediate. The encoded J bits are
