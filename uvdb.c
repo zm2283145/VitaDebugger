@@ -10,6 +10,11 @@
 #include <kubridge.h>
 #include "uvdb.h"
 
+#define UVDB_DEFAULT_PORT 1234
+#define UVDB_DEFAULT_MAX_BUFFER (256 * 1024)
+#define UVDB_MIN_BUFFER 4096
+#define UVDB_MAX_BUFFER (16 * 1024 * 1024)
+
 //we prefer to use raw syscalls to avoid issues with signal safety
 void _sceKernelExitProcessForUser(int);
 int _sceKernelSendMsgPipeVector(SceUID, const SceKernelAddrPair*, unsigned int, uint32_t* rest);
@@ -35,7 +40,18 @@ static void uvdb_unlock(void)
 }
 
 static int uvdb_socket = -1;
+static int uvdb_listen_socket = -1;
 static SceUID uvdb_pipe = -1;
+static size_t uvdb_max_buffer = UVDB_DEFAULT_MAX_BUFFER;
+static unsigned short uvdb_port = UVDB_DEFAULT_PORT;
+static volatile enum uvdb_state uvdb_state = UVDB_STATE_IDLE;
+static int uvdb_io_failed;
+static unsigned int uvdb_handler_mask;
+static struct uvdb_fault_info uvdb_last_fault = {
+    .exception_type = UVDB_EXCEPTION_NONE,
+};
+
+static void breakpoint_remove_all(void);
 
 struct buffer
 {
@@ -48,6 +64,8 @@ struct buffer
 
 static void buffer_popleft(struct buffer* buf, size_t cnt)
 {
+    if(cnt > buf->size)
+        cnt = buf->size;
     memmove(buf->buf, buf->buf+cnt, buf->size-cnt);
     buf->size -= cnt;
 }
@@ -58,17 +76,31 @@ static size_t buffer_getspace(struct buffer* buf, char** pos)
     {
         size_t cap2 = buf->cap * 2;
         if(!cap2)
-            cap2 = 4096;
+            cap2 = UVDB_MIN_BUFFER;
+        if(cap2 > uvdb_max_buffer)
+            cap2 = uvdb_max_buffer;
+        if(cap2 <= buf->cap)
+        {
+            *pos = NULL;
+            return 0;
+        }
         SceUID memblock2 = sceKernelAllocMemBlock("gdb socket buffer", SCE_KERNEL_MEMBLOCK_TYPE_USER_RW, cap2, NULL);
         if(memblock2 < 0)
         {
             *pos = NULL;
             return 0;
         }
-        void* base;
-        sceKernelGetMemBlockBase(memblock2, &base);
-        memcpy(base, buf->buf, buf->size);
-        sceKernelFreeMemBlock(buf->memblock_uid);
+        void* base = NULL;
+        if(sceKernelGetMemBlockBase(memblock2, &base) < 0 || !base)
+        {
+            sceKernelFreeMemBlock(memblock2);
+            *pos = NULL;
+            return 0;
+        }
+        if(buf->size)
+            memcpy(base, buf->buf, buf->size);
+        if(buf->memblock_uid >= 0)
+            sceKernelFreeMemBlock(buf->memblock_uid);
         buf->memblock_uid = memblock2;
         buf->buf = base;
         buf->cap = cap2;
@@ -80,20 +112,34 @@ static size_t buffer_getspace(struct buffer* buf, char** pos)
 static size_t buffer_poll(struct buffer* buf, char** pos)
 {
     size_t chk_size = buffer_getspace(buf, pos);
+    if(!chk_size)
+    {
+        uvdb_io_failed = 1;
+        return 0;
+    }
     uint32_t args[6] = {uvdb_socket, (uint32_t)*pos, chk_size, 0, 0, 0};
     ssize_t ans = sceNetSyscallRecvfrom((void*)args);
-    if(ans < 0)
-        ans = 0;
+    if(ans <= 0)
+    {
+        uvdb_io_failed = 1;
+        return 0;
+    }
     buf->size += ans;
     return ans;
 }
 
-static void buffer_write(struct buffer* buf, const char* data, size_t sz)
+static void buffer_write(struct buffer* buf, const void* source, size_t sz)
 {
+    const char* data = source;
     while(sz)
     {
         char* pos;
         size_t chk = buffer_getspace(buf, &pos);
+        if(!chk)
+        {
+            uvdb_io_failed = 1;
+            return;
+        }
         if(chk > sz)
             chk = sz;
         memcpy(pos, data, chk);
@@ -132,16 +178,100 @@ static void buffer_flush(struct buffer* buf)
     {
         uint32_t args[6] = {uvdb_socket, (uint32_t)(buf->buf+pos), buf->size-pos, 0, 0, 0};
         ssize_t chk = sceNetSyscallSendto((void*)args);
-        if(chk < 0)
-            chk = 0;
+        if(chk <= 0)
+        {
+            uvdb_io_failed = 1;
+            break;
+        }
         pos += chk;
     }
     buf->size = 0;
 }
 
-static struct buffer in_buf, out_buf;
+static struct buffer in_buf = {.memblock_uid = -1};
+static struct buffer out_buf = {.memblock_uid = -1};
 
-#define POLL() while(cur == end) { size_t sz = buffer_poll(&in_buf, &cur); end = cur + sz; }
+static void buffer_release(struct buffer* buf)
+{
+    if(buf->memblock_uid >= 0)
+        sceKernelFreeMemBlock(buf->memblock_uid);
+    memset(buf, 0, sizeof(*buf));
+    buf->memblock_uid = -1;
+}
+
+static void uvdb_close_socket(int* socket)
+{
+    if(*socket >= 0)
+    {
+        sceNetSyscallShutdown(*socket, SHUT_RDWR);
+        sceNetSyscallClose(*socket);
+        *socket = -1;
+    }
+}
+
+static void uvdb_release_handlers(void)
+{
+    if(uvdb_handler_mask & (1u << KU_KERNEL_EXCEPTION_TYPE_DATA_ABORT))
+        kuKernelReleaseExceptionHandler(KU_KERNEL_EXCEPTION_TYPE_DATA_ABORT);
+    if(uvdb_handler_mask & (1u << KU_KERNEL_EXCEPTION_TYPE_PREFETCH_ABORT))
+        kuKernelReleaseExceptionHandler(KU_KERNEL_EXCEPTION_TYPE_PREFETCH_ABORT);
+    if(uvdb_handler_mask & (1u << KU_KERNEL_EXCEPTION_TYPE_UNDEFINED_INSTRUCTION))
+        kuKernelReleaseExceptionHandler(KU_KERNEL_EXCEPTION_TYPE_UNDEFINED_INSTRUCTION);
+    uvdb_handler_mask = 0;
+}
+
+int uvdb_configure(const struct uvdb_config* config)
+{
+    if(uvdb_state != UVDB_STATE_IDLE || uvdb_socket >= 0 || uvdb_listen_socket >= 0)
+        return -1;
+
+    unsigned short port = UVDB_DEFAULT_PORT;
+    size_t max_buffer = UVDB_DEFAULT_MAX_BUFFER;
+    if(config)
+    {
+        port = config->port;
+        max_buffer = config->max_packet_buffer;
+        if(!port || max_buffer < UVDB_MIN_BUFFER || max_buffer > UVDB_MAX_BUFFER)
+            return -1;
+    }
+    uvdb_port = port;
+    uvdb_max_buffer = max_buffer;
+    return 0;
+}
+
+enum uvdb_state uvdb_get_state(void)
+{
+    return uvdb_state;
+}
+
+int uvdb_get_last_fault(struct uvdb_fault_info* info)
+{
+    if(!info)
+        return -1;
+    *info = uvdb_last_fault;
+    return uvdb_last_fault.exception_type == UVDB_EXCEPTION_NONE ? 0 : 1;
+}
+
+void uvdb_shutdown(void)
+{
+    uvdb_lock();
+    breakpoint_remove_all();
+    uvdb_close_socket(&uvdb_socket);
+    uvdb_close_socket(&uvdb_listen_socket);
+    uvdb_release_handlers();
+    if(uvdb_pipe >= 0)
+    {
+        sceKernelDeleteMsgPipe(uvdb_pipe);
+        uvdb_pipe = -1;
+    }
+    buffer_release(&in_buf);
+    buffer_release(&out_buf);
+    uvdb_io_failed = 0;
+    uvdb_state = UVDB_STATE_IDLE;
+    uvdb_unlock();
+}
+
+#define POLL() while(cur == end) { size_t sz = buffer_poll(&in_buf, &cur); if(!sz && uvdb_io_failed) return 0; end = cur + sz; }
 
 static size_t recv_packet(char** data)
 {
@@ -184,10 +314,12 @@ static void discard_packet(char* data, size_t sz)
     buffer_popleft(&in_buf, data - in_buf.buf + sz + 3);
 }
 
-static void send_packet(void)
+static int send_packet(void)
 {
     buffer_end_packet(&out_buf);
     buffer_flush(&out_buf);
+    if(uvdb_io_failed)
+        return -1;
     char* cur = in_buf.buf;
     char* end = cur + in_buf.size;
     char c = 0;
@@ -197,11 +329,12 @@ static void send_packet(void)
         c = *cur++;
     }
     buffer_popleft(&in_buf, cur - in_buf.buf);
+    return 0;
 }
 
 #undef POLL
-#define IS(s) sz == sizeof(s) - 1 && !memcmp(pkt, s, sizeof(s) - 1)
-#define STARTSWITH(s) sz >= sizeof(s) - 1 && !memcmp(pkt, s, sizeof(s) - 1)
+#define IS(s) (sz == sizeof(s) - 1 && !memcmp(pkt, s, sizeof(s) - 1))
+#define STARTSWITH(s) (sz >= sizeof(s) - 1 && !memcmp(pkt, s, sizeof(s) - 1))
 #define STRING(s) s, sizeof(s) - 1
 
 struct stream
@@ -240,7 +373,10 @@ static struct stream parse_stream(char* s)
 {
     struct stream ans = {};
     ans.start = parse_hex(&s);
-    ans.end = parse_hex(&s);
+    uint64_t length = parse_hex(&s);
+    ans.end = ans.start + length;
+    if(ans.end < ans.start)
+        ans.end = UINT64_MAX;
     return ans;
 }
 
@@ -289,7 +425,7 @@ static void read_hex(char** p, char* start, size_t sz)
     {
         if(**p == 'x' && (*p)[1] == 'x')
         {
-            p += 2;
+            *p += 2;
             start++;
         }
         else if(!**p || !(*p)[1])
@@ -310,6 +446,183 @@ static void write_x(size_t sz)
         buffer_write(&out_buf, "xx", 2);
 }
 
+static size_t safe_memcpy(char* dst, const char* src, size_t sz);
+
+#define UVDB_MAX_BREAKPOINTS 32
+
+struct uvdb_breakpoint
+{
+    uintptr_t address;
+    uint8_t original[4];
+    uint8_t size;
+    uint8_t active;
+    uint8_t temporary;
+};
+
+static struct uvdb_breakpoint uvdb_breakpoints[UVDB_MAX_BREAKPOINTS];
+
+static struct uvdb_breakpoint* breakpoint_find(uintptr_t address)
+{
+    address &= ~(uintptr_t)1;
+    for(size_t i = 0; i < UVDB_MAX_BREAKPOINTS; ++i)
+        if(uvdb_breakpoints[i].active && uvdb_breakpoints[i].address == address)
+            return &uvdb_breakpoints[i];
+    return NULL;
+}
+
+static int breakpoint_insert_internal(uintptr_t address, size_t size, int temporary)
+{
+    address &= ~(uintptr_t)1;
+    if(size != 2 && size != 4)
+        return -1;
+    if(breakpoint_find(address))
+        return 0;
+
+    struct uvdb_breakpoint* bp = NULL;
+    for(size_t i = 0; i < UVDB_MAX_BREAKPOINTS; ++i)
+        if(!uvdb_breakpoints[i].active)
+        {
+            bp = &uvdb_breakpoints[i];
+            break;
+        }
+    if(!bp || safe_memcpy((char*)bp->original, (const char*)address, size) != size)
+        return -1;
+
+    static const uint8_t thumb_udf[2] = {0x00, 0xde};
+    static const uint8_t arm_udf[4] = {0xf0, 0x00, 0xf0, 0xe7};
+    const void* trap = size == 2 ? (const void*)thumb_udf : (const void*)arm_udf;
+    kuKernelCpuUnrestrictedMemcpy((void*)address, trap, size);
+    kuKernelFlushCaches((void*)address, size);
+    bp->address = address;
+    bp->size = (uint8_t)size;
+    bp->temporary = temporary != 0;
+    bp->active = 1;
+    return 0;
+}
+
+static int breakpoint_insert(uintptr_t address, size_t size)
+{
+    return breakpoint_insert_internal(address, size, 0);
+}
+
+static int breakpoint_remove(uintptr_t address)
+{
+    struct uvdb_breakpoint* bp = breakpoint_find(address);
+    if(!bp)
+        return 0;
+    kuKernelCpuUnrestrictedMemcpy((void*)bp->address, bp->original, bp->size);
+    kuKernelFlushCaches((void*)bp->address, bp->size);
+    memset(bp, 0, sizeof(*bp));
+    return 0;
+}
+
+static void breakpoint_remove_all(void)
+{
+    for(size_t i = 0; i < UVDB_MAX_BREAKPOINTS; ++i)
+        if(uvdb_breakpoints[i].active)
+            breakpoint_remove(uvdb_breakpoints[i].address);
+}
+
+static void breakpoint_remove_temporary(void)
+{
+    for(size_t i = 0; i < UVDB_MAX_BREAKPOINTS; ++i)
+        if(uvdb_breakpoints[i].active && uvdb_breakpoints[i].temporary)
+            breakpoint_remove(uvdb_breakpoints[i].address);
+}
+
+static int breakpoint_insert_step(KuKernelExceptionContext* ctx)
+{
+    uintptr_t pc = ctx->pc;
+    if(ctx->SPSR & 32)
+    {
+        uint16_t instruction;
+        if(safe_memcpy((char*)&instruction, (const char*)pc, sizeof(instruction)) != sizeof(instruction))
+            return -1;
+        unsigned int prefix = instruction >> 11;
+        size_t instruction_size = (prefix == 0x1d || prefix == 0x1e || prefix == 0x1f) ? 4 : 2;
+
+        // 16-bit conditional branch. Plant traps on both possible paths so the
+        // CPU's condition flags, rather than the debugger, choose the result.
+        if((instruction & 0xf000) == 0xd000 && (instruction & 0x0f00) < 0x0e00)
+        {
+            intptr_t offset = (intptr_t)(int8_t)(instruction & 0xff) * 2;
+            uintptr_t target = pc + 4 + offset;
+            if(breakpoint_insert_internal(pc + 2, 2, 1) < 0 ||
+               breakpoint_insert_internal(target, 2, 1) < 0)
+            {
+                breakpoint_remove_temporary();
+                return -1;
+            }
+            return 0;
+        }
+
+        // 16-bit unconditional branch.
+        if((instruction & 0xf800) == 0xe000)
+        {
+            int32_t offset = (int32_t)(instruction & 0x07ff) << 21;
+            offset >>= 20;
+            return breakpoint_insert_internal(pc + 4 + offset, 2, 1);
+        }
+
+        // CBZ/CBNZ. As above, let the processor select between both traps.
+        if((instruction & 0xf500) == 0xb100)
+        {
+            uintptr_t target = pc + 4 + ((instruction & 0x0200) >> 3) +
+                               ((instruction & 0x00f8) >> 2);
+            if(breakpoint_insert_internal(pc + 2, 2, 1) < 0 ||
+               breakpoint_insert_internal(target, 2, 1) < 0)
+            {
+                breakpoint_remove_temporary();
+                return -1;
+            }
+            return 0;
+        }
+
+        // BX/BLX register.
+        if((instruction & 0xff00) == 0x4700)
+        {
+            unsigned int rm = (instruction >> 3) & 0xf;
+            const uint32_t* registers = &ctx->r0;
+            uintptr_t target = registers[rm];
+            return breakpoint_insert_internal(target, (target & 1) ? 2 : 4, 1);
+        }
+
+        return breakpoint_insert_internal(pc + instruction_size, 2, 1);
+    }
+
+    uint32_t instruction;
+    if(safe_memcpy((char*)&instruction, (const char*)pc, sizeof(instruction)) != sizeof(instruction))
+        return -1;
+
+    // ARM B/BL immediate. Conditional forms get traps on both possible paths.
+    if((instruction & 0x0e000000) == 0x0a000000)
+    {
+        int32_t offset = (int32_t)(instruction & 0x00ffffff) << 8;
+        offset >>= 6;
+        uintptr_t target = pc + 8 + offset;
+        if((instruction >> 28) == 0x0e)
+            return breakpoint_insert_internal(target, 4, 1);
+        if(breakpoint_insert_internal(pc + 4, 4, 1) < 0 ||
+           breakpoint_insert_internal(target, 4, 1) < 0)
+        {
+            breakpoint_remove_temporary();
+            return -1;
+        }
+        return 0;
+    }
+
+    // ARM BX/BLX register.
+    if((instruction & 0x0ffffff0) == 0x012fff10 ||
+       (instruction & 0x0ffffff0) == 0x012fff30)
+    {
+        const uint32_t* registers = &ctx->r0;
+        uintptr_t target = registers[instruction & 0xf];
+        return breakpoint_insert_internal(target, (target & 1) ? 2 : 4, 1);
+    }
+
+    return breakpoint_insert_internal(pc + 4, 4, 1);
+}
+
 static size_t safe_memcpy(char* dst, const char* src, size_t sz)
 {
     size_t ans = 0;
@@ -320,6 +633,8 @@ static size_t safe_memcpy(char* dst, const char* src, size_t sz)
         SceKernelAddrPair q = {(uint32_t)src, sz};
         if(_sceKernelSendMsgPipeVector(uvdb_pipe, &q, 1, rest))
             break;
+        if(!chk)
+            break;
         ans += chk;
         src += chk;
         sz -= chk;
@@ -329,7 +644,9 @@ static size_t safe_memcpy(char* dst, const char* src, size_t sz)
             uint32_t rest[3] = {1, (uint32_t)&chk2, 0};
             SceKernelAddrPair q = {(uint32_t)dst, chk};
             if(_sceKernelReceiveMsgPipeVector(uvdb_pipe, &q, 1, rest))
-                chk2 = 0;
+                return ans;
+            if(!chk2)
+                return ans;
             dst += chk2;
             chk -= chk2;
         }
@@ -343,6 +660,13 @@ static void uvdb_main_loop(KuKernelExceptionContext* ctx, int stop_signal)
     {
         char* pkt;
         size_t sz = recv_packet(&pkt);
+        if(uvdb_io_failed)
+        {
+            breakpoint_remove_all();
+            uvdb_close_socket(&uvdb_socket);
+            uvdb_state = UVDB_STATE_ERROR;
+            return;
+        }
         buffer_start_packet(&out_buf);
         if(STARTSWITH("qSupported:"))
             buffer_write(&out_buf, STRING("qXfer:features:read+"));
@@ -417,10 +741,41 @@ static void uvdb_main_loop(KuKernelExceptionContext* ctx, int stop_signal)
             else
                 buffer_write(&out_buf, "OK", 2);
         }
+        else if(STARTSWITH("Z0,") || STARTSWITH("z0,"))
+        {
+            int insert = pkt[0] == 'Z';
+            char* p = pkt + 3;
+            uintptr_t address = parse_hex(&p);
+            size_t kind = parse_hex(&p);
+            int result = insert ? breakpoint_insert(address, kind) : breakpoint_remove(address);
+            buffer_write(&out_buf, result < 0 ? "E16" : "OK", result < 0 ? 3 : 2);
+        }
         else if(IS("k"))
             _sceKernelExitProcessForUser(1);
-        else if(IS("c"))
+        else if(sz && (pkt[0] == 'c' || pkt[0] == 'C' || pkt[0] == 's' || pkt[0] == 'S'))
         {
+            int stepping = pkt[0] == 's' || pkt[0] == 'S';
+            char* address = NULL;
+            if(pkt[0] == 'c' || pkt[0] == 's')
+            {
+                if(sz > 1)
+                    address = pkt + 1;
+            }
+            else
+            {
+                char* separator = memchr(pkt, ';', sz);
+                if(separator && separator + 1 < pkt + sz)
+                    address = separator + 1;
+            }
+            if(address)
+                ctx->pc = (uint32_t)parse_hex(&address);
+            if(stepping && breakpoint_insert_step(ctx) < 0)
+            {
+                buffer_write(&out_buf, "E16", 3);
+                discard_packet(pkt, sz);
+                send_packet();
+                continue;
+            }
             memcpy(pkt, "?#3f", 4); //next invocation of uvdb_main_loop will parse it and respond with the status
             out_buf.size--; //undo buffer_start_packet
             buffer_flush(&out_buf); //see the comment in recv_packet
@@ -440,17 +795,23 @@ static void uvdb_main_loop(KuKernelExceptionContext* ctx, int stop_signal)
         }
         else if(IS("qOffsets"))
         {
-            uint8_t packet[33] = "TextSeg=........;DataSeg=........";
+            char packet[] = "TextSeg=........;DataSeg=........";
             uint32_t value = (uint32_t)__executable_start;
             for(int i = 0; i < 8; i++)
                 packet[15-i] = int2hex((value >> (4*i)) & 15);
             value = (uint32_t)__init_array_start;
             for(int i = 0; i < 8; i++)
                 packet[32-i] = int2hex((value >> (4*i)) & 15);
-            buffer_write(&out_buf, packet, sizeof(packet));
+            buffer_write(&out_buf, packet, sizeof(packet) - 1);
         }
         discard_packet(pkt, sz);
-        send_packet();
+        if(send_packet() < 0)
+        {
+            breakpoint_remove_all();
+            uvdb_close_socket(&uvdb_socket);
+            uvdb_state = UVDB_STATE_ERROR;
+            return;
+        }
     }
 }
 
@@ -479,12 +840,24 @@ static void exception_handler(KuKernelExceptionContext* ctx)
         pc = ctx->r0;
         signal = SIGTRAP;
     }
+    else if(ctx->exceptionType == KU_KERNEL_EXCEPTION_TYPE_UNDEFINED_INSTRUCTION && breakpoint_find(pc))
+    {
+        signal = SIGTRAP;
+    }
     if((pc & 1))
     {
         ctx->SPSR |= 32;
         pc &= -2;
     }
     ctx->pc = pc;
+    uvdb_last_fault.exception_type = (enum uvdb_exception_type)ctx->exceptionType;
+    uvdb_last_fault.signal = signal;
+    uvdb_last_fault.fault_status = ctx->FSR;
+    uvdb_last_fault.fault_address = ctx->FAR;
+    uvdb_last_fault.pc = pc;
+    uvdb_last_fault.lr = ctx->lr;
+    uvdb_last_fault.sp = ctx->sp;
+    breakpoint_remove_temporary();
     uvdb_lock();
     uvdb_main_loop(ctx, signal);
     uvdb_unlock();
@@ -535,6 +908,9 @@ static __attribute__((used)) uint64_t real_uvdb_enter(uintptr_t lr)
         uvdb_unlock();
         return trap;
     }
+    uvdb_io_failed = 0;
+    in_buf.size = 0;
+    out_buf.size = 0;
     if(uvdb_pipe < 0)
     {
         uvdb_pipe = sceKernelCreateMsgPipe("pipe to catch efault", 0x40, 0xc, 4*4096, NULL);
@@ -544,27 +920,43 @@ static __attribute__((used)) uint64_t real_uvdb_enter(uintptr_t lr)
             return no_trap;
         }
     }
-    struct KuKernelExceptionHandlerOpt opt = {
-        .size = sizeof(opt),
-    };
-    KuKernelExceptionHandler old;
-    if(kuKernelRegisterExceptionHandler(KU_KERNEL_EXCEPTION_TYPE_DATA_ABORT, exception_handler, &old, &opt)
-    || kuKernelRegisterExceptionHandler(KU_KERNEL_EXCEPTION_TYPE_PREFETCH_ABORT, exception_handler, &old, &opt)
-    || kuKernelRegisterExceptionHandler(KU_KERNEL_EXCEPTION_TYPE_UNDEFINED_INSTRUCTION, exception_handler, &old, &opt))
+    if(!uvdb_handler_mask)
     {
-        uvdb_unlock();
-        return no_trap;
+        struct KuKernelExceptionHandlerOpt opt = {
+            .size = sizeof(opt),
+        };
+        KuKernelExceptionHandler old;
+        const unsigned int all_handlers =
+            (1u << KU_KERNEL_EXCEPTION_TYPE_DATA_ABORT) |
+            (1u << KU_KERNEL_EXCEPTION_TYPE_PREFETCH_ABORT) |
+            (1u << KU_KERNEL_EXCEPTION_TYPE_UNDEFINED_INSTRUCTION);
+        if(kuKernelRegisterExceptionHandler(KU_KERNEL_EXCEPTION_TYPE_DATA_ABORT, exception_handler, &old, &opt) >= 0)
+            uvdb_handler_mask |= 1u << KU_KERNEL_EXCEPTION_TYPE_DATA_ABORT;
+        if(kuKernelRegisterExceptionHandler(KU_KERNEL_EXCEPTION_TYPE_PREFETCH_ABORT, exception_handler, &old, &opt) >= 0)
+            uvdb_handler_mask |= 1u << KU_KERNEL_EXCEPTION_TYPE_PREFETCH_ABORT;
+        if(kuKernelRegisterExceptionHandler(KU_KERNEL_EXCEPTION_TYPE_UNDEFINED_INSTRUCTION, exception_handler, &old, &opt) >= 0)
+            uvdb_handler_mask |= 1u << KU_KERNEL_EXCEPTION_TYPE_UNDEFINED_INSTRUCTION;
+        if(uvdb_handler_mask != all_handlers)
+        {
+            uvdb_release_handlers();
+            uvdb_state = UVDB_STATE_ERROR;
+            uvdb_unlock();
+            return no_trap;
+        }
     }
-    int sock = sceNetSyscallSocket("gdb socket", AF_INET, SOCK_STREAM, 0);
-    if(sock < 0)
+    uvdb_listen_socket = sceNetSyscallSocket("gdb socket", AF_INET, SOCK_STREAM, 0);
+    if(uvdb_listen_socket < 0)
     {
+        uvdb_state = UVDB_STATE_ERROR;
         uvdb_unlock();
         return no_trap;
     }
     int value = 1;
-    uint32_t args[5] = {sock, SOL_SOCKET, SO_REUSEADDR, (uint32_t)&value, sizeof(value)};
+    uint32_t args[5] = {uvdb_listen_socket, SOL_SOCKET, SO_REUSEADDR, (uint32_t)&value, sizeof(value)};
     if(sceNetSyscallSetsockopt((void*)&args))
     {
+        uvdb_close_socket(&uvdb_listen_socket);
+        uvdb_state = UVDB_STATE_ERROR;
         uvdb_unlock();
         return no_trap;
     }
@@ -572,27 +964,34 @@ static __attribute__((used)) uint64_t real_uvdb_enter(uintptr_t lr)
     args[2] = TCP_NODELAY;
     if(sceNetSyscallSetsockopt((void*)&args))
     {
+        uvdb_close_socket(&uvdb_listen_socket);
+        uvdb_state = UVDB_STATE_ERROR;
         uvdb_unlock();
         return no_trap;
     }
-    int port = 1234;
     struct sockaddr_in sin = {
         .sin_family = AF_INET,
         .sin_addr = {},
-        .sin_port = 0,
+        .sin_port = htons(uvdb_port),
     };
-    while(port < 65536 && (sin.sin_port = htons(port), sceNetSyscallBind(sock, &sin, sizeof(sin))))
-        port++;
-    if(port == 65536)
+    if(sceNetSyscallBind(uvdb_listen_socket, &sin, sizeof(sin)))
     {
+        uvdb_close_socket(&uvdb_listen_socket);
+        uvdb_state = UVDB_STATE_ERROR;
         uvdb_unlock();
         return no_trap;
     }
-    if(sceNetSyscallListen(sock, 1) || (uvdb_socket = sceNetSyscallAccept(sock, NULL, NULL)) < 0)
+    uvdb_state = UVDB_STATE_LISTENING;
+    if(sceNetSyscallListen(uvdb_listen_socket, 1) ||
+       (uvdb_socket = sceNetSyscallAccept(uvdb_listen_socket, NULL, NULL)) < 0)
     {
+        uvdb_close_socket(&uvdb_listen_socket);
+        uvdb_state = UVDB_STATE_ERROR;
         uvdb_unlock();
         return no_trap;
     }
+    uvdb_close_socket(&uvdb_listen_socket);
+    uvdb_state = UVDB_STATE_CONNECTED;
     uvdb_unlock();
     return trap;
 }

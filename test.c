@@ -1,11 +1,22 @@
-#include <stdio.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <unistd.h>
-#include <time.h>
 #include "debugScreen.h"
 #include "uvdb.h"
+
+static volatile int test_value;
+volatile int trigger_fault;
+
+__attribute__((noinline)) static int step_target(int value)
+{
+    value += 3;
+    if(value & 1)
+        value *= 2;
+    else
+        value -= 1;
+    return value;
+}
 
 int main(void)
 {
@@ -25,31 +36,14 @@ int main(void)
     psvDebugScreenPrintf("Run the following command on your PC:\n");
     psvDebugScreenPrintf("$ gdb test.elf -ex 'target remote %hhu.%hhu.%hhu.%hhu:1234'\n", addr[0], addr[1], addr[2], addr[3]);
     uvdb_enter();
-    uvdb_redirect_stdio();
-    //let's do something fun and run fizzbuzz
-    for(int i = 1;; i++)
+    psvDebugScreenPrintf("Debugger connected. Running quiet step target.\n");
+    for(int i = 0;; i++)
     {
-        if(i % 6 == 0)
-        {
-            printf("FizzBuzz\n");
-            psvDebugScreenPrintf("FizzBuzz\n");
-        }
-        else if(i % 2 == 0)
-        {
-            printf("Fizz\n");
-            psvDebugScreenPrintf("Fizz\n");
-        }
-        else if(i % 3 == 0)
-        {
-            printf("Buzz\n");
-            psvDebugScreenPrintf("Buzz\n");
-        }
-        else
-        {
-            printf("%d\n", i);
-            psvDebugScreenPrintf("%d\n", i);
-        }
+        if(trigger_fault)
+            *(volatile unsigned int*)0 = 0x55464442;
+        test_value = step_target(i);
+        if((i % 10) == 0)
+            psvDebugScreenPrintf("alive: i=%d value=%d\n", i, test_value);
+        usleep(100000);
     }
-    usleep(3000000);
-    return 0;
 }

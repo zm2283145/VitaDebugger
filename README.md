@@ -43,3 +43,45 @@ uvdb uses kubridge's exception handling feature to catch exceptions. If your hom
 Also (obviously?) uvdb does not work in kernel mode, thus you can't use it to debug kernel plugins.
 
 Anything else? Feel free to [file a bug report](https://github.com/sleirsgoevy/vita-uvdb/issues/new).
+
+## Render96 hardening branch
+
+This branch preserves the original `uvdb_enter()` entry point and adds:
+
+* Explicit configuration, state inspection, and shutdown APIs.
+* A bounded packet buffer (256 KiB by default).
+* Socket, message-pipe, allocation, and exception-handler cleanup.
+* Disconnect detection and support for reconnecting at a later debugger entry.
+* GDB `Z0`/`z0` software breakpoints for ARM and Thumb code.
+* GDB `s`/`S` single-step packets using temporary software breakpoints.
+* Branch-aware stepping for common ARM and 16-bit Thumb control flow.
+* Structured details for the most recently intercepted exception.
+* Fixes for partial stdio writes, wildcard register writes, qXfer ranges, and
+  failed safe-memory transfers.
+
+Configure the library before its first breakpoint if non-default settings are
+needed:
+
+```c
+struct uvdb_config config = {
+    .port = 1234,
+    .max_packet_buffer = 256 * 1024,
+};
+uvdb_configure(&config);
+uvdb_enter();
+```
+
+The diagnostic ELF on the PC must match the executable running on the Vita.
+Compile application and library objects with `-g`; the packaged Vita executable
+may still be stripped by the normal VPK packaging tools.
+
+### Current limitations
+
+* The debugger is process-local and requires an explicit `uvdb_enter()` call.
+* Stepping is not yet thread-aware. Another application thread can encounter a
+  temporary breakpoint first.
+* Thumb-2 32-bit branches and uncommon instructions that write to `pc` still
+  need dedicated target decoding.
+* Hardware breakpoints and watchpoints are not implemented.
+* Resuming a real memory fault without correcting its cause generally faults
+  again.

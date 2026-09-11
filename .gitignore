@@ -1,0 +1,9 @@
+*.a
+*.o
+*.elf
+*.velf
+*.vpk
+*.psp2dmp
+eboot.bin
+param.sfo
+

@@ -33,22 +33,25 @@ static void* redir_thread(void* arg)
 {
     int source_pipe = (int)arg;
     char buf[1024];
-    ssize_t chk;
     for(;;)
     {
         ssize_t chk = read(source_pipe, buf, sizeof(buf));
+        if(chk <= 0)
+            break;
         if(chk > 0)
         {
+            size_t total = (size_t)chk;
             size_t pos = 0;
-            while(pos < chk)
+            while(pos < total)
             {
-                ssize_t chk2 = uvdb_remote_syscall("write", 3, 1, buf, chk);
+                ssize_t chk2 = uvdb_remote_syscall("write", 3, 1, buf + pos, total - pos);
                 if(chk2 <= 0)
                     break;
                 pos += chk2;
             }
         }
     }
+    close(source_pipe);
     return 0;
 }
 
@@ -59,8 +62,17 @@ int uvdb_redirect_stdio(void)
         return -1;
     pthread_t pth;
     if(pthread_create(&pth, 0, redir_thread, (void*)pp[1]))
+    {
+        close(pp[0]);
+        close(pp[1]);
         return -1;
+    }
+    pthread_detach(pth);
     if(my_dup2(pp[0], 1) != 1 || my_dup2(pp[0], 2) != 2)
+    {
+        close(pp[0]);
         return -1;
+    }
+    close(pp[0]);
     return 0;
 }

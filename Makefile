@@ -11,8 +11,13 @@ deploy: package
 fetch_dumps:
 	curl ftp://$(VITA_IP):1337/ux0:/data/ | grep -o 'psp2core-.*' | while read line; do curl "ftp://$(VITA_IP):1337/ux0:/data/$$line" > "$$line"; curl -v "ftp://$(VITA_IP):1337/" -Q "DELE ux0:/data/$$line" >/dev/null; done
 
-EXTRA_CFLAGS := -O0 -g -I $(VITASDK)/share/gcc-arm-vita-eabi/samples/common
-EXTRA_LDFLAGS := $(CFLAGS) -Wl,-q -lSceDisplay_stub -lSceNetPs_stub -lkubridge_stub -pthread
+KUBRIDGE_DIR ?= ../kubridge-review
+KUBRIDGE_LIB_DIR ?= $(KUBRIDGE_DIR)/build-local
+
+EXTRA_CFLAGS := -O0 -g -Wall -Wextra -I $(VITASDK)/share/gcc-arm-vita-eabi/samples/common -I $(KUBRIDGE_DIR)
+EXTRA_LDFLAGS := $(CFLAGS) -Wl,-q -L $(KUBRIDGE_LIB_DIR) -lSceDisplay_stub -lSceNetPs_stub -lkubridge_stub -pthread
+
+override CFLAGS += -I $(KUBRIDGE_DIR) -Wall -Wextra -g
 
 %.o: %.c *.h
 	arm-vita-eabi-gcc $< $(CFLAGS) -c -o $@
@@ -24,7 +29,7 @@ psvDebugScreen.o: $(VITASDK)/share/gcc-arm-vita-eabi/samples/common/debugScreen.
 	arm-vita-eabi-gcc $< $(CFLAGS) $(EXTRA_CFLAGS) -c -o $@
 
 libuvdb.a: uvdb.o stdio_redirect.o
-	ar q $@ $^
+	arm-vita-eabi-ar rcs $@ $^
 
 test.elf: psvDebugScreen.o test.o libuvdb.a
 	arm-vita-eabi-gcc $^ $(LDFLAGS) $(EXTRA_LDFLAGS) -o $@
