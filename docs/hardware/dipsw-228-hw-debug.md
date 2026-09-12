@@ -1,7 +1,8 @@
 # KBL DIP switch 228 hardware-debug lead
 
-Status: source-audit finding; no Vita state, boot files, or kernel plugin were
-changed as part of this review.
+Status: the isolated read-only inventory app is source-complete and pending its
+first hardware run. No DIP switch, boot file, persistent kernel plugin, or
+comparator register has been changed.
 
 ## Finding
 
@@ -101,9 +102,16 @@ passing rung authorizes only the next listed rung.
 1. **Read-only state inventory.** In a fresh disposable diagnostic, call
    `ksceKernelCheckDipsw(228)` and `ksceKernelGetDipswInfo(7)`. Also record
    bit 203 and debug-control word 6 so later results are not interpreted without
-   the SKBL-reconfiguration state, plus CP version/board ID because those select
-   the documented fallback path. Record firmware, device type, core, and bit/
-   word consistency. Do not read DBGVCR.
+   the SKBL-reconfiguration state, plus CP version/build ID because those select
+   the documented fallback path. Record firmware and device type out of band;
+   the diagnostic itself records the current core and bit/word consistency. Do
+   not read DBGVCR.
+
+   This rung is implemented as the disposable `VDCP00005` app in
+   [`kernel/dipsw-read-probe`](../../kernel/dipsw-read-probe/README.md). It uses
+   an explicit X-button gate and a two-slot checksummed lifecycle journal. Its
+   packaged one-shot kernel module returns non-resident and has not yet been run
+   on hardware.
 2. **Kernel DIP-state API round trip.** First inspect the tested firmware's
    `ksceKernelSetDipsw` implementation because the VitaSDK declaration promises
    neither persistence nor absence of hardware side effects. If bit 228 is

@@ -1,7 +1,7 @@
 all: libuvdb.a
 
 clean:
-	rm -f *.o tests/*.o *.a *.elf *.velf eboot.bin param.sfo *.vpk *.psp2dmp test-rsp test-rsp.exe test-rsp-console test-rsp-console.exe test-console-queue test-console-queue.exe
+	rm -f *.o tests/*.o *.a *.elf *.velf eboot.bin param.sfo *.vpk *.psp2dmp test-rsp test-rsp.exe test-rsp-console test-rsp-console.exe test-console-queue test-console-queue.exe kernel/dipsw-read-probe/test-record kernel/dipsw-read-probe/test-record.exe
 
 package: uvdb-test.vpk
 
@@ -78,9 +78,9 @@ HOST_EXEEXT ?=
 HOST_CC_RUN ?= $(HOST_CC)
 endif
 
-.PHONY: host-tests host-test-rsp host-test-rsp-console host-test-console-queue
+.PHONY: host-tests host-test-rsp host-test-rsp-console host-test-console-queue host-test-dipsw-probe-record
 
-host-tests: host-test-rsp host-test-rsp-console host-test-console-queue
+host-tests: host-test-rsp host-test-rsp-console host-test-console-queue host-test-dipsw-probe-record
 
 host-test-rsp: test-rsp$(HOST_EXEEXT)
 	./test-rsp$(HOST_EXEEXT)
@@ -91,6 +91,9 @@ host-test-rsp-console: test-rsp-console$(HOST_EXEEXT)
 host-test-console-queue: test-console-queue$(HOST_EXEEXT)
 	./test-console-queue$(HOST_EXEEXT)
 
+host-test-dipsw-probe-record: kernel/dipsw-read-probe/test-record$(HOST_EXEEXT)
+	./kernel/dipsw-read-probe/test-record$(HOST_EXEEXT)
+
 test-rsp$(HOST_EXEEXT): uvdb_rsp.c uvdb_rsp.h tests/host/test_rsp_registers.c
 	$(HOST_CC_RUN) $(HOST_CFLAGS) uvdb_rsp.c tests/host/test_rsp_registers.c -o $@
 
@@ -99,6 +102,9 @@ test-rsp-console$(HOST_EXEEXT): uvdb_rsp.c uvdb_rsp.h tests/host/test_rsp_consol
 
 test-console-queue$(HOST_EXEEXT): uvdb_console.c uvdb_console.h tests/host/test_console_queue.c
 	$(HOST_CC_RUN) $(HOST_CFLAGS) -DUVDB_CONSOLE_TESTING uvdb_console.c tests/host/test_console_queue.c $(HOST_THREAD_FLAGS) -o $@
+
+kernel/dipsw-read-probe/test-record$(HOST_EXEEXT): kernel/dipsw-read-probe/test_record.c kernel/dipsw-read-probe/include/vd_dipsw_probe_record.h
+	$(HOST_CC_RUN) $(HOST_CFLAGS) kernel/dipsw-read-probe/test_record.c -o $@
 
 test.elf: psvDebugScreen.o test.o tests/thumb_step_returns.o libuvdb.a
 	arm-vita-eabi-gcc $^ $(LDFLAGS) $(EXTRA_LDFLAGS) -o $@

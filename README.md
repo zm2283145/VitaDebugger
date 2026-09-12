@@ -144,7 +144,10 @@ remains blocked. A subsequent KBL source audit identified DIP switch 228
 (`SYSTEM_FLAG_ENABLE_HW_BREAKPOINTS`) as the strongest Vita-specific control
 lead. It is bit 4 (`0x10`) of the system-control word at KBL offset `0x5C`, not
 the unrelated KBL field at offset `0xE4`. The safe next rung is a read-only
-DIP-switch state inventory, followed only after review by a documented
+DIP-switch state inventory. That isolated `VDCP00005`
+[probe app](kernel/dipsw-read-probe/README.md) is source-complete, uses a
+checksummed A/B lifecycle journal, and is pending its first hardware run. It is
+followed only after review by a documented
 set/readback/exact-restore test that performs no CP14 access. The
 [bit-228 report](docs/hardware/dipsw-228-hw-debug.md) records the evidence,
 boot-versus-runtime timing uncertainty, and staged gates. DEVTOOL identity is
