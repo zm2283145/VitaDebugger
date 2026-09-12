@@ -15,17 +15,33 @@ option(VITADEBUG_EXPERIMENTAL_VFP_SNAPSHOT
   "Compile the unverified ksceKernelGetVfpRegisterForDebugger layout probe"
   OFF
 )
+option(VITADEBUG_EXPERIMENTAL_HW_DEBUG
+  "Compile the guarded ARMv7 hardware-breakpoint/watchpoint session engine"
+  OFF
+)
 
 add_executable(vitadebug_kernel
   src/main.c
 )
+if(VITADEBUG_EXPERIMENTAL_HW_DEBUG)
+  target_sources(vitadebug_kernel PRIVATE
+    src/hw_debug.c
+    src/armv7_debug_codec.c
+  )
+endif()
 
 target_compile_options(vitadebug_kernel PRIVATE
   -Wall -Wextra -Werror -O2 -ffreestanding -fno-optimize-sibling-calls
+  -mgeneral-regs-only -fno-tree-vectorize -fno-tree-slp-vectorize
 )
 if(VITADEBUG_EXPERIMENTAL_VFP_SNAPSHOT)
   target_compile_definitions(vitadebug_kernel PRIVATE
     VD_KERNEL_ENABLE_EXPERIMENTAL_VFP_SNAPSHOT=1
+  )
+endif()
+if(VITADEBUG_EXPERIMENTAL_HW_DEBUG)
+  target_compile_definitions(vitadebug_kernel PRIVATE
+    VD_KERNEL_ENABLE_EXPERIMENTAL_HW_DEBUG=1
   )
 endif()
 target_link_options(vitadebug_kernel PRIVATE -Wl,-q -nostdlib)
@@ -35,6 +51,8 @@ target_include_directories(vitadebug_kernel PRIVATE
 )
 
 target_link_libraries(vitadebug_kernel
+  SceCpuForDriver_stub
+  SceSysclibForDriver_stub
   SceSysmemForDriver_stub
   SceThreadmgrForDriver_stub
 )

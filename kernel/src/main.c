@@ -6,10 +6,15 @@
 #include <psp2kern/kernel/threadmgr/thread.h>
 
 #include "vitadebug_kernel.h"
+#ifdef VD_KERNEL_ENABLE_EXPERIMENTAL_HW_DEBUG
+#include "hw_debug.h"
+#endif
 
 #define VD_SUSPEND_STATUS 0x1002
 #define VD_MIN_LEASE_MS 250u
 #define VD_MAX_LEASE_MS 5000u
+#define VD_WATCHDOG_STOP_TIMEOUT_US 500000u
+#define VD_SESSION_LOCK_RETRY_US 1000u
 #ifdef VD_KERNEL_ENABLE_EXPERIMENTAL_VFP_SNAPSHOT
 #define VD_VFP_PREFIX_GUARD_WORDS 64
 #define VD_VFP_SUFFIX_GUARD_WORDS 1024
@@ -36,6 +41,9 @@ struct vd_stop_session {
     int suspended_count;
     uint64_t deadline_us;
     int active;
+    int hardware_mutation;
+    int hardware_restore_pending;
+    unsigned int hardware_token;
 };
 
 static struct vd_stop_session stop_session;
@@ -52,7 +60,16 @@ static void lock_sessions(void)
         if(__atomic_compare_exchange_n(&session_lock, &expected, 1, 0,
                                        __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST))
             return;
+        ksceKernelDelayThread(VD_SESSION_LOCK_RETRY_US);
     }
+}
+
+static int try_lock_sessions(void)
+{
+    int expected = 0;
+    return __atomic_compare_exchange_n(&session_lock, &expected, 1, 0,
+                                        __ATOMIC_SEQ_CST,
+                                        __ATOMIC_SEQ_CST);
 }
 
 static void unlock_sessions(void)
@@ -60,8 +77,32 @@ static void unlock_sessions(void)
     __atomic_store_n(&session_lock, 0, __ATOMIC_SEQ_CST);
 }
 
+static int thread_list_contains(const SceUID* threads, int count,
+                                SceUID thread)
+{
+    for(int i = 0; i < count; ++i)
+        if(threads[i] == thread)
+            return 1;
+    return 0;
+}
+
 static int resume_session_locked(void)
 {
+    if(stop_session.hardware_mutation ||
+       stop_session.hardware_restore_pending)
+        return VD_KERNEL_ERROR_HW_BUSY;
+
+    SceUID current_threads[VD_KERNEL_MAX_THREADS];
+    SceUID retry_threads[VD_KERNEL_MAX_THREADS];
+    int current_count = 0;
+    int retry_count = 0;
+    int total = ksceKernelGetThreadIdList(
+        stop_session.pid, current_threads, VD_KERNEL_MAX_THREADS,
+        &current_count);
+    int membership_known = total >= 0 &&
+                           total <= VD_KERNEL_MAX_THREADS &&
+                           current_count >= 0 &&
+                           current_count <= VD_KERNEL_MAX_THREADS;
     int first_error = 0;
     for(int i = stop_session.suspended_count - 1; i >= 0; --i)
     {
@@ -70,10 +111,33 @@ static int resume_session_locked(void)
         if(result < 0)
         {
             int recovery = ksceKernelChangeThreadSuspendStatus(thread, 2);
-            if(recovery < 0 && first_error == 0)
-                first_error = result;
+            if(recovery < 0)
+            {
+                int still_present = !membership_known ||
+                    thread_list_contains(current_threads, current_count,
+                                         thread);
+                int suspend_state = ksceKernelIsThreadDebugSuspended(thread);
+                if(still_present && suspend_state != 0)
+                {
+                    retry_threads[retry_count++] = thread;
+                    if(first_error == 0)
+                        first_error = result;
+                }
+            }
         }
     }
+
+    if(retry_count > 0)
+    {
+        for(int i = 0; i < retry_count; ++i)
+            stop_session.suspended[i] = retry_threads[i];
+        stop_session.suspended_count = retry_count;
+        stop_session.active = 1;
+        /* Keep the lease expired so the watchdog retries on its next tick. */
+        stop_session.deadline_us = 0;
+        return first_error;
+    }
+
     stop_session.active = 0;
     stop_session.pid = -1;
     stop_session.token = 0;
@@ -81,6 +145,9 @@ static int resume_session_locked(void)
     stop_session.exempt_thread = -1;
     stop_session.suspended_count = 0;
     stop_session.deadline_us = 0;
+    stop_session.hardware_mutation = 0;
+    stop_session.hardware_restore_pending = 0;
+    stop_session.hardware_token = 0;
     return first_error;
 }
 
@@ -90,11 +157,51 @@ static int watchdog_main(SceSize args, void* argp)
     (void)argp;
     while(!__atomic_load_n(&watchdog_stop, __ATOMIC_SEQ_CST))
     {
-        if(__atomic_load_n(&stop_session.active, __ATOMIC_SEQ_CST))
+        uint64_t now = (uint64_t)ksceKernelGetSystemTimeWide();
+#ifdef VD_KERNEL_ENABLE_EXPERIMENTAL_HW_DEBUG
+        SceUID recovery_pid = -1;
+        unsigned int recovery_stop_token = 0;
+        unsigned int recovery_hw_token = 0;
+
+        if(!try_lock_sessions())
         {
-            uint64_t now = (uint64_t)ksceKernelGetSystemTimeWide();
-            lock_sessions();
-            if(stop_session.active && now >= stop_session.deadline_us)
+            ksceKernelDelayThread(20000);
+            continue;
+        }
+        if(stop_session.active && stop_session.hardware_restore_pending)
+        {
+            recovery_pid = stop_session.pid;
+            recovery_stop_token = stop_session.token;
+            recovery_hw_token = stop_session.hardware_token;
+        }
+        unlock_sessions();
+
+        int recovery_needed = recovery_pid >= 0 &&
+                              recovery_stop_token != 0 &&
+                              recovery_hw_token != 0;
+        int hardware_recovered = 0;
+        if(recovery_needed)
+            hardware_recovered = vdHwDebugRecover(recovery_pid,
+                                                   recovery_hw_token) >= 0;
+        else
+            vdHwDebugWatchdog(now);
+#endif
+        if(try_lock_sessions())
+        {
+#ifdef VD_KERNEL_ENABLE_EXPERIMENTAL_HW_DEBUG
+            if(recovery_needed && hardware_recovered &&
+               stop_session.active && stop_session.hardware_restore_pending &&
+               stop_session.pid == recovery_pid &&
+               stop_session.token == recovery_stop_token &&
+               stop_session.hardware_token == recovery_hw_token)
+            {
+                stop_session.hardware_restore_pending = 0;
+                stop_session.hardware_token = 0;
+            }
+#endif
+            if(stop_session.active && !stop_session.hardware_mutation &&
+               !stop_session.hardware_restore_pending &&
+               now >= stop_session.deadline_us)
                 resume_session_locked();
             unlock_sessions();
         }
@@ -110,6 +217,10 @@ int module_start(SceSize args, void* argp)
 {
     (void)args;
     (void)argp;
+#ifdef VD_KERNEL_ENABLE_EXPERIMENTAL_HW_DEBUG
+    if(vdHwDebugStart() < 0)
+        return SCE_KERNEL_START_FAILED;
+#endif
     watchdog_stop = 0;
     watchdog_thread = ksceKernelCreateThread("vitadebug watchdog",
                                              watchdog_main, 0x40,
@@ -120,6 +231,13 @@ int module_start(SceSize args, void* argp)
         if(watchdog_thread >= 0)
             ksceKernelDeleteThread(watchdog_thread);
         watchdog_thread = -1;
+#ifdef VD_KERNEL_ENABLE_EXPERIMENTAL_HW_DEBUG
+        if(vdHwDebugStop() < 0)
+        {
+            /* Keep code resident if a worker could not be proven stopped. */
+            return SCE_KERNEL_START_SUCCESS;
+        }
+#endif
         return SCE_KERNEL_START_FAILED;
     }
     return SCE_KERNEL_START_SUCCESS;
@@ -129,16 +247,42 @@ int module_stop(SceSize args, void* argp)
 {
     (void)args;
     (void)argp;
-    __atomic_store_n(&watchdog_stop, 1, __ATOMIC_SEQ_CST);
+#ifdef VD_KERNEL_ENABLE_EXPERIMENTAL_HW_DEBUG
+    /* Keep the watchdog alive if exact hardware-state restoration fails. */
+    if(vdHwDebugStop() < 0)
+        return SCE_KERNEL_STOP_FAIL;
+#endif
+    int resume_result = 0;
     lock_sessions();
+#ifdef VD_KERNEL_ENABLE_EXPERIMENTAL_HW_DEBUG
+    /* vdHwDebugStop proved that every local-core snapshot was restored. */
+    stop_session.hardware_mutation = 0;
+    stop_session.hardware_restore_pending = 0;
+    stop_session.hardware_token = 0;
+#endif
     if(stop_session.active)
-        resume_session_locked();
+        resume_result = resume_session_locked();
     unlock_sessions();
+    if(resume_result < 0)
+        return SCE_KERNEL_STOP_FAIL;
+    /*
+     * Do not retire the lease watchdog until every stopped application thread
+     * has been released.  A concurrent hardware mutation can make the first
+     * unload attempt fail with HW_BUSY; in that case the resident plugin must
+     * retain its recovery thread for the caller's next cleanup attempt.
+     */
+    __atomic_store_n(&watchdog_stop, 1, __ATOMIC_SEQ_CST);
     if(watchdog_thread >= 0)
     {
         int status = 0;
-        ksceKernelWaitThreadEnd(watchdog_thread, &status, NULL);
-        ksceKernelDeleteThread(watchdog_thread);
+        SceUInt timeout_us = VD_WATCHDOG_STOP_TIMEOUT_US;
+        int result = ksceKernelWaitThreadEnd(watchdog_thread, &status,
+                                              &timeout_us);
+        if(result < 0)
+            return SCE_KERNEL_STOP_FAIL;
+        result = ksceKernelDeleteThread(watchdog_thread);
+        if(result < 0)
+            return SCE_KERNEL_STOP_FAIL;
         watchdog_thread = -1;
     }
     return SCE_KERNEL_STOP_SUCCESS;
@@ -149,17 +293,23 @@ int vdKernelGetStatus(struct vd_kernel_status* status)
     uint32_t syscall_state;
     ENTER_SYSCALL(syscall_state);
 
+    unsigned int capabilities = VD_KERNEL_CAP_THREAD_LIST |
+                                VD_KERNEL_CAP_THREAD_CONTROL |
+                                VD_KERNEL_CAP_THREAD_REGISTERS |
+                                VD_KERNEL_CAP_STOP_RECONCILE |
+                                VD_KERNEL_CAP_HW_DEBUG_DISCOVERY |
+                                VD_KERNEL_CAP_PROBE_SUSPEND;
+#ifdef VD_KERNEL_ENABLE_EXPERIMENTAL_VFP_SNAPSHOT
+    capabilities |= VD_KERNEL_CAP_THREAD_VFP_REGISTERS;
+#endif
+#ifdef VD_KERNEL_ENABLE_EXPERIMENTAL_HW_DEBUG
+    if(vdHwDebugReady())
+        capabilities |= VD_KERNEL_CAP_HW_BREAKPOINT |
+                        VD_KERNEL_CAP_HW_WATCHPOINT;
+#endif
     const struct vd_kernel_status kernel_status = {
         .abi_version = VD_KERNEL_ABI_VERSION,
-        .capabilities = VD_KERNEL_CAP_THREAD_LIST |
-                        VD_KERNEL_CAP_THREAD_CONTROL |
-                        VD_KERNEL_CAP_THREAD_REGISTERS |
-                        VD_KERNEL_CAP_STOP_RECONCILE |
-                        VD_KERNEL_CAP_HW_DEBUG_DISCOVERY |
-#ifdef VD_KERNEL_ENABLE_EXPERIMENTAL_VFP_SNAPSHOT
-                        VD_KERNEL_CAP_THREAD_VFP_REGISTERS |
-#endif
-                        VD_KERNEL_CAP_PROBE_SUSPEND,
+        .capabilities = capabilities,
         .max_threads = VD_KERNEL_MAX_THREADS,
         .reserved = 0,
     };
@@ -368,6 +518,9 @@ int vdKernelBeginStop(unsigned int lease_ms, SceUID exempt_user_thread,
     stop_session.controller_thread = caller_thread;
     stop_session.exempt_thread = exempt_thread;
     stop_session.suspended_count = 0;
+    stop_session.hardware_mutation = 0;
+    stop_session.hardware_restore_pending = 0;
+    stop_session.hardware_token = 0;
     for(int i = 0; i < copied; ++i)
     {
         if(threads[i] == caller_thread || threads[i] == exempt_thread)
@@ -441,6 +594,15 @@ int vdKernelRenewStop(unsigned int token, unsigned int lease_ms)
             result = total < 0 ? total : -4;
         else
         {
+            int retained_count = 0;
+            for(int i = 0; i < stop_session.suspended_count; ++i)
+            {
+                SceUID owned_thread = stop_session.suspended[i];
+                if(thread_list_contains(threads, copied, owned_thread) &&
+                   ksceKernelIsThreadDebugSuspended(owned_thread) > 0)
+                    stop_session.suspended[retained_count++] = owned_thread;
+            }
+            stop_session.suspended_count = retained_count;
             int original_count = stop_session.suspended_count;
             result = 0;
             for(int i = 0; i < copied; ++i)
@@ -460,6 +622,11 @@ int vdKernelRenewStop(unsigned int token, unsigned int lease_ms)
                 if(owned || ksceKernelIsThreadDebugSuspended(thread) > 0)
                     continue;
 
+                if(stop_session.suspended_count >= VD_KERNEL_MAX_THREADS)
+                {
+                    result = -4;
+                    break;
+                }
                 result = ksceKernelDebugSuspendThread(thread,
                                                        VD_SUSPEND_STATUS);
                 if(result < 0)
@@ -469,15 +636,21 @@ int vdKernelRenewStop(unsigned int token, unsigned int lease_ms)
 
             if(result < 0)
             {
-                while(stop_session.suspended_count > original_count)
+                int appended_count = stop_session.suspended_count;
+                int retained_after_rollback = original_count;
+                for(int i = original_count; i < appended_count; ++i)
                 {
-                    SceUID thread = stop_session.suspended[
-                        --stop_session.suspended_count];
+                    SceUID thread = stop_session.suspended[i];
                     int resume = ksceKernelDebugResumeThread(
                         thread, VD_SUSPEND_STATUS);
-                    if(resume < 0)
-                        ksceKernelChangeThreadSuspendStatus(thread, 2);
+                    int recovery = resume < 0 ?
+                        ksceKernelChangeThreadSuspendStatus(thread, 2) : 0;
+                    if(resume < 0 && recovery < 0 &&
+                       ksceKernelIsThreadDebugSuspended(thread) != 0)
+                        stop_session.suspended[retained_after_rollback++] =
+                            thread;
                 }
+                stop_session.suspended_count = retained_after_rollback;
             }
             else
                 stop_session.deadline_us =
@@ -654,6 +827,221 @@ int vdKernelGetThreadVfpRegisters(
         }
     }
     unlock_sessions();
+    EXIT_SYSCALL(syscall_state);
+    return result;
+#endif
+}
+
+#ifdef VD_KERNEL_ENABLE_EXPERIMENTAL_HW_DEBUG
+static unsigned int read_full_context_id(void)
+{
+    unsigned int context_id;
+    __asm__ volatile("mrc p15, 0, %0, c13, c0, 1" : "=r"(context_id));
+    return context_id;
+}
+
+static int stop_session_is_current_locked(SceUID caller_pid,
+                                          unsigned int stop_token,
+                                          uint64_t now_us)
+{
+    SceUID threads[VD_KERNEL_MAX_THREADS];
+    int copied = 0;
+    int total;
+
+    if(!stop_session.active || stop_session.pid != caller_pid ||
+       stop_session.token != stop_token ||
+       now_us >= stop_session.deadline_us ||
+       stop_session.hardware_mutation ||
+       stop_session.hardware_restore_pending ||
+       stop_session.exempt_thread >= 0 ||
+       stop_session.controller_thread != ksceKernelGetThreadId())
+        return 0;
+
+    total = ksceKernelGetThreadIdList(caller_pid, threads,
+                                      VD_KERNEL_MAX_THREADS, &copied);
+    if(total < 0 || total > VD_KERNEL_MAX_THREADS)
+        return 0;
+    for(int i = 0; i < copied; ++i)
+    {
+        if(threads[i] == stop_session.controller_thread ||
+           threads[i] == stop_session.exempt_thread)
+            continue;
+        if(ksceKernelIsThreadDebugSuspended(threads[i]) <= 0)
+            return 0;
+    }
+    return 1;
+}
+#endif
+
+int vdKernelAcquireHardwareDebug(
+    unsigned int lease_ms,
+    struct vd_kernel_hw_session_result* session_result)
+{
+    uint32_t syscall_state;
+    ENTER_SYSCALL(syscall_state);
+
+#ifndef VD_KERNEL_ENABLE_EXPERIMENTAL_HW_DEBUG
+    (void)lease_ms;
+    (void)session_result;
+    EXIT_SYSCALL(syscall_state);
+    return VD_KERNEL_ERROR_HW_DISABLED;
+#else
+    if(!session_result || !valid_lease(lease_ms))
+    {
+        EXIT_SYSCALL(syscall_state);
+        return VD_KERNEL_ERROR_HW_INVALID;
+    }
+
+    SceUID caller_pid = ksceKernelGetProcessId();
+    unsigned int context_id = read_full_context_id();
+    struct vd_kernel_hw_session_result kernel_result = {0};
+    int result = vdHwDebugAcquire(caller_pid, context_id, lease_ms,
+                                  &kernel_result);
+    int copy_result = ksceKernelMemcpyKernelToUser(session_result,
+                                                   &kernel_result,
+                                                   sizeof(kernel_result));
+    if(copy_result < 0 && kernel_result.token != 0)
+        vdHwDebugRelease(caller_pid, kernel_result.token);
+
+    EXIT_SYSCALL(syscall_state);
+    return copy_result < 0 ? copy_result : result;
+#endif
+}
+
+int vdKernelRenewHardwareDebug(unsigned int token, unsigned int lease_ms)
+{
+    uint32_t syscall_state;
+    ENTER_SYSCALL(syscall_state);
+
+#ifndef VD_KERNEL_ENABLE_EXPERIMENTAL_HW_DEBUG
+    (void)token;
+    (void)lease_ms;
+    EXIT_SYSCALL(syscall_state);
+    return VD_KERNEL_ERROR_HW_DISABLED;
+#else
+    if(token == 0 || !valid_lease(lease_ms))
+    {
+        EXIT_SYSCALL(syscall_state);
+        return VD_KERNEL_ERROR_HW_INVALID;
+    }
+    int result = vdHwDebugRenew(ksceKernelGetProcessId(),
+                                read_full_context_id(), token, lease_ms);
+    EXIT_SYSCALL(syscall_state);
+    return result;
+#endif
+}
+
+int vdKernelUpdateHardwarePoint(
+    unsigned int token,
+    unsigned int stop_token,
+    const struct vd_kernel_hw_point_request* request)
+{
+    uint32_t syscall_state;
+    ENTER_SYSCALL(syscall_state);
+
+#ifndef VD_KERNEL_ENABLE_EXPERIMENTAL_HW_DEBUG
+    (void)token;
+    (void)stop_token;
+    (void)request;
+    EXIT_SYSCALL(syscall_state);
+    return VD_KERNEL_ERROR_HW_DISABLED;
+#else
+    struct vd_kernel_hw_point_request kernel_request;
+    if(token == 0 || stop_token == 0 || !request)
+    {
+        EXIT_SYSCALL(syscall_state);
+        return VD_KERNEL_ERROR_HW_INVALID;
+    }
+    int result = ksceKernelMemcpyUserToKernel(&kernel_request, request,
+                                               sizeof(kernel_request));
+    if(result < 0)
+    {
+        EXIT_SYSCALL(syscall_state);
+        return result;
+    }
+
+    SceUID caller_pid = ksceKernelGetProcessId();
+    unsigned int context_id = read_full_context_id();
+    uint64_t now;
+    lock_sessions();
+    now = (uint64_t)ksceKernelGetSystemTimeWide();
+    if(!stop_session_is_current_locked(caller_pid, stop_token, now))
+    {
+        unlock_sessions();
+        EXIT_SYSCALL(syscall_state);
+        return VD_KERNEL_ERROR_HW_STOP_REQUIRED;
+    }
+    stop_session.hardware_mutation = 1;
+    stop_session.hardware_restore_pending = 0;
+    stop_session.hardware_token = token;
+    unlock_sessions();
+    /*
+     * The in-flight flag keeps EndStop and lease cleanup from resuming the
+     * target while the three pinned workers program their local registers.
+     * Do not hold the raw stop-session spin lock across this sleeping dispatch.
+     */
+    result = vdHwDebugUpdate(caller_pid, context_id, token,
+                             &kernel_request);
+
+    now = (uint64_t)ksceKernelGetSystemTimeWide();
+    int resume_result = 0;
+    lock_sessions();
+    if(stop_session.active && stop_session.pid == caller_pid &&
+       stop_session.token == stop_token && stop_session.hardware_mutation &&
+       stop_session.hardware_token == token)
+    {
+        stop_session.hardware_mutation = 0;
+        if(result == VD_KERNEL_ERROR_HW_RESTORE)
+            stop_session.hardware_restore_pending = 1;
+        else
+        {
+            stop_session.hardware_restore_pending = 0;
+            stop_session.hardware_token = 0;
+        }
+        if(!stop_session.hardware_restore_pending &&
+           now >= stop_session.deadline_us)
+            resume_result = resume_session_locked();
+    }
+    unlock_sessions();
+    if(result >= 0 && resume_result < 0)
+        result = resume_result;
+    EXIT_SYSCALL(syscall_state);
+    return result;
+#endif
+}
+
+int vdKernelReleaseHardwareDebug(unsigned int token)
+{
+    uint32_t syscall_state;
+    ENTER_SYSCALL(syscall_state);
+
+#ifndef VD_KERNEL_ENABLE_EXPERIMENTAL_HW_DEBUG
+    (void)token;
+    EXIT_SYSCALL(syscall_state);
+    return VD_KERNEL_ERROR_HW_DISABLED;
+#else
+    if(token == 0)
+    {
+        EXIT_SYSCALL(syscall_state);
+        return VD_KERNEL_ERROR_HW_INVALID;
+    }
+    SceUID caller_pid = ksceKernelGetProcessId();
+    int result = vdHwDebugRelease(caller_pid, token);
+    if(result >= 0)
+    {
+        uint64_t now = (uint64_t)ksceKernelGetSystemTimeWide();
+        lock_sessions();
+        if(stop_session.active && stop_session.pid == caller_pid &&
+           stop_session.hardware_restore_pending &&
+           stop_session.hardware_token == token)
+        {
+            stop_session.hardware_restore_pending = 0;
+            stop_session.hardware_token = 0;
+            if(now >= stop_session.deadline_us)
+                result = resume_session_locked();
+        }
+        unlock_sessions();
+    }
     EXIT_SYSCALL(syscall_state);
     return result;
 #endif

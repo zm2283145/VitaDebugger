@@ -6,12 +6,23 @@
 extern "C" {
 #endif
 
-#define VD_KERNEL_ABI_VERSION 0x00010007u
+#define VD_KERNEL_ABI_VERSION 0x00010008u
 #define VD_KERNEL_MAX_THREADS 64
+#define VD_KERNEL_HW_CORE_COUNT 3
+#define VD_KERNEL_HW_BREAKPOINT_COUNT 6
+#define VD_KERNEL_HW_WATCHPOINT_COUNT 4
 #define VD_KERNEL_VFP_D_REGISTER_COUNT 32
 #define VD_KERNEL_VFP_LAYOUT_D32_V1 1u
 #define VD_KERNEL_VFP_FPSCR_ENTRY_D32_V1 0u
 #define VD_KERNEL_ERROR_VFP_DISABLED (-8)
+#define VD_KERNEL_ERROR_HW_DISABLED (-9)
+#define VD_KERNEL_ERROR_HW_BUSY (-10)
+#define VD_KERNEL_ERROR_HW_OWNER (-11)
+#define VD_KERNEL_ERROR_HW_STOP_REQUIRED (-12)
+#define VD_KERNEL_ERROR_HW_INVALID (-13)
+#define VD_KERNEL_ERROR_HW_CORE (-14)
+#define VD_KERNEL_ERROR_HW_RESTORE (-15)
+#define VD_KERNEL_ERROR_HW_RANGE (-16)
 
 enum vd_kernel_capability {
     VD_KERNEL_CAP_THREAD_LIST = 1u << 0,
@@ -20,6 +31,8 @@ enum vd_kernel_capability {
     VD_KERNEL_CAP_STOP_RECONCILE = 1u << 3,
     VD_KERNEL_CAP_HW_DEBUG_DISCOVERY = 1u << 4,
     VD_KERNEL_CAP_THREAD_VFP_REGISTERS = 1u << 5,
+    VD_KERNEL_CAP_HW_BREAKPOINT = 1u << 6,
+    VD_KERNEL_CAP_HW_WATCHPOINT = 1u << 7,
     VD_KERNEL_CAP_PROBE_SUSPEND = 1u << 31,
 };
 
@@ -80,6 +93,57 @@ struct vd_kernel_hw_debug_info {
     unsigned int context_breakpoint_count;
 };
 
+enum vd_kernel_hw_point_operation {
+    VD_KERNEL_HW_POINT_INSERT = 1,
+    VD_KERNEL_HW_POINT_REMOVE = 2,
+};
+
+enum vd_kernel_hw_point_type {
+    VD_KERNEL_HW_POINT_EXECUTE = 1,
+    VD_KERNEL_HW_POINT_WRITE = 2,
+    VD_KERNEL_HW_POINT_READ = 3,
+    VD_KERNEL_HW_POINT_ACCESS = 4,
+};
+
+struct vd_kernel_hw_point_request {
+    unsigned int size;
+    unsigned int operation;
+    unsigned int type;
+    unsigned int address;
+    unsigned int length;
+    unsigned int flags;
+};
+
+struct vd_kernel_hw_core_info {
+    unsigned int core_id;
+    unsigned int raw_mpidr;
+    unsigned int raw_midr;
+    unsigned int raw_didr;
+    unsigned int raw_dscr;
+    unsigned int raw_vcr;
+    unsigned int breakpoint_control[VD_KERNEL_HW_BREAKPOINT_COUNT];
+    unsigned int watchpoint_control[VD_KERNEL_HW_WATCHPOINT_COUNT];
+    unsigned int breakpoint0_value;
+    unsigned int context_breakpoint_value;
+    unsigned int watchpoint0_value;
+};
+
+struct vd_kernel_hw_session_result {
+    unsigned int token;
+    unsigned int core_count;
+    unsigned int context_id;
+    int failure_core;
+    int failure_code;
+    struct vd_kernel_hw_core_info core[VD_KERNEL_HW_CORE_COUNT];
+};
+
+typedef char vd_kernel_hw_point_request_size_must_be_24[
+    sizeof(struct vd_kernel_hw_point_request) == 24 ? 1 : -1];
+typedef char vd_kernel_hw_core_info_size_must_be_76[
+    sizeof(struct vd_kernel_hw_core_info) == 76 ? 1 : -1];
+typedef char vd_kernel_hw_session_result_size_must_be_248[
+    sizeof(struct vd_kernel_hw_session_result) == 248 ? 1 : -1];
+
 // Copy the companion ABI and supported capability bits to user memory.
 int vdKernelGetStatus(struct vd_kernel_status* status);
 
@@ -131,6 +195,37 @@ int vdKernelGetThreadVfpRegisters(
     unsigned int token,
     SceUID target_user_thread,
     struct vd_thread_vfp_registers* registers);
+
+// Acquire exclusive, lease-protected ownership of the experimental ARMv7
+// debug comparators for the calling process. The default kernel build returns
+// VD_KERNEL_ERROR_HW_DISABLED and never touches CP14 debug state. An enabled
+// candidate snapshots and inventories all three application CPU cores and
+// refuses acquisition if any comparator is already enabled rather than risk
+// conflicting with another debugger or an existing link to reserved BRP5.
+int vdKernelAcquireHardwareDebug(
+    unsigned int lease_ms,
+    struct vd_kernel_hw_session_result* session_result);
+
+// Renew hardware-debug ownership. The full caller CONTEXTIDR must still match
+// the value captured at acquisition. Expiration restores every owned register
+// on every application core before another process may acquire the resource.
+int vdKernelRenewHardwareDebug(unsigned int token, unsigned int lease_ms);
+
+// Insert or remove the single supported execution breakpoint or data
+// watchpoint. Mutation is allowed only while the caller owns both this hardware
+// token and the supplied active all-stop token. For the experimental v1.8
+// implementation, that stop must have no extra exempt thread and the original
+// stop controller must issue the mutation. Requests are copied and strictly
+// validated in kernel memory; flags must be zero.
+int vdKernelUpdateHardwarePoint(
+    unsigned int token,
+    unsigned int stop_token,
+    const struct vd_kernel_hw_point_request* request);
+
+// Restore the exact pre-acquisition comparator and monitor state. Unlike point
+// mutation, release intentionally needs no all-stop token so disconnect and
+// shutdown cleanup remain possible.
+int vdKernelReleaseHardwareDebug(unsigned int token);
 
 #ifdef __cplusplus
 }

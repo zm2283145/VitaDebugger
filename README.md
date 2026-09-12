@@ -103,6 +103,11 @@ hardware. Its current status includes:
 
 It is already useful for controlled application debugging. It is not yet a
 complete system-wide debugger; see [Current limitations](#current-limitations).
+The [`cerwym/kvdb` feature-parity checklist](docs/kvdb-feature-parity.md) tracks
+equivalent debugger capabilities and the hardware gates required before each
+one is advertised. VitaDebugger also targets guarded hardware execution
+breakpoints (`Z1`), which are beyond KVDB's documented `Z2`-`Z4` watchpoint
+handlers.
 
 ## Hardware validation
 
@@ -125,6 +130,13 @@ hardware. These unedited Vita screenshots record the completed probe results:
 Every displayed probe check passed. These images document controlled test
 coverage; they do not claim that arbitrary applications or every firmware and
 plugin combination are already supported.
+
+The first disposable disabled-comparator round-trip attempt on 2026-09-12
+[rebooted during its kernel critical section](docs/hardware/hw-disabled-probe-attempt-1.md).
+Its valid pre-probe journal proves entry but not the exact failing instruction or
+any comparator write. Because the earlier v7 DIDR read passed, the follow-up is
+a one-operation-at-a-time read-only ladder; enabled hardware debugging remains
+blocked.
 
 The preceding [FPSCR discovery run](docs/hardware/kernel-vfp-probe-v8-fpscr-bank-discovery.jpg)
 is retained separately because its one failed expectation established that the
@@ -322,6 +334,40 @@ and unencrypted. Never expose it to the internet or forward the port through a
 router. Use it only on a trusted development network.
 
 ## Building
+
+### Windows build environment
+
+On Windows, use `tools/invoke-vita-env.ps1` for direct compiler, Make, and
+CMake invocations. An absolute path to MSYS2's `gcc.exe` is not sufficient by
+itself: its `cc1.exe` child also needs the matching MinGW64 runtime directory
+on `PATH`. The wrapper validates VitaSDK's `bin` directory, both required MSYS2
+directories, and every non-system DLL imported directly by the installed
+MinGW64 `cc1.exe`. It changes only the current process environment while the
+child runs and restores it afterward.
+
+Validate the environment without launching a compiler:
+
+```powershell
+.\tools\invoke-vita-env.ps1 -ValidateOnly
+```
+
+Place any wrapper options before the executable. Every remaining token is
+forwarded to that executable unchanged, including short native options such as
+GCC's `-o`. For example, the hardware-debug register encoder has a host-only
+safety test that does not build or install a Vita kernel plugin:
+
+```powershell
+.\tools\invoke-vita-env.ps1 C:\msys64\mingw64\bin\gcc.exe `
+  -std=c11 -Wall -Wextra -Werror -Ikernel/include `
+  kernel/src/armv7_debug_codec.c tests/host/test_armv7_debug_codec.c `
+  -o test-armv7-debug-codec.exe
+.\test-armv7-debug-codec.exe
+```
+
+For nonstandard installations, pass `-VitaSdkPath`, `-Msys2RuntimePath`, or
+`-Msys2UsrBinPath` before the executable. Do not copy MinGW DLLs into VitaSDK
+or Windows system directories; keeping the matching runtime together avoids
+silent version skew.
 
 Provide the Kubridge source and import-library locations:
 
@@ -625,8 +671,14 @@ if (uvdb_redirect_stdio() == 0) {
 }
 ```
 
-This creates a helper thread and is suitable for light diagnostic output. Use
-the DebugNet-compatible transport for sustained log or profiler streaming.
+This current implementation creates a helper thread and sends light diagnostic
+output through GDB remote file I/O. It is an experimental compatibility path,
+not the final console transport. The planned debugger transport will capture
+both stdout and stderr into a bounded, thread-safe, nonblocking queue and emit
+GDB remote-console `O` packets. Queue depth, truncation, and drop counts will be
+observable; disconnect, target-stop, and shutdown paths must never leave an
+application writer blocked. DebugNet remains the independent path for sustained
+logs and profiler streaming, including periods when GDB is disconnected.
 
 ### Cooperative thread registration
 
@@ -743,7 +795,9 @@ exact matching unstripped ELF on the development computer.
   register reads are hardware tested; the guarded VFP snapshot passed its
   separate known-pattern hardware gate, but the opt-in GDB mapping still needs
   a live foreign-thread D0/D31/FPSCR read and lifecycle test before promotion.
-- Hardware breakpoints and watchpoints are not implemented.
+- Hardware breakpoint/watchpoint encoding and a guarded kernel session engine
+  are implemented experimentally, but no enabled comparator has passed the
+  retail-hardware trap/restoration gates, so GDB does not advertise them yet.
 - Software stepping does not decode every instruction capable of writing PC.
   Important remaining cases are concentrated in shifted PC-writing data-
   processing forms, register-offset PC loads, and uncommon ARM/Thumb control
@@ -786,23 +840,32 @@ exact matching unstripped ELF on the development computer.
 3. Move blocking accept/RSP work outside the global spin lock; add nested-fault
    handling, previous-handler chaining, strict packet parsing, fake-kernel host
    tests, fuzzing, and long reconnect/shutdown/multithread hardware soaks.
-4. Complete ARM and Thumb-2 control-flow decoding, then add `p`/`P` register
+4. Replace the experimental remote-file-I/O stdio bridge with bounded stdout
+   and stderr capture delivered as GDB remote-console `O` packets. Add explicit
+   buffering, truncation/drop counters, thread-safety, reconnect behavior, and
+   tests proving that target output cannot block while the debugger is stopped.
+5. Complete ARM and Thumb-2 control-flow decoding, then add `p`/`P` register
    access and independently validate any foreign-thread mutation/restoration.
-5. Add hardware breakpoints and watchpoints through separate guarded kernel
-   probes before exposing them to GDB.
-6. Extend the profiler foundation with a name dictionary, binary drain/receiver,
+6. Complete the staged [KVDB feature-parity](docs/kvdb-feature-parity.md)
+   hardware gates: disabled-register restore, one context-scoped execution
+   breakpoint, one data watchpoint, correct stop replies, and lease/detach
+   cleanup before exposing `Z1`-`Z4` to GDB.
+7. Complete ASLR-aware symbol relocation: reconcile `qOffsets` and
+   `qXfer:libraries:read` with every loaded module segment, automate matching
+   unstripped ELF loading, and verify relocated breakpoints across relaunches.
+8. Extend the profiler foundation with a name dictionary, binary drain/receiver,
    desktop trace viewer, and host-application instrumentation; evaluate narrow
    kernel PC/PMU sampling and explicit VitaGL/SceGxm hooks separately.
-7. Add protocol authentication/pairing and peer allowlists, isolated feature
+9. Add protocol authentication/pairing and peer allowlists, isolated feature
    build directories, exported VitaSDK/CMake packages, CI, a firmware matrix,
    and a project-wide license.
-8. Finish VitaDevDeploy bootstrap, interrupted-install, and recovery validation;
+10. Finish VitaDevDeploy bootstrap, interrupted-install, and recovery validation;
    then integrate it with VS Code build/deploy/stop, IntelliSense, GDB, logs,
    and profiles. Later replace the external Vita Companion dependency with a
    versioned authenticated device service if its implementation audit supports
    that design.
-9. Add optional attachment to applications not compiled with the library.
-10. As the final compatibility milestone after all debugger and profiler paths
+11. Add optional attachment to applications not compiled with the library.
+12. As the final compatibility milestone after all debugger and profiler paths
     are confirmed, validate LLDB remote-protocol behavior and add a Debug
     Adapter Protocol bridge for IDEs without regressing GDB.
 

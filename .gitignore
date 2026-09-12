@@ -6,9 +6,8 @@
 *.psp2dmp
 eboot.bin
 param.sfo
-kernel/build/
-kernel/build-short/
-kernel/build-vfp/
+/build*/
+kernel/build*/
 profiler/build/
 local/
 __pycache__/
