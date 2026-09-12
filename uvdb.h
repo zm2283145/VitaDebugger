@@ -18,6 +18,45 @@ struct uvdb_config {
     size_t max_packet_buffer;
 };
 
+enum uvdb_log_level {
+    UVDB_LOG_NONE = 0,
+    UVDB_LOG_ERROR = 1,
+    UVDB_LOG_INFO = 2,
+    UVDB_LOG_DEBUG = 3,
+    UVDB_LOG_TRACE = 4,
+};
+
+struct uvdb_debugnet_config {
+    const char* server_ip;
+    unsigned short port;
+    enum uvdb_log_level level;
+};
+
+struct uvdb_debugnet_stats {
+    unsigned int queued;
+    unsigned int sent;
+    unsigned int dropped;
+    unsigned int truncated;
+    unsigned int send_errors;
+    int last_send_error;
+};
+
+// Start an optional DebugNet-compatible UDP log stream. Vita networking must
+// already be initialized. Calls fail cleanly when configuration is invalid or
+// the sender cannot be started; the GDB service is independent.
+int uvdb_debugnet_start(const struct uvdb_debugnet_config* config);
+
+// Queue one bounded message without waiting for network I/O. Returns 0 when
+// queued, 1 when filtered, 2 when queued but truncated, or -1 when unavailable
+// or full. Datagrams, including the level prefix, are at most 1023 bytes.
+int uvdb_debugnet_write(enum uvdb_log_level level, const char* text);
+int uvdb_debugnet_printf(enum uvdb_log_level level, const char* format, ...);
+
+// Read counters or stop the sender. Stop makes a bounded best-effort attempt to
+// send already queued messages before closing the debugger-owned UDP socket.
+int uvdb_debugnet_get_stats(struct uvdb_debugnet_stats* stats);
+int uvdb_debugnet_stop(void);
+
 // Register the calling thread so it is visible to GDB. Registration is
 // cooperative in the application-only library; complete thread suspension and
 // foreign-thread register access require the planned kernel companion.

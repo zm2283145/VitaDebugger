@@ -19,6 +19,15 @@ VITADEBUG_KERNEL_BUILD_DIR ?= $(VITADEBUG_KERNEL_DIR)/build-short
 EXTRA_CFLAGS := -O0 -g -Wall -Wextra -I $(VITASDK)/share/gcc-arm-vita-eabi/samples/common -I $(KUBRIDGE_DIR)
 EXTRA_LDFLAGS := $(CFLAGS) -Wl,-q -L $(KUBRIDGE_LIB_DIR) -lSceDisplay_stub -lSceNetPs_stub -lSceKernelModulemgr_stub -lkubridge_stub -pthread
 
+ifdef UVDB_DEBUGNET_HOST
+override EXTRA_CFLAGS += -DUVDB_DEBUGNET_HOST=\"$(UVDB_DEBUGNET_HOST)\"
+override EXTRA_CFLAGS += -DUVDB_DEBUGNET_PORT=$(or $(UVDB_DEBUGNET_PORT),18194)
+endif
+
+ifeq ($(UVDB_DEBUGNET_LIFECYCLE_TEST),1)
+override EXTRA_CFLAGS += -DUVDB_DEBUGNET_LIFECYCLE_TEST
+endif
+
 ifeq ($(UVDB_KERNEL_THREAD_CONTROL),1)
 override CFLAGS += -DUVDB_KERNEL_THREAD_CONTROL -I $(VITADEBUG_KERNEL_DIR)/include
 EXTRA_LDFLAGS += $(VITADEBUG_KERNEL_BUILD_DIR)/vitadebug_stubs/libvitadebug_kernel_stub.a
@@ -38,7 +47,7 @@ psvDebugScreen.o: $(VITASDK)/share/gcc-arm-vita-eabi/samples/common/debugScreen.
 tests/thumb_step_returns.o: tests/thumb_step_returns.S
 	arm-vita-eabi-gcc $< $(CFLAGS) -c -o $@
 
-libuvdb.a: uvdb.o stdio_redirect.o
+libuvdb.a: uvdb.o uvdb_debugnet.o stdio_redirect.o
 	arm-vita-eabi-ar rcs $@ $^
 
 test.elf: psvDebugScreen.o test.o tests/thumb_step_returns.o libuvdb.a

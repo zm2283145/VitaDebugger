@@ -1,6 +1,6 @@
 # VitaDebugger
 
-VitaDebugger is an experimental, open-source remote debugging toolkit for
+VitaDebugger is an experimental remote debugging toolkit for
 PlayStation Vita homebrew. Its current component is an application-linked GDB
 server (`libuvdb.a`) that allows a matching GDB on a development computer to
 debug a program running on real Vita hardware over a local network.
@@ -77,6 +77,9 @@ The current application-side library has been tested on real Vita hardware with:
   breakpoint, four watchpoint, and two context-aware breakpoint comparators.
 - GDB loaded-module discovery through chunk-safe `qXfer:libraries:read`,
   hardware-tested with 14 executable and system modules.
+- Hardware-tested DebugNet-compatible UDP logging with bounded messages,
+  concurrent producers, stop/restart under load, and GDB attach/detach
+  coexistence.
 - A debugger-enabled Render96ex build as a larger real-world test.
 
 It is already useful for controlled application debugging. It is not yet a
@@ -96,6 +99,7 @@ hardware. These unedited Vita screenshots record the completed probe results:
 | v5 | [Saved register banks](docs/hardware/kernel-probe-v5-register-banks.jpg) | Session ownership checks and both raw ARM banks; bank 1 contains the saved user-mode PC, SP, CPSR, and general registers |
 | v6 | [Late-thread reconciliation](docs/hardware/kernel-probe-v6-late-thread-reconcile.jpg) | A thread created after stop begins is discovered on renewal, suspended, tracked, and resumed with the session |
 | v7 | [Hardware-debug discovery](docs/hardware/kernel-probe-v7-hw-debug-discovery.jpg) | Read-only CP14 identification and the Vita's six breakpoint, four watchpoint, and two context-aware comparator counts |
+| DebugNet v24 | [Sustained UDP stream](docs/hardware/debugnet-v24-sustained-stream.jpg) | Logging remains live after a loaded stop/restart cycle, with the displayed queue draining and no packet drops or send errors |
 
 Every displayed probe check passed. These images document controlled test
 coverage; they do not claim that arbitrary applications or every firmware and
@@ -164,20 +168,64 @@ A separate low-overhead profiler intended for optimized builds:
 Profiling remains separate from GDB because debugger stops and debug compiler
 settings distort real-time performance measurements.
 
-### DebugNet log streaming
+### DebugNet-compatible log streaming
 
-The toolkit will eventually integrate
-[psxdev/debugnet](https://github.com/psxdev/debugnet) as an optional transport
-for continuous logs and telemetry over the network. DebugNet and GDB complement
-one another:
+The library includes an optional UDP log transport wire-compatible with the
+simple text receivers commonly used with
+[psxdev/debugnet](https://github.com/psxdev/debugnet). The original project is
+used as a protocol and workflow reference; VitaDebugger's sender is a separate
+hardened implementation and is not API/ABI-compatible with `libdebugnet`.
+DebugNet-style logging and GDB complement one another:
 
 - GDB handles breakpoints, faults, registers, stacks, memory, and control.
 - DebugNet carries non-stopping logs, profiler events, frame timing, audio
   status, and other continuous diagnostics.
 
-The integration will be hardened for bounded messages, explicit initialization,
-disconnect handling, thread safety, and failure without crashing the host
-application. Applications will not be required to use DebugNet.
+Log calls enqueue bounded datagrams and never perform network I/O on the calling
+thread. A dedicated worker sleeps on a semaphore and owns the UDP socket. Its
+64-message queue is allocated only while logging is active; contention and
+overflow drop messages instead of blocking gameplay. Statistics expose current
+queue depth, datagrams accepted by the Vita network stack, dropped and truncated
+messages, failed sends, and the most recent send result. Initialization and
+bounded shutdown are explicit, invalid
+configuration fails cleanly, and applications are not required to enable logs.
+
+Networking must already be initialized. Start the stream after network startup:
+
+```c
+struct uvdb_debugnet_config logs = {
+    .server_ip = "10.1.1.10", /* development computer */
+    .port = 18194,
+    .level = UVDB_LOG_DEBUG,
+};
+
+if (uvdb_debugnet_start(&logs) == 0) {
+    uvdb_debugnet_printf(UVDB_LOG_INFO, "scene=%s frame=%u\n", scene, frame);
+}
+```
+
+`uvdb_debugnet_write()` and `uvdb_debugnet_printf()` return `0` when queued,
+`1` when filtered by the selected level, `2` when queued with truncation, and
+`-1` when logging is unavailable or the bounded queue is busy/full. Messages,
+including their level prefix, are limited to 1023 bytes. Query
+`uvdb_debugnet_get_stats()` for local loss and truncation; its `queued` field is
+the current queue depth rather than a cumulative total. Call
+`uvdb_debugnet_stop()` after joining application log producers during normal
+shutdown; `uvdb_shutdown()` also requests a bounded stop. Serialize start/stop
+calls from one application control thread, and do not call shutdown from an
+exception handler. UDP delivery is intentionally best-effort: a `sent` count
+means the Vita network stack accepted the datagram, not that the PC received it.
+
+Run the included cross-platform receiver on the development computer:
+
+```sh
+python tools/debugnet_listener.py --port 18194 --source 10.1.1.93
+```
+
+On Windows, allow inbound UDP port 18194 when prompted and use a Private network
+profile for the trusted LAN shared with the Vita. Keep any manual firewall rule
+limited to the selected UDP port and local subnet; never expose the receiver to
+the internet.
 
 ### Desktop and IDE tools
 
@@ -257,6 +305,20 @@ all-stop in the test build with:
 ```sh
 make package UVDB_KERNEL_THREAD_CONTROL=1
 ```
+
+To compile the hardware test with UDP logging enabled, supply the development
+computer's LAN address (not the Vita address):
+
+```sh
+make package UVDB_KERNEL_THREAD_CONTROL=1 \
+  UVDB_DEBUGNET_HOST=10.1.1.10 \
+  UVDB_DEBUGNET_PORT=18194
+```
+
+The repository's on-device stress package also passes
+`UVDB_DEBUGNET_LIFECYCLE_TEST=1`. That option deliberately floods the bounded
+queue from two producers and stops/restarts the sender while they are active;
+do not enable it in a normal application build.
 
 Application builds must add `-DUVDB_KERNEL_THREAD_CONTROL`, include
 `kernel/include`, and link the generated
@@ -424,7 +486,7 @@ if (uvdb_redirect_stdio() == 0) {
 ```
 
 This creates a helper thread and is suitable for light diagnostic output. Use
-the planned DebugNet integration for sustained log or profiler streaming.
+the DebugNet-compatible transport for sustained log or profiler streaming.
 
 ### Cooperative thread registration
 
@@ -544,7 +606,7 @@ remain installed. Preserve the matching unstripped ELF on the computer.
 2. Complete ARM and Thumb-2 control-flow decoding.
 3. Hardware breakpoints and watchpoints.
 4. Reusable VitaSDK and exported CMake packages.
-5. Hardened optional DebugNet log and telemetry streaming.
+5. Extend DebugNet-compatible transport with binary telemetry and profiler events.
 6. VS Code build, deployment, IntelliSense, and GDB configurations.
 7. A separate optimized profiler library and desktop trace viewer.
 8. Optional attachment to applications not compiled with the library.
@@ -555,7 +617,9 @@ remain installed. Preserve the matching unstripped ELF on the computer.
   exception handling.
 - `uvdb.h`: public application API.
 - `stdio_redirect.c`: optional newlib stdout/stderr forwarding.
+- `uvdb_debugnet.c`: bounded asynchronous UDP logs for DebugNet-style receivers.
 - `test.c`: Vita hardware test program.
+- `tools/debugnet_listener.py`: cross-platform development-computer log receiver.
 - `tests/`: focused instruction fixtures.
 - `kernel/`: narrow kernel companion, generated user stubs, and boundary probe.
 - `Makefile`: static library and test-package build.
@@ -564,5 +628,7 @@ remain installed. Preserve the matching unstripped ELF on the computer.
 
 VitaDebugger derives from
 [sleirsgoevy/vita-uvdb](https://github.com/sleirsgoevy/vita-uvdb). Kubridge and
-DebugNet are separate projects maintained by their respective authors. Consult
-this repository's license and each dependency's license before redistribution.
+DebugNet are separate projects maintained by their respective authors. A
+project-wide license has not been selected yet, so do not assume redistribution
+rights merely because the source is public. Review each dependency's license as
+well; maintainers should add an explicit project license before a formal release.

@@ -386,6 +386,7 @@ int uvdb_stop_server(void)
 
 void uvdb_shutdown(void)
 {
+    uvdb_debugnet_stop();
     uvdb_stop_server();
     uvdb_lock();
     breakpoint_remove_all();
