@@ -3,9 +3,14 @@
 #include <netinet/in.h>
 #include <unistd.h>
 #include <pthread.h>
+#include <stdint.h>
 #include <psp2/kernel/modulemgr.h>
 #include "debugScreen.h"
 #include "uvdb.h"
+
+#if defined(UVDB_GDB_VFP_FIXTURE) && !defined(UVDB_KERNEL_VFP_READS)
+#error "UVDB_GDB_VFP_FIXTURE requires UVDB_KERNEL_VFP_READS"
+#endif
 
 #ifndef UVDB_DEBUGNET_PORT
 #define UVDB_DEBUGNET_PORT 18194
@@ -14,6 +19,11 @@
 static volatile int test_value;
 volatile int trigger_fault;
 static volatile int worker_values[2];
+#ifdef UVDB_GDB_VFP_FIXTURE
+static volatile unsigned int gdb_vfp_fixture_ready;
+static volatile unsigned int gdb_vfp_fixture_release;
+static uint64_t gdb_vfp_fixture_pattern[32] __attribute__((aligned(8)));
+#endif
 #ifdef UVDB_DEBUGNET_LIFECYCLE_TEST
 static volatile int debugnet_stress;
 #endif
@@ -48,6 +58,61 @@ static void* worker_main(void* argument)
     uvdb_unregister_thread();
     return NULL;
 }
+
+#ifdef UVDB_GDB_VFP_FIXTURE
+/*
+ * Keep exact values live without making a function call after publishing
+ * readiness. This is intentionally a diagnostic-only busy loop: it gives the
+ * kernel all-stop path a foreign, registered thread whose saved VFP bank can
+ * be checked through GDB without relying on compiler-generated floating-point
+ * code. The function restores the ABI-preserved VFP registers and FPSCR if a
+ * future orderly test teardown releases it.
+ */
+__attribute__((naked, noinline))
+static void hold_gdb_vfp_fixture(
+    const uint64_t* pattern __attribute__((unused)),
+    volatile unsigned int* ready __attribute__((unused)),
+    volatile unsigned int* release __attribute__((unused)))
+{
+    __asm__ volatile(
+        ".syntax unified\n"
+        ".fpu neon\n"
+        "push {r4, lr}\n"
+        "vpush {d8-d15}\n"
+        "vmrs r4, fpscr\n"
+        "vldmia r0!, {d0-d15}\n"
+        "vldmia r0!, {d16-d31}\n"
+        "movw r3, #0\n"
+        "movt r3, #0x40\n"
+        "vmsr fpscr, r3\n"
+        "isb\n"
+        "dmb ish\n"
+        "movs r3, #1\n"
+        "str r3, [r1]\n"
+        "1:\n"
+        "ldr r3, [r2]\n"
+        "cmp r3, #0\n"
+        "beq 1b\n"
+        "vmsr fpscr, r4\n"
+        "vpop {d8-d15}\n"
+        "pop {r4, pc}\n");
+}
+
+static void* gdb_vfp_fixture_main(void* argument)
+{
+    (void)argument;
+    if(uvdb_register_thread("GDB VFP fixture") < 0)
+    {
+        __atomic_store_n(&gdb_vfp_fixture_ready, ~0u, __ATOMIC_SEQ_CST);
+        return NULL;
+    }
+    hold_gdb_vfp_fixture(gdb_vfp_fixture_pattern,
+                         &gdb_vfp_fixture_ready,
+                         &gdb_vfp_fixture_release);
+    uvdb_unregister_thread();
+    return NULL;
+}
+#endif
 
 __attribute__((noinline)) static int step_target(int value)
 {
@@ -109,6 +174,32 @@ int main(void)
     pthread_t workers[2];
     pthread_create(&workers[0], NULL, worker_main, (void*)0);
     pthread_create(&workers[1], NULL, worker_main, (void*)1);
+#ifdef UVDB_GDB_VFP_FIXTURE
+    for(unsigned int i = 0; i < 32; ++i)
+        gdb_vfp_fixture_pattern[i] = 0xD00D000000000000ULL |
+                                     ((uint64_t)i << 32) |
+                                     (uint64_t)(0xA5A50000u + i);
+    /* Finite endpoint values make exact GDB console checks unambiguous. */
+    gdb_vfp_fixture_pattern[0] = 0x3FF0000000000000ULL;  /* 1.0 */
+    gdb_vfp_fixture_pattern[31] = 0x4000000000000000ULL; /* 2.0 */
+    gdb_vfp_fixture_ready = 0;
+    gdb_vfp_fixture_release = 0;
+    pthread_t vfp_fixture;
+    int vfp_fixture_result = pthread_create(&vfp_fixture, NULL,
+                                             gdb_vfp_fixture_main, NULL);
+    for(int wait = 0; vfp_fixture_result == 0 &&
+                         __atomic_load_n(&gdb_vfp_fixture_ready,
+                                         __ATOMIC_SEQ_CST) == 0 &&
+                         wait < 2000; ++wait)
+        usleep(1000);
+    unsigned int vfp_fixture_state =
+        __atomic_load_n(&gdb_vfp_fixture_ready, __ATOMIC_SEQ_CST);
+    psvDebugScreenPrintf(
+        "GDB VFP fixture: %s (D0=1 D31=2 FPSCR=00400000)\n",
+        vfp_fixture_result == 0 && vfp_fixture_state == 1
+            ? "ready"
+            : "FAILED");
+#endif
     if(uvdb_start_server() < 0)
     {
         psvDebugScreenPrintf("Failed to start persistent debugger server.\n");

@@ -173,6 +173,11 @@ Those hooks can emit into this same ring without changing its core.
 
 ## Build and verify
 
+On Windows, run the Vita targets from an MSYS2 shell or put the MSYS2
+`mingw64\bin` and `usr\bin` directories plus the selected VitaSDK `bin`
+directory on `PATH`. Invoking `arm-vita-eabi-gcc.exe` by full path alone is not
+sufficient because its `cc1.exe` child must also load the MinGW runtime DLLs.
+
 From this directory on a normal VitaSDK shell:
 
 ```sh
@@ -205,3 +210,31 @@ build\host\test_vitaprofiler.exe
 The Vita adapter is intentionally excluded from the native executable because
 its public system calls exist only on Vita. The Vita cross-build is the compile
 gate for that file.
+
+## Vita user-mode self-test
+
+Build the separate diagnostic application with:
+
+```sh
+make vita-probe
+```
+
+The resulting `build/vita-probe/vitaprofiler-probe.vpk` is an ordinary
+user-mode application with title ID `VDPR00001`. It does not call or require
+the VitaDebugger kernel plugin. On real hardware it displays PASS/FAIL checks
+for timing zones, frame markers, counters, memory and current-thread snapshots,
+exact wire encoding, concurrent multi-producer pressure/drop accounting, and
+ring reuse. The result remains on screen for five minutes before the diagnostic
+exits normally.
+
+The first retail-hardware run passed all 11 checks, including four concurrent
+producers accepting the 64-slot capacity, accounting for all 448 excess events
+as drops, draining unique complete records, and reusing a drained slot. The app
+then exited normally after its five-minute result display. See the [unedited
+result screenshot](../docs/hardware/profiler-user-mode-probe-v1.jpg).
+
+The probe link reserves `__sce_headroom=0x1000`. This uses the VitaSDK linker
+script's supported SCE-metadata headroom mechanism and avoids a Windows
+`vita-elf-create` heap-corruption bug when an optimized read-only segment ends
+too close to the next 64 KiB boundary. It does not change the profiler library
+or require an unoptimized build.

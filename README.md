@@ -1,9 +1,10 @@
 # VitaDebugger
 
-VitaDebugger is an experimental remote debugging toolkit for
-PlayStation Vita homebrew. Its current component is an application-linked GDB
-server (`libuvdb.a`) that allows a matching GDB on a development computer to
-debug a program running on real Vita hardware over a local network.
+VitaDebugger is an experimental development toolkit for PlayStation Vita
+homebrew. The repository combines an application-linked GDB server
+(`libuvdb.a`), an optional narrow kernel companion, bounded network logging, a
+low-overhead profiler foundation, and the signed VitaDevDeploy remote
+installation helper.
 
 The project is based on
 [sleirsgoevy/vita-uvdb](https://github.com/sleirsgoevy/vita-uvdb) and is being
@@ -28,7 +29,8 @@ hardware and software developers can actually obtain:
 - Set breakpoints and inspect or change state while the program is running.
 - Stream logs and diagnostic events over the network.
 - Profile CPU time, frame pacing, memory use, and eventually GPU work.
-- Integrate those capabilities into normal VitaSDK projects and familiar IDEs.
+- Build, install, launch, debug, and profile from normal VitaSDK projects and
+  familiar IDEs with as little manual device interaction as practical.
 
 It is intended for legitimate homebrew development and debugging on systems the
 developer controls. It does not include or require Sony's proprietary SDK.
@@ -89,6 +91,15 @@ hardware. Its current status includes:
 - A debugger-enabled larger application build as a real-world integration test.
 - A standalone allocation-free profiler foundation for named zones, counters,
   frame markers, Vita memory snapshots, and known-thread statistics.
+- A hardware-tested user-mode Vita profiler self-test covering event order,
+  timing zones, counters, memory/thread snapshots, bounded multithreaded
+  pressure, wire encoding, exact drop accounting, and queue-slot reuse. All 11
+  on-device checks pass without calling the kernel plugin.
+- A bundled, separately licensed VitaDevDeploy subproject. Its signed normal
+  install-and-launch path has passed on retail hardware and its host-side
+  validation, signing, startup, transport, and recovery logic has 73 automated
+  tests. Interrupted-install fault injection and bootstrap recovery validation
+  are still in progress.
 
 It is already useful for controlled application debugging. It is not yet a
 complete system-wide debugger; see [Current limitations](#current-limitations).
@@ -109,6 +120,7 @@ hardware. These unedited Vita screenshots record the completed probe results:
 | v7 | [Hardware-debug discovery](docs/hardware/kernel-probe-v7-hw-debug-discovery.jpg) | Read-only CP14 identification and the Vita's six breakpoint, four watchpoint, and two context-aware comparator counts |
 | VFP v8 | [Corrected D32/FPSCR probe](docs/hardware/kernel-vfp-probe-v8-bank0-pass.jpg) | Guarded D0-D31 capture, raw FPSCR entry-0 mapping, ownership rejection, two-thread stop/resume, and clean worker restoration |
 | DebugNet v24 | [Sustained UDP stream](docs/hardware/debugnet-v24-sustained-stream.jpg) | Logging remains live after a loaded stop/restart cycle, with the displayed queue draining and no packet drops or send errors |
+| Profiler v1 | [User-mode profiler probe](docs/hardware/profiler-user-mode-probe-v1.jpg) | Eleven passing checks for live zones, frames, counters, memory/thread snapshots, wire encoding, four-producer pressure/drop accounting, uniqueness, and ring reuse without kernel calls |
 
 Every displayed probe check passed. These images document controlled test
 coverage; they do not claim that arbitrary applications or every firmware and
@@ -124,12 +136,10 @@ above is the subsequent all-pass gate.
 The intended final design is a hybrid toolkit:
 
 ```text
-GDB / IDE / profile viewer / log console
-                  |
-          local network transport
-                  |
-      application libraries and APIs
-                  |
+GDB / IDE / profile viewer / log console / build runner
+          | debug, logs, profiles       | signed deployment
+     application libraries          VitaDevDeploy agent
+          |
     optional narrow kernel companion
 ```
 
@@ -241,6 +251,21 @@ profile for the trusted LAN shared with the Vita. Keep any manual firewall rule
 limited to the selected UDP port and local subnet; never expose the receiver to
 the internet.
 
+### VitaDevDeploy
+
+The [`deploy/`](deploy/) subproject supplies a signed PC-to-Vita deployment
+path for the normal edit/build/test loop. Its host command validates a VPK,
+signs a one-use job, transfers it through Vita Companion, waits for a durable
+result from the user-mode Vita agent, and can launch the installed title. Only
+the public signing key is embedded in the agent; the private key remains on the
+development computer.
+
+VitaDevDeploy is currently an experimental, one-shot service intended for a
+trusted private LAN. It does not add another kernel plugin. It has its own
+[setup and recovery guide](deploy/README.md), [security boundary](deploy/SECURITY.md),
+[third-party notices](deploy/THIRD_PARTY.md), and GPL-3.0-only
+[license](deploy/LICENSE).
+
 ### Desktop and IDE tools
 
 The end goal also includes ready-to-use GDB and LLDB command files, VS Code
@@ -263,6 +288,11 @@ space.
 - GNU Make for the included build.
 - A Vita C or C++ homebrew project capable of linking a static library.
 - Local-network connectivity to the Vita.
+
+Remote deployment additionally requires Python 3.10 or newer, PowerShell,
+CMake, an Ed25519 implementation, Vita Companion 1.06, and one-time installation
+of the VitaDevDeploy agent. See [the deployment requirements](deploy/README.md#requirements)
+for the exact setup and safety boundary.
 
 All application objects, the debugger library, Kubridge imports, and other
 libraries must use compatible VitaSDK ABIs.
@@ -406,6 +436,13 @@ also verifies the exact kernel ABI and capability bit before negotiating the
 extended packet; a normal fail-closed plugin retains the legacy core-only
 contract.
 
+The repository test application can additionally compile a diagnostic-only
+registered worker with deterministic D0, D31, and FPSCR values. Add
+`UVDB_GDB_VFP_FIXTURE=1` to the command above and follow the
+[live GDB VFP validation gate](docs/gdb-vfp-validation.md). The flag is rejected
+unless the thread-control and VFP-read gates are also enabled. The fixture uses
+a call-free busy loop and must not be enabled in a production application.
+
 ### Offline protocol checks
 
 The ARM register serializer is platform-independent and has a native unit test.
@@ -419,6 +456,34 @@ cc -std=c11 -Wall -Wextra -Werror -I. \
 ./test-rsp
 python -m unittest discover -s tests/host -p "test_*.py" -v
 ```
+
+## Remote deployment
+
+After completing the one-time agent and signing-key setup in the
+[VitaDevDeploy guide](deploy/README.md), verify the host tools from the
+repository root:
+
+```powershell
+Set-Location .\deploy
+py -3 -m unittest discover -s tests -t . -p "test_*.py" -v
+py -3 -m host.vitadevdeploy --help
+```
+
+With the Vita awake at LiveArea and Vita Companion active, a normal signed
+install-and-launch operation is:
+
+```powershell
+py -3 -m host.vitadevdeploy deploy "C:\path\to\MyHomebrew.vpk" `
+  --vita 192.168.1.42 `
+  --private-key .\local\deploy_private.pem `
+  --action install_launch
+```
+
+Keep the private key under `deploy/local/` or another access-controlled path;
+never copy it to the Vita or commit it. VitaDevDeploy deliberately refuses to
+force-close a running application, so begin deployment from LiveArea. See the
+subproject guide for verification-only operation, dry runs, agent builds,
+bootstrap recovery, and failure handling.
 
 ## Makefile integration
 
@@ -699,6 +764,12 @@ exact matching unstripped ELF on the development computer.
   a name dictionary, binary network/file drain, desktop viewer, arbitrary
   thread PC/call-stack sampling, PMU ownership, or automatic VitaGL/SceGxm GPU
   instrumentation.
+- VitaDevDeploy currently depends on Vita Companion's unauthenticated FTP and
+  command transport. Signed one-use jobs protect the install decision, but do
+  not authenticate or encrypt Companion itself; use it only on a private LAN.
+- Deployment is serialized and one-shot, starts from LiveArea, does not provide
+  general target-app rollback, and still needs full bootstrap recovery and
+  interrupted-install fault-injection testing before it is production-ready.
 - Build-directory isolation, an exported CMake/VitaSDK package, CI and firmware
   compatibility matrices, and a project-wide license are not finished.
 - Long-running reconnect, shutdown, multithread, and fault stress testing is
@@ -725,10 +796,11 @@ exact matching unstripped ELF on the development computer.
 7. Add protocol authentication/pairing and peer allowlists, isolated feature
    build directories, exported VitaSDK/CMake packages, CI, a firmware matrix,
    and a project-wide license.
-8. Integrate VitaDevDeploy with VS Code build/deploy/stop, IntelliSense, GDB,
-   logs, and profiles; later replace the external Vita Companion dependency
-   with a versioned authenticated device service if its implementation audit
-   supports that design.
+8. Finish VitaDevDeploy bootstrap, interrupted-install, and recovery validation;
+   then integrate it with VS Code build/deploy/stop, IntelliSense, GDB, logs,
+   and profiles. Later replace the external Vita Companion dependency with a
+   versioned authenticated device service if its implementation audit supports
+   that design.
 9. Add optional attachment to applications not compiled with the library.
 10. As the final compatibility milestone after all debugger and profiler paths
     are confirmed, validate LLDB remote-protocol behavior and add a Debug
@@ -748,6 +820,8 @@ exact matching unstripped ELF on the development computer.
 - `tools/debugnet_listener.py`: cross-platform development-computer log receiver.
 - `profiler/`: standalone bounded user-mode profiler library, Vita adapter,
   native tests, and integration documentation.
+- `deploy/`: self-contained signed host/Vita remote deployment subproject,
+  including its agent, host CLI, tests, security documentation, and license.
 - `tests/`: focused instruction fixtures and offline protocol tests.
 - `kernel/`: narrow kernel companion, generated user stubs, the stable boundary
   probe, and a separate fail-closed VFP layout probe.
@@ -757,7 +831,10 @@ exact matching unstripped ELF on the development computer.
 
 VitaDebugger derives from
 [sleirsgoevy/vita-uvdb](https://github.com/sleirsgoevy/vita-uvdb). Kubridge and
-DebugNet are separate projects maintained by their respective authors. A
+DebugNet are separate projects maintained by their respective authors.
+`deploy/` is a self-contained GPL-3.0-only subproject governed by
+[`deploy/LICENSE`](deploy/LICENSE) and its third-party notices. That license
+does not select a license for files outside the deployment subproject. A
 project-wide license has not been selected yet, so do not assume redistribution
 rights merely because the source is public. Review each dependency's license as
 well; maintainers should add an explicit project license before a formal release.

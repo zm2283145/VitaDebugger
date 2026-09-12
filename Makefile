@@ -40,6 +40,13 @@ endif
 override CFLAGS += -DUVDB_KERNEL_VFP_READS
 endif
 
+ifeq ($(UVDB_GDB_VFP_FIXTURE),1)
+ifneq ($(UVDB_KERNEL_VFP_READS),1)
+$(error UVDB_GDB_VFP_FIXTURE=1 requires UVDB_KERNEL_VFP_READS=1)
+endif
+override EXTRA_CFLAGS += -DUVDB_GDB_VFP_FIXTURE
+endif
+
 override CFLAGS += -I $(KUBRIDGE_DIR) -Wall -Wextra -g
 
 %.o: %.c *.h
