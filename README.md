@@ -135,8 +135,10 @@ The first disposable disabled-comparator round-trip attempt on 2026-09-12
 [rebooted during its kernel critical section](docs/hardware/hw-disabled-probe-attempt-1.md).
 Its valid pre-probe journal proves entry but not the exact failing instruction or
 any comparator write. Because the earlier v7 DIDR read passed, the follow-up is
-a one-operation-at-a-time read-only ladder; enabled hardware debugging remains
-blocked.
+the separate, strictly sequential
+[staged read-only ladder](kernel/staged-readonly-probe/README.md); enabled
+hardware debugging remains blocked until those gates identify the first
+inaccessible register class.
 
 The preceding [FPSCR discovery run](docs/hardware/kernel-vfp-probe-v8-fpscr-bank-discovery.jpg)
 is retained separately because its one failed expectation established that the
@@ -887,7 +889,8 @@ exact matching unstripped ELF on the development computer.
   including its agent, host CLI, tests, security documentation, and license.
 - `tests/`: focused instruction fixtures and offline protocol tests.
 - `kernel/`: narrow kernel companion, generated user stubs, the stable boundary
-  probe, and a separate fail-closed VFP layout probe.
+  probe, the fail-closed VFP layout probe, and the disposable staged hardware-
+  register read ladder.
 - `Makefile`: static library and test-package build.
 
 ## Attribution
