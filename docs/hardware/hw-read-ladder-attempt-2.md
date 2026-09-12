@@ -113,3 +113,109 @@ deployment do not depend on this hardware path. A page-protection/data-abort
 watchpoint design is also a possible retail fallback, but it needs separate
 MMU ownership, access-decoding, page-contention, rearm, and recovery gates
 before it can be exposed through GDB.
+
+## KBL DIP-switch 228 lead
+
+After this run, the HENkaku KBL documentation was found to name global DIP
+switch `0xE4`/228 `SYSTEM_FLAG_ENABLE_HW_BREAKPOINTS`. It records use by SKBL,
+SceProcessmgr, and SceKernelThreadMgr, making this the strongest direct software
+lead for the observed boundary. VitaSDK exposes read, set, and clear operations
+for indexed DIP switches.
+
+The value is a bit index, not a KBL byte offset. It maps to mask `0x10` in
+`SceDipsw::system_control_flags`, which is at KBL offset `0x5C`. The separate
+unknown KBL field at offset `0xE4` is unrelated and must not be written.
+
+The bit's name and consumers are strong correlation, not proof that it directly
+raises `DBGSWENABLE`. The wiki documents cache-only behavior for user-facing
+setters on bits 0-63; it does not prove the hardware-side semantics of the
+kernel setter for bit 228. In either case, a normal kernel plugin runs only
+after SKBL may already have configured or denied an underlying debug device. A
+new process may also be required for ProcessMgr to allocate its breakpoint-
+related context. The staged read-only inventory, runtime
+set/readback/restore gate, possible bit-only boot-time test, and explicit stop
+conditions are documented in the
+[KBL DIP-switch 228 report](dipsw-228-hw-debug.md).
+
+The KBL fallback notes also say SKBL force-sets bit 228 for TEST/TOOL-class
+units under a particular early fallback condition. This supports a relationship
+between real devtool identity and the flag, but Enso_ex's public boot-manager
+spoof runs later during NSKBL. It cannot be assumed to replay that SKBL path.
+
+## Boot-time device-type spoof hypothesis
+
+After this run, the public Enso_ex and Miaki sources were reviewed to determine
+whether a retail-to-development-unit identity change is a supported way to raise
+`DBGSWENABLE`. This is a source audit only; no device-type change was made and
+the failed ladder was not retried.
+
+Enso_ex's `lv0-typespoof` payload is more than a display-name spoof. It defines
+retail (`0x0301`), DEX/testkit (`0x0201`), devtool (`0x0101`), and internal
+system-debugger/TEST (`0x0001`) device types. Its lv0 payload, invoked through
+the secure-monitor framework, copies keyslot `0x509`, substitutes the selected
+16-bit type, asks the keyring program to rewrite that slot, and then mirrors the
+type into both known kernel boot-argument copies. The example boot manager
+currently calls `set_type(TEST)`.
+See the
+[Enso_ex type-spoof source](https://github.com/SKGleba/enso_ex/tree/bfedbd877994dd414a0b89e4efb8110d3a40c10a/bootmgr/lv0-typespoof).
+
+Miaki takes a substantially more invasive route: it installs matching DevKit
+firmware and supplies separate early kernel modules that scan mapped memory for
+a product-code signature and overwrite an eight-byte record with a variant-
+specific constant. Its optional DevMode module hooks four software policy
+queries for development mode, screenshot
+permission, debug-menu display, and a Vita-TV identity check. No explicit
+`DBGSWENABLE`, CP14 debug-authentication, or comparator-control implementation
+was found in the reviewed revisions. Miaki also documents that several debug
+settings still crash on retail hardware and that Neighborhood remains
+unavailable because retail units lack required hardware. See the
+[Miaki source and limitations](https://github.com/cem-3000ve1/Miaki/tree/12ae9ff761ef14c7cd06c7fefc265de9e489b791).
+
+This leaves a plausible but unproven secondary branch: secure Sony firmware
+might drive the external per-core `DBGSWENABLE` input from the boot-time device
+type, in which case an Enso_ex identity change could change the result.
+DEVTOOL/devkit (`0x0101`) is the closest target for the first A/B test;
+DEX/testkit (`0x0201`) is retail-like hardware and is useful only as a secondary
+control. The signal
+might instead be fixed by a fuse or board signal, controlled by Syscon or
+another secure component, or latched before the type-spoof payload executes.
+The Enso_ex boot-manager timing means it is already too late to exercise SKBL's
+documented TEST/TOOL fallback, although it remains early enough to affect later
+ProcessMgr and ThreadMgr consumers. The reviewed source cannot distinguish the
+remaining cases. Miaki adds no demonstrated control for this signal and is not
+justified for this experiment.
+
+If this hypothesis is reached after the narrower bit-228 path, use a separate
+read-only diagnostic title and a fresh journal under an already-recoverable
+Enso_ex DEVTOOL boot. Repeat the
+known-good lifecycle/MIDR/DIDR/DSCRint baseline and then perform only the single
+DBGVCR read. A later DEX run may be used as a secondary control. Record the exact
+Enso_ex payload hash, selected device type, firmware, and core. Do not unlock the
+existing rung-6 journal, install Miaki, or proceed to comparator/MMIO access
+merely because the UI reports a development-unit type.
+The complete backup, test, and exact-restoration procedure is recorded in the
+[Enso_ex DEVTOOL A/B runbook](enso-ex-devtool-ab.md).
+
+## Register-probing safety boundary
+
+The observed CP14 failure was volatile on this run: the Vita rebooted and
+returned to LiveArea, with the ordinary risk of losing unsaved data. That does
+not guarantee the same recovery for another access and does not make arbitrary
+register probing safe. Unknown MMIO reads can acknowledge or clear device
+state, or stall on an unclocked bus. Unknown writes can reach clock, reset,
+power, storage, Syscon, security, OTP, or eFuse controls and can cause
+persistent corruption, an unrecoverable boot failure, electrical stress, or
+permanent damage. A power cycle is therefore not a guaranteed recovery
+strategy.
+
+`DBGSWENABLE` is an external Cortex-A9 input, not a writable bit in DBGVCR or
+another standard CP14 register. ARM ADIv5 defines an optional external MEM-AP
+`CSW.DbgSwEnable` field whose use is implementation-defined, but the reviewed
+Vita sources establish neither an accessible CoreSight DAP path nor a known
+CPU-side/on-device control. Any Vita path must be identified from a trusted
+implementation or static reverse-engineering evidence, then exercised as one
+exact read/modify/restore transaction with barriers and readback. Blind address
+scans, guessed MMIO writes, broad bit-flipping, and writes to persistent,
+security, or power domains are outside this project's hardware test boundary.
+See the
+[ARM Debug Interface ADIv5 specification](https://documentation-service.arm.com/static/622222b2e6f58973271ebc21).

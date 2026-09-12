@@ -32,6 +32,48 @@ static void write_unavailable(char** output, size_t byte_count)
     }
 }
 
+static int spans_overlap(const void* first, size_t first_size,
+                         const void* second, size_t second_size)
+{
+    if(!first_size || !second_size)
+        return 0;
+    uintptr_t first_address = (uintptr_t)first;
+    uintptr_t second_address = (uintptr_t)second;
+    if(first_address <= second_address)
+        return second_address - first_address < first_size;
+    return first_address - second_address < second_size;
+}
+
+int uvdb_rsp_encode_console_payload(
+    char* output,
+    size_t capacity,
+    const void* data,
+    size_t data_size,
+    size_t* output_size)
+{
+    if(!output_size)
+        return -1;
+    if(data_size > (SIZE_MAX - 1u) / 2u)
+    {
+        *output_size = SIZE_MAX;
+        return -1;
+    }
+
+    size_t required = 1u + data_size * 2u;
+    *output_size = required;
+    if(!output || (!data && data_size) || capacity < required)
+        return -1;
+    if(spans_overlap(output, required, data, data_size))
+        return -1;
+
+    const uint8_t* bytes = data;
+    char* cursor = output;
+    *cursor++ = 'O';
+    for(size_t i = 0; i < data_size; ++i)
+        write_byte(&cursor, bytes[i]);
+    return cursor == output + required ? 0 : -1;
+}
+
 int uvdb_rsp_encode_register_packet(
     char* output,
     size_t capacity,

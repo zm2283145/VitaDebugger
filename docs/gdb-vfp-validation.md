@@ -14,7 +14,7 @@ running.
 
 1. The fail-closed VFP kernel probe has passed every check on this Vita and
    firmware.
-2. The matching opt-in kernel companion is installed and advertises ABI v1.7
+2. The matching opt-in kernel companion is installed and advertises ABI v1.8
    plus `VD_KERNEL_CAP_THREAD_VFP_REGISTERS`.
 3. The Vita and development computer are on a trusted network. The current RSP
    listener is not authenticated.

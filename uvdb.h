@@ -59,7 +59,7 @@ int uvdb_debugnet_stop(void);
 
 // Register the calling thread so it is visible to GDB. Registration is
 // cooperative in the application-only library; complete thread suspension and
-// foreign-thread register access require the planned kernel companion.
+// foreign-thread register access require a matching opt-in kernel companion.
 int uvdb_register_thread(const char* name);
 int uvdb_unregister_thread(void);
 

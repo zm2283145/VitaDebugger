@@ -81,7 +81,7 @@ int main(void)
     int result = vdKernelGetStatus(&status);
     int status_valid = result >= 0 &&
                        status.abi_version == VD_KERNEL_ABI_VERSION;
-    report_check("kernel ABI v1.7", status_valid);
+    report_check("kernel ABI v1.8", status_valid);
     int vfp_supported = status_valid &&
         (status.capabilities & VD_KERNEL_CAP_THREAD_CONTROL) != 0 &&
         (status.capabilities & VD_KERNEL_CAP_THREAD_VFP_REGISTERS) != 0;

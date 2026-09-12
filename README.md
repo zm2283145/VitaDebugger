@@ -140,7 +140,17 @@ its lifecycle, MIDR, DIDR, and DSCRint gates before rebooting at the first
 `DBGVCR` read on core 1. This matches an ARM boundary for denied extended CP14
 debug access; the exact authentication, OS Lock, or debug-power cause is not yet
 identified. Comparator rungs were not run, and enabled hardware debugging
-remains blocked.
+remains blocked. A subsequent KBL source audit identified DIP switch 228
+(`SYSTEM_FLAG_ENABLE_HW_BREAKPOINTS`) as the strongest Vita-specific control
+lead. It is bit 4 (`0x10`) of the system-control word at KBL offset `0x5C`, not
+the unrelated KBL field at offset `0xE4`. The safe next rung is a read-only
+DIP-switch state inventory, followed only after review by a documented
+set/readback/exact-restore test that performs no CP14 access. The
+[bit-228 report](docs/hardware/dipsw-228-hw-debug.md) records the evidence,
+boot-versus-runtime timing uncertainty, and staged gates. DEVTOOL identity is
+now a secondary control rather than the first experiment. None of these leads
+is evidence that comparator access is safe, and the hardware report records why
+blind MMIO/register writes remain outside the project's safety boundary.
 
 The preceding [FPSCR discovery run](docs/hardware/kernel-vfp-probe-v8-fpscr-bank-discovery.jpg)
 is retained separately because its one failed expectation established that the
@@ -439,7 +449,7 @@ This produces `vitadebug.skprx` plus strong and weak user import libraries.
 The current companion provides ABI/capability queries, caller-process thread
 enumeration, lease-protected stop sessions, renewal-time reconciliation of new
 threads, and token-protected reads of both saved ARM register banks for a
-session-owned suspended thread. ABI v1.7 also reserves a read-only candidate
+session-owned suspended thread. ABI v1.8 also reserves a read-only candidate
 VFP snapshot call. A normal build compiles that undocumented path out, omits
 its capability bit, and returns `VD_KERNEL_ERROR_VFP_DISABLED` if called. Keep
 a known-good taiHEN configuration backup while testing kernel builds.
@@ -677,12 +687,14 @@ if (uvdb_redirect_stdio() == 0) {
 
 This current implementation creates a helper thread and sends light diagnostic
 output through GDB remote file I/O. It is an experimental compatibility path,
-not the final console transport. The planned debugger transport will capture
-both stdout and stderr into a bounded, thread-safe, nonblocking queue and emit
-GDB remote-console `O` packets. Queue depth, truncation, and drop counts will be
-observable; disconnect, target-stop, and shutdown paths must never leave an
-application writer blocked. DebugNet remains the independent path for sustained
-logs and profiler streaming, including periods when GDB is disconnected.
+not the final console transport. The fixed-memory queue, reconnect-generation
+gate, loss counters, and GDB `O`-payload encoder now exist and pass native host
+tests plus a VitaSDK cross-build, but they are not yet connected to this helper
+or the live RSP socket. The remaining single-owner transport, no-ack handshake,
+restorable nonblocking stdio capture, failure handling, and Vita validation are
+specified in the [bounded GDB console transport design](docs/gdb-console-transport.md).
+DebugNet remains the independent path for sustained logs and profiler
+streaming, including periods when GDB is disconnected.
 
 ### Cooperative thread registration
 
@@ -845,10 +857,10 @@ exact matching unstripped ELF on the development computer.
 3. Move blocking accept/RSP work outside the global spin lock; add nested-fault
    handling, previous-handler chaining, strict packet parsing, fake-kernel host
    tests, fuzzing, and long reconnect/shutdown/multithread hardware soaks.
-4. Replace the experimental remote-file-I/O stdio bridge with bounded stdout
-   and stderr capture delivered as GDB remote-console `O` packets. Add explicit
-   buffering, truncation/drop counters, thread-safety, reconnect behavior, and
-   tests proving that target output cannot block while the debugger is stopped.
+4. Integrate the host-tested bounded console queue and `O`-payload encoder with
+   a single-owner, no-ack RSP transport; replace the experimental remote-file-
+   I/O stdio bridge with restorable nonblocking capture, then prove stop,
+   reconnect, truncation/drop accounting, and shutdown behavior on Vita.
 5. Complete ARM and Thumb-2 control-flow decoding, then add `p`/`P` register
    access and independently validate any foreign-thread mutation/restoration.
 6. Keep hardware `Z1`-`Z4` fail-closed while researching offline whether Vita's
@@ -885,6 +897,8 @@ exact matching unstripped ELF on the development computer.
   exception handling.
 - `uvdb_rsp.c` / `uvdb_rsp.h`: host-testable ARM and VFP register-packet
   serialization.
+- `uvdb_console.c` / `uvdb_console.h`: internal fixed-memory, generation-scoped
+  GDB console queue; live transport integration remains gated.
 - `uvdb.h`: public application API.
 - `protocol/arm_vfp_target_xml.inc`: exact opt-in GDB D32 target description.
 - `stdio_redirect.c`: optional newlib stdout/stderr forwarding.

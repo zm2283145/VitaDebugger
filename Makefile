@@ -1,7 +1,7 @@
 all: libuvdb.a
 
 clean:
-	rm -f *.o tests/*.o *.a *.elf *.velf eboot.bin param.sfo *.vpk *.psp2dmp
+	rm -f *.o tests/*.o *.a *.elf *.velf eboot.bin param.sfo *.vpk *.psp2dmp test-rsp test-rsp.exe test-rsp-console test-rsp-console.exe test-console-queue test-console-queue.exe
 
 package: uvdb-test.vpk
 
@@ -63,8 +63,42 @@ psvDebugScreen.o: $(VITASDK)/share/gcc-arm-vita-eabi/samples/common/debugScreen.
 tests/thumb_step_returns.o: tests/thumb_step_returns.S
 	arm-vita-eabi-gcc $< $(CFLAGS) -c -o $@
 
-libuvdb.a: uvdb.o uvdb_rsp.o uvdb_debugnet.o stdio_redirect.o
+libuvdb.a: uvdb.o uvdb_rsp.o uvdb_console.o uvdb_debugnet.o stdio_redirect.o
 	arm-vita-eabi-ar rcs $@ $^
+
+HOST_CC ?= cc
+HOST_CFLAGS ?= -std=c11 -O2 -Wall -Wextra -Werror -I.
+ifeq ($(OS),Windows_NT)
+HOST_THREAD_FLAGS ?= -pthread -static
+HOST_EXEEXT ?= .exe
+HOST_CC_RUN ?= powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File tools/invoke-vita-env.ps1 $(HOST_CC)
+else
+HOST_THREAD_FLAGS ?= -pthread
+HOST_EXEEXT ?=
+HOST_CC_RUN ?= $(HOST_CC)
+endif
+
+.PHONY: host-tests host-test-rsp host-test-rsp-console host-test-console-queue
+
+host-tests: host-test-rsp host-test-rsp-console host-test-console-queue
+
+host-test-rsp: test-rsp$(HOST_EXEEXT)
+	./test-rsp$(HOST_EXEEXT)
+
+host-test-rsp-console: test-rsp-console$(HOST_EXEEXT)
+	./test-rsp-console$(HOST_EXEEXT)
+
+host-test-console-queue: test-console-queue$(HOST_EXEEXT)
+	./test-console-queue$(HOST_EXEEXT)
+
+test-rsp$(HOST_EXEEXT): uvdb_rsp.c uvdb_rsp.h tests/host/test_rsp_registers.c
+	$(HOST_CC_RUN) $(HOST_CFLAGS) uvdb_rsp.c tests/host/test_rsp_registers.c -o $@
+
+test-rsp-console$(HOST_EXEEXT): uvdb_rsp.c uvdb_rsp.h tests/host/test_rsp_console.c
+	$(HOST_CC_RUN) $(HOST_CFLAGS) uvdb_rsp.c tests/host/test_rsp_console.c -o $@
+
+test-console-queue$(HOST_EXEEXT): uvdb_console.c uvdb_console.h tests/host/test_console_queue.c
+	$(HOST_CC_RUN) $(HOST_CFLAGS) -DUVDB_CONSOLE_TESTING uvdb_console.c tests/host/test_console_queue.c $(HOST_THREAD_FLAGS) -o $@
 
 test.elf: psvDebugScreen.o test.o tests/thumb_step_returns.o libuvdb.a
 	arm-vita-eabi-gcc $^ $(LDFLAGS) $(EXTRA_LDFLAGS) -o $@

@@ -26,7 +26,7 @@ failure, cleanup, and restoration paths have passed on a retail Vita.
 | Thread enumeration, selection, names, and state | Cooperative and kernel-assisted discovery hardware tested | Unify bookkeeping and complete `Hc`/`vCont` and per-thread stepping |
 | Launch a target by path | Signed VitaDevDeploy can install and launch a build; arbitrary kernel-side attach/launch is not implemented | Finish deploy recovery tests, then add an IDE orchestration layer and optional unmodified-process attachment |
 | Clean detach and reuse | Persistent detach/reconnect and abrupt-client recovery hardware tested | Complete long-duration multithread/fault-injection soaks |
-| stdout to GDB console (`O` packets) | Required and on the roadmap; current file-I/O bridge is experimental | Bounded nonblocking stdout/stderr queue, observable drops/truncation, reconnect tests, and proof that target writers never wait on GDB |
+| stdout to GDB console (`O` packets) | Fixed-memory generation-scoped queue and `O`-payload encoder pass host tests and VitaSDK cross-build; current file-I/O bridge remains experimental and is not wired to them | Single-owner no-ack RSP integration, restorable nonblocking stdout/stderr capture, fake-socket/real-GDB reconnect tests, and proof that target writers never wait on GDB |
 | Debugger monitor commands | Not yet exposed through `qRcmd` | Add a read-only command registry beginning with `help`, `threads`, `modules`, and debugger status |
 | Framebuffer/display diagnostics | Information path not implemented | Add a read-only `monitor display` equivalent without exposing unrestricted kernel memory |
 | Cortex-A9 PMU counters | User-mode profiler foundation passes its first hardware probe; raw PMU ownership is not implemented | Inventory PMU state, define exclusive ownership/restoration, then add guarded cycle/event counters and profiler integration |
@@ -34,19 +34,31 @@ failure, cleanup, and restoration paths have passed on a retail Vita.
 
 ## Implementation order
 
-1. Prove disabled CP14 breakpoint/watchpoint register writes and exact restore in
-   the disposable, dynamically loaded one-shot probe.
-2. Prove one context-scoped hardware execution breakpoint and one data
-   watchpoint, including correct fault classification and stop replies.
-3. Integrate guarded `Z1`-`Z4` handling, lease expiry, detach, reconnect, and
-   all-core restoration without advertising support before acquisition passes.
+1. Complete the read-only VFP live-GDB lifecycle gate.
+2. Unify cooperative and kernel thread inventory with one stop-session state
+   model; complete honest `Hc`/`vCont` behavior and fail-closed lease cleanup.
+3. Harden RSP parsing and move blocking socket operations outside the global
+   debugger lock, with fake-transport tests and fuzzing.
 4. Add bounded stdout/stderr `O`-packet delivery and the read-only monitor
    command framework.
-5. Finish VFP live-GDB promotion, thread-state unification, and remaining step
-   decoding.
-6. Add PMU ownership and restore gates, then connect the counters to both
+5. Finish remaining ARM/Thumb software-step decoding and strict `p`/`P`
+   register access; expose foreign-thread writes only after independent
+   mutation and restoration validation.
+6. Keep CP14 and memory-mapped hardware-debug access disabled. The staged
+   ladder rebooted at its first DBGVCR read before any comparator access. First
+   inventory KBL DIP switch 228 read-only; only after review, validate its
+   documented runtime setter with an exact set/readback/restore rung that does
+   not touch CP14. A separately approved, journaled DBGVCR A/B may follow only
+   if that rung passes. If runtime timing is too late, statically trace the SKBL
+   consumer before considering a bit-only boot-time test. DEVTOOL identity is a
+   secondary control, not proof of access. Resume comparator restore/trap tests
+   only after a supported safe DSE/authentication path passes every earlier
+   gate. Develop page-protection/data-abort software watchpoints independently
+   behind their own safety gates.
+7. Complete ASLR-aware module symbol loading and relocated-breakpoint tests.
+8. Add PMU ownership and restore gates, then connect the counters to both
    `monitor perf` and `libvitaprofiler`.
-7. Complete IDE orchestration around build, signed deploy, launch, GDB, logs,
+9. Complete IDE orchestration around build, signed deploy, launch, GDB, logs,
    profiles, stop, and recovery.
 
 ## Important architectural differences
@@ -57,8 +69,9 @@ performs only operations that require kernel privilege. This keeps library-only
 debugging available across more setups and limits the amount of persistent
 kernel code.
 
-Hardware state is per CPU core. VitaDebugger therefore snapshots, programs,
-verifies, and restores each application core, scopes comparators to the target
-process context, refuses to coexist with unknown enabled comparators in the
-first implementation, and uses a short ownership lease. Those safeguards are
-part of the feature, not optional follow-up work.
+If a supported hardware-debug path is ever established, hardware state is per
+CPU core. VitaDebugger must therefore snapshot, program, verify, and restore
+each application core, scope comparators to the target process context, refuse
+to coexist with unknown enabled comparators in the first implementation, and
+use a short ownership lease. Those safeguards remain mandatory promotion gates;
+the current retail build does not acquire or advertise comparator access.

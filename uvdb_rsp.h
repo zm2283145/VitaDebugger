@@ -28,6 +28,21 @@ struct uvdb_rsp_vfp_registers {
     uint32_t fpscr;
 };
 
+/*
+ * Encode one GDB remote-console payload: the literal 'O' followed by two
+ * lowercase hexadecimal characters for every input byte.  The RSP '$...#cc'
+ * framing is intentionally left to the transport.  output_size is required
+ * and receives the required payload size even when capacity is insufficient.
+ * The output is not NUL terminated.  A NULL data pointer is valid only when
+ * data_size is zero.  Input and output spans must not overlap.
+ */
+int uvdb_rsp_encode_console_payload(
+    char* output,
+    size_t capacity,
+    const void* data,
+    size_t data_size,
+    size_t* output_size);
+
 // Encode GDB's ARM register packet in target-description register-number
 // order. The legacy ARM description includes unavailable FPA slots 16-24.
 // The explicit D32 description omits those undescribed slots from `g`, places
