@@ -8,3 +8,11 @@ eboot.bin
 param.sfo
 kernel/build/
 kernel/build-short/
+kernel/build-vfp/
+profiler/build/
+local/
+__pycache__/
+*.pyc
+*.exe
+/test-rsp
+/test-rsp.exe

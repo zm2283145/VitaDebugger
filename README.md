@@ -8,8 +8,8 @@ debug a program running on real Vita hardware over a local network.
 The project is based on
 [sleirsgoevy/vita-uvdb](https://github.com/sleirsgoevy/vita-uvdb) and is being
 hardened, documented, tested on hardware, and expanded into a general VitaSDK
-development tool. Render96ex is one of its integration and stress-test targets,
-but VitaDebugger is not a Render96-specific project.
+development tool. It is designed to be embedded in ordinary VitaSDK C or C++
+homebrew rather than tied to one game or engine.
 
 ## Why this project exists
 
@@ -35,7 +35,8 @@ developer controls. It does not include or require Sony's proprietary SDK.
 
 ## Current status
 
-The current application-side library has been tested on real Vita hardware with:
+The current application-side library has been tested extensively on real Vita
+hardware. Its current status includes:
 
 - GDB connections over TCP.
 - Source and function breakpoints.
@@ -75,12 +76,19 @@ The current application-side library has been tested on real Vita hardware with:
   initial snapshot are discovered and suspended by the next lease renewal.
 - Hardware-tested read-only ARM debug-resource discovery reporting six
   breakpoint, four watchpoint, and two context-aware breakpoint comparators.
+- A default-off, token-protected VFP snapshot boundary for suspended
+  session-owned threads, plus an opt-in D0-D31/FPSCR GDB packet path. The
+  known-pattern hardware gate now passes every D-register, FPSCR, ownership,
+  session-end, resume, and worker-restoration check. Live GDB validation is the
+  remaining promotion step.
 - GDB loaded-module discovery through chunk-safe `qXfer:libraries:read`,
   hardware-tested with 14 executable and system modules.
 - Hardware-tested DebugNet-compatible UDP logging with bounded messages,
   concurrent producers, stop/restart under load, and GDB attach/detach
   coexistence.
-- A debugger-enabled Render96ex build as a larger real-world test.
+- A debugger-enabled larger application build as a real-world integration test.
+- A standalone allocation-free profiler foundation for named zones, counters,
+  frame markers, Vita memory snapshots, and known-thread statistics.
 
 It is already useful for controlled application debugging. It is not yet a
 complete system-wide debugger; see [Current limitations](#current-limitations).
@@ -99,11 +107,17 @@ hardware. These unedited Vita screenshots record the completed probe results:
 | v5 | [Saved register banks](docs/hardware/kernel-probe-v5-register-banks.jpg) | Session ownership checks and both raw ARM banks; bank 1 contains the saved user-mode PC, SP, CPSR, and general registers |
 | v6 | [Late-thread reconciliation](docs/hardware/kernel-probe-v6-late-thread-reconcile.jpg) | A thread created after stop begins is discovered on renewal, suspended, tracked, and resumed with the session |
 | v7 | [Hardware-debug discovery](docs/hardware/kernel-probe-v7-hw-debug-discovery.jpg) | Read-only CP14 identification and the Vita's six breakpoint, four watchpoint, and two context-aware comparator counts |
+| VFP v8 | [Corrected D32/FPSCR probe](docs/hardware/kernel-vfp-probe-v8-bank0-pass.jpg) | Guarded D0-D31 capture, raw FPSCR entry-0 mapping, ownership rejection, two-thread stop/resume, and clean worker restoration |
 | DebugNet v24 | [Sustained UDP stream](docs/hardware/debugnet-v24-sustained-stream.jpg) | Logging remains live after a loaded stop/restart cycle, with the displayed queue draining and no packet drops or send errors |
 
 Every displayed probe check passed. These images document controlled test
 coverage; they do not claim that arbitrary applications or every firmware and
 plugin combination are already supported.
+
+The preceding [FPSCR discovery run](docs/hardware/kernel-vfp-probe-v8-fpscr-bank-discovery.jpg)
+is retained separately because its one failed expectation established that the
+saved worker FPSCR is in raw entry 0 rather than entry 1. The corrected v8 row
+above is the subsequent all-pass gate.
 
 ## End goals
 
@@ -229,9 +243,15 @@ the internet.
 
 ### Desktop and IDE tools
 
-The end goal also includes ready-to-use GDB command files, VS Code build/deploy/
-debug configurations, a live log console, a trace viewer, and documented APIs
-that other IDE extensions can consume.
+The end goal also includes ready-to-use GDB and LLDB command files, VS Code
+build/deploy/debug configurations, a Debug Adapter Protocol bridge, a live log
+console, a trace viewer, and documented APIs that other IDE extensions can
+consume. A later authenticated Vita service may consolidate the narrowly
+required file transfer, title launch/stop, screenshot, wake/no-sleep, debugger,
+log, and profiler operations that currently depend on separate tools. That
+service should keep privileged kernel operations isolated behind the small
+validated companion ABI rather than moving the whole toolchain into kernel
+space.
 
 ## Requirements
 
@@ -339,14 +359,66 @@ This produces `vitadebug.skprx` plus strong and weak user import libraries.
 The current companion provides ABI/capability queries, caller-process thread
 enumeration, lease-protected stop sessions, renewal-time reconciliation of new
 threads, and token-protected reads of both saved ARM register banks for a
-session-owned suspended thread. Keep a known-good taiHEN configuration backup
-while testing kernel builds.
+session-owned suspended thread. ABI v1.7 also reserves a read-only candidate
+VFP snapshot call. A normal build compiles that undocumented path out, omits
+its capability bit, and returns `VD_KERNEL_ERROR_VFP_DISABLED` if called. Keep
+a known-good taiHEN configuration backup while testing kernel builds.
 
-The same build produces `vitadebug-kernel-probe.vpk`. The probe checks the ABI,
-capability bits, main/worker thread visibility, invalid argument rejection, a
-normal tokenized stop/end sequence, and automatic watchdog resumption after an
-intentionally abandoned lease. Any failed boundary check is shown as a `FAIL`
-line on screen.
+The normal build produces `vitadebug-kernel-probe.vpk`. That stable probe
+checks the ABI, capability bits, main/worker thread visibility, invalid
+argument rejection, a normal tokenized stop/end sequence, and automatic
+watchdog resumption after an intentionally abandoned lease.
+
+The candidate VFP implementation must be built explicitly in a separate
+directory:
+
+```sh
+cmake -S kernel -B kernel/build-vfp -G "Unix Makefiles" \
+  -DVITADEBUG_EXPERIMENTAL_VFP_SNAPSHOT=ON
+cmake --build kernel/build-vfp
+```
+
+This build advertises the VFP capability and uses an aligned global scratch
+area with prefix canaries and a full page of trailing canaries. Any changed
+canary rejects the snapshot rather than copying it to user mode. It also emits
+the separate `vitadebug-vfp-probe.vpk` (`VDCP00002`), which loads distinct bit
+patterns into D0-D31 on a disposable worker, changes only that worker's FPSCR,
+captures it while session-owned and suspended, and checks every value before
+restoring the worker state. Keeping this gate separate leaves the stable stop,
+lease, and watchdog probe unchanged. Any failed boundary check is shown as a
+`FAIL` line on screen. Do not enable GDB VFP reads until this probe passes on
+the target firmware. See
+[VFP register layout validation gate](docs/vfp-layout-gate.md) for the evidence
+boundary, protections, and promotion checklist.
+
+After the separate VFP hardware probe passes, the experimental application
+build is:
+
+```sh
+make UVDB_KERNEL_THREAD_CONTROL=1 UVDB_KERNEL_VFP_READS=1 \
+  VITADEBUG_KERNEL_DIR=kernel \
+  VITADEBUG_KERNEL_BUILD_DIR=kernel/build-vfp
+```
+
+This feature is read-only. Full `G` register writes are rejected in that build
+so GDB cannot silently claim that it changed VFP state. At each stop, the stub
+also verifies the exact kernel ABI and capability bit before negotiating the
+extended packet; a normal fail-closed plugin retains the legacy core-only
+contract.
+
+### Offline protocol checks
+
+The ARM register serializer is platform-independent and has a native unit test.
+The target-description test parses the exact XML bytes embedded in the stub and
+checks both the legacy core-register gap and the explicit D0-D31/FPSCR
+656-character packet contract:
+
+```sh
+cc -std=c11 -Wall -Wextra -Werror -I. \
+  uvdb_rsp.c tests/host/test_rsp_registers.c -o test-rsp
+./test-rsp
+python -m unittest discover -s tests/host -p "test_*.py" -v
+```
 
 ## Makefile integration
 
@@ -448,8 +520,11 @@ stub use lease-protected process all-stop. A dedicated exempt keeper renews the
 lease while GDB is stopped; continue, detach, shutdown, and I/O failure end the
 session, while the kernel watchdog recovers an abandoned client. Experimental
 builds can also return the validated user-mode register bank for a selected
-suspended thread; register writes and VFP-register packet mapping remain
-disabled.
+suspended thread. A VFP D32 target description and packet serializer are
+available only with `UVDB_KERNEL_VFP_READS=1`; leave that flag off until the
+separate known-pattern probe passes on the target firmware, and continue to
+treat it as experimental until the live GDB lifecycle gate passes. Foreign
+register writes remain disabled.
 Later calls while connected act as intentional software breakpoints. Calling it
 before graphics initialization normally leaves a black screen while waiting;
 this is expected.
@@ -505,8 +580,10 @@ The implementation supports GDB thread listing, names, liveness checks,
 selection, and identification of the thread that entered the exception
 handler. Kernel-integrated builds suspend the other process threads coherently
 and can report a selected suspended thread's saved general registers, PC, SP,
-LR, and CPSR. VFP registers remain unavailable and foreign register writes are
-rejected.
+LR, and CPSR. The new kernel boundary can capture a selected thread's candidate
+D0-D31 state and both raw saved FPSCR bank values without changing them. GDB
+exposure remains compile-time opt-in pending the live GDB lifecycle gate;
+foreign register writes are rejected.
 
 ## Connecting with GDB
 
@@ -563,19 +640,16 @@ register, memory, or control flow usually triggers the same fault again.
 Applications installing their own exception handlers may conflict with the
 stub and must deliberately preserve and chain handlers.
 
-## Render96ex integration example
+## Project integration example
 
-Render96ex is a test consumer, not a dependency. Its current local build option
-uses this pattern:
-
-```sh
-make VERSION=us TARGET_VITA=1 VITA_DEBUGGER=1 \
-  VITA_UVDB_DIR=../VitaDebugger \
-  VITA_KUBRIDGE_DIR=../kubridge
-```
-
-Use a distinct Vita title ID for diagnostic packages so the optimized game can
-remain installed. Preserve the matching unstripped ELF on the computer.
+The [Makefile integration](#makefile-integration), [temporary CMake
+integration](#temporary-cmake-integration), and [application
+integration](#application-integration) examples above are intentionally
+project-neutral. Build the debugger archive with the same VitaSDK ABI as the
+application, link it after the application's objects, initialize networking,
+then call `uvdb_enter()` or `uvdb_start_server()`. Use a distinct diagnostic
+title ID when retaining an optimized build beside the debug build, and keep the
+exact matching unstripped ELF on the development computer.
 
 ## Current limitations
 
@@ -583,10 +657,27 @@ remain installed. Preserve the matching unstripped ELF on the computer.
   to an arbitrary unmodified process.
 - Kernel all-stop is opt-in and requires the matching `vitadebug.skprx` ABI;
   library-only builds continue to provide application-side stopping.
-- A newly created thread is folded into all-stop at the next lease renewal, so
-  there can be a brief interval before it is suspended.
-- Foreign-thread register writes and VFP context mapping are not implemented;
-  foreign-thread general-register reads are hardware tested.
+- Thread discovery is not yet one coherent source of truth. The application
+  registry is bounded to 32 cooperative entries while the kernel boundary can
+  enumerate 64 threads; stale registrations and the debugger's own helper
+  threads still need stricter filtering. A newly created thread is folded into
+  all-stop only at the next lease renewal, leaving a brief interval before it
+  is suspended.
+- GDB's continue-thread selection is recorded, but per-thread stepping and the
+  full `Hc`/`vCont` state model are not complete. Stop-session creation or lease
+  renewal failure also needs to abort the client session consistently rather
+  than allowing partially stopped debugging to continue.
+- The initial accept path and exception/RSP path still hold a global spin lock
+  across blocking work. Shutdown, registration, nested faults, and handler
+  chaining need a bounded state-machine refactor before this is suitable for
+  hostile or failure-prone applications.
+- RSP parsing is intended only for a trusted debugger today. Memory and full-
+  register write packets still need strict length, syntax, overflow, page-
+  boundary, and breakpoint-overlap validation plus parser fuzzing.
+- Foreign-thread register writes are not implemented. Foreign-thread general
+  register reads are hardware tested; the guarded VFP snapshot passed its
+  separate known-pattern hardware gate, but the opt-in GDB mapping still needs
+  a live foreign-thread D0/D31/FPSCR read and lifecycle test before promotion.
 - Hardware breakpoints and watchpoints are not implemented.
 - Software stepping does not decode every instruction capable of writing PC.
   Important remaining cases are concentrated in shifted PC-writing data-
@@ -596,32 +687,70 @@ remain installed. Preserve the matching unstripped ELF on the computer.
   requires matching unstripped module files and a configured solib search path.
 - Remote syscall catching is not implemented.
 - Kernel plugins cannot be debugged with the current application-side stub.
-- The network protocol has no authentication or encryption.
+- Disconnect and error cleanup needs broader fault injection to prove bounded
+  socket shutdown, removal of every software breakpoint, all-stop release, and
+  recovery from a client or lease-keeper failure.
+- The debugger and Vita Companion transports have no authentication or
+  encryption. DebugNet uses best-effort UDP. Use the tools only on a private,
+  trusted LAN; pairing, peer allowlists, and a secured control plane remain
+  release blockers.
+- `libvitaprofiler` currently records explicit zones, counters, frame markers,
+  memory snapshots, and supplied known-thread statistics. It does not yet have
+  a name dictionary, binary network/file drain, desktop viewer, arbitrary
+  thread PC/call-stack sampling, PMU ownership, or automatic VitaGL/SceGxm GPU
+  instrumentation.
+- Build-directory isolation, an exported CMake/VitaSDK package, CI and firmware
+  compatibility matrices, and a project-wide license are not finished.
 - Long-running reconnect, shutdown, multithread, and fault stress testing is
   still in progress.
 
 ## Roadmap
 
-1. Validate foreign-thread VFP context mapping without enabling writes.
-2. Complete ARM and Thumb-2 control-flow decoding.
-3. Hardware breakpoints and watchpoints.
-4. Reusable VitaSDK and exported CMake packages.
-5. Extend DebugNet-compatible transport with binary telemetry and profiler events.
-6. VS Code build, deployment, IntelliSense, and GDB configurations.
-7. A separate optimized profiler library and desktop trace viewer.
-8. Optional attachment to applications not compiled with the library.
+1. Hardware-test opt-in GDB D0/D31/FPSCR reads on a foreign stopped thread,
+   including continue, detach, reconnect, and watchdog recovery, then promote
+   the read-only mapping from experimental status.
+2. Replace the split cooperative/kernel thread bookkeeping with a coherent
+   stop-state machine, complete `Hc`/`vCont` selection, and make stop or lease
+   failure fail closed with bounded resume and disconnect cleanup.
+3. Move blocking accept/RSP work outside the global spin lock; add nested-fault
+   handling, previous-handler chaining, strict packet parsing, fake-kernel host
+   tests, fuzzing, and long reconnect/shutdown/multithread hardware soaks.
+4. Complete ARM and Thumb-2 control-flow decoding, then add `p`/`P` register
+   access and independently validate any foreign-thread mutation/restoration.
+5. Add hardware breakpoints and watchpoints through separate guarded kernel
+   probes before exposing them to GDB.
+6. Extend the profiler foundation with a name dictionary, binary drain/receiver,
+   desktop trace viewer, and host-application instrumentation; evaluate narrow
+   kernel PC/PMU sampling and explicit VitaGL/SceGxm hooks separately.
+7. Add protocol authentication/pairing and peer allowlists, isolated feature
+   build directories, exported VitaSDK/CMake packages, CI, a firmware matrix,
+   and a project-wide license.
+8. Integrate VitaDevDeploy with VS Code build/deploy/stop, IntelliSense, GDB,
+   logs, and profiles; later replace the external Vita Companion dependency
+   with a versioned authenticated device service if its implementation audit
+   supports that design.
+9. Add optional attachment to applications not compiled with the library.
+10. As the final compatibility milestone after all debugger and profiler paths
+    are confirmed, validate LLDB remote-protocol behavior and add a Debug
+    Adapter Protocol bridge for IDEs without regressing GDB.
 
 ## Repository layout
 
 - `uvdb.c`: protocol server, safe memory access, breakpoints, stepping, and
   exception handling.
+- `uvdb_rsp.c` / `uvdb_rsp.h`: host-testable ARM and VFP register-packet
+  serialization.
 - `uvdb.h`: public application API.
+- `protocol/arm_vfp_target_xml.inc`: exact opt-in GDB D32 target description.
 - `stdio_redirect.c`: optional newlib stdout/stderr forwarding.
 - `uvdb_debugnet.c`: bounded asynchronous UDP logs for DebugNet-style receivers.
 - `test.c`: Vita hardware test program.
 - `tools/debugnet_listener.py`: cross-platform development-computer log receiver.
-- `tests/`: focused instruction fixtures.
-- `kernel/`: narrow kernel companion, generated user stubs, and boundary probe.
+- `profiler/`: standalone bounded user-mode profiler library, Vita adapter,
+  native tests, and integration documentation.
+- `tests/`: focused instruction fixtures and offline protocol tests.
+- `kernel/`: narrow kernel companion, generated user stubs, the stable boundary
+  probe, and a separate fail-closed VFP layout probe.
 - `Makefile`: static library and test-package build.
 
 ## Attribution
@@ -632,3 +761,7 @@ DebugNet are separate projects maintained by their respective authors. A
 project-wide license has not been selected yet, so do not assume redistribution
 rights merely because the source is public. Review each dependency's license as
 well; maintainers should add an explicit project license before a formal release.
+The VFP work used VitaSDK's public header/NID declarations and a pinned review of
+`cerwym/kvdb` commit `88742b760afa18cd11e251160d4c3b85357c30f1` only as a
+research pointer to the undocumented kernel call. No KVDB source was copied;
+its root repository does not currently contain an explicit `LICENSE` file.

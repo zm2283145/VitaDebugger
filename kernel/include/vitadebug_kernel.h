@@ -6,8 +6,12 @@
 extern "C" {
 #endif
 
-#define VD_KERNEL_ABI_VERSION 0x00010006u
+#define VD_KERNEL_ABI_VERSION 0x00010007u
 #define VD_KERNEL_MAX_THREADS 64
+#define VD_KERNEL_VFP_D_REGISTER_COUNT 32
+#define VD_KERNEL_VFP_LAYOUT_D32_V1 1u
+#define VD_KERNEL_VFP_FPSCR_ENTRY_D32_V1 0u
+#define VD_KERNEL_ERROR_VFP_DISABLED (-8)
 
 enum vd_kernel_capability {
     VD_KERNEL_CAP_THREAD_LIST = 1u << 0,
@@ -15,6 +19,7 @@ enum vd_kernel_capability {
     VD_KERNEL_CAP_THREAD_REGISTERS = 1u << 2,
     VD_KERNEL_CAP_STOP_RECONCILE = 1u << 3,
     VD_KERNEL_CAP_HW_DEBUG_DISCOVERY = 1u << 4,
+    VD_KERNEL_CAP_THREAD_VFP_REGISTERS = 1u << 5,
     VD_KERNEL_CAP_PROBE_SUSPEND = 1u << 31,
 };
 
@@ -30,6 +35,20 @@ struct vd_arm_registers {
 struct vd_thread_registers {
     struct vd_arm_registers entry[2];
 };
+
+// Experimental read-only VFP snapshot. A known-pattern hardware probe
+// validated the D0-D31 ordering and established that the D32 v1 FPSCR value is
+// in raw CPU-register entry 0, even though saved user-mode ARM core state is in
+// entry 1. Both raw FPSCR entries remain available as validation evidence.
+struct vd_thread_vfp_registers {
+    unsigned int layout_version;
+    unsigned int d_register_count;
+    uint64_t d[VD_KERNEL_VFP_D_REGISTER_COUNT];
+    unsigned int fpscr_entry[2];
+};
+
+typedef char vd_thread_vfp_registers_size_must_be_272[
+    sizeof(struct vd_thread_vfp_registers) == 272 ? 1 : -1];
 
 struct vd_kernel_stop_result {
     unsigned int token;
@@ -101,6 +120,17 @@ int vdKernelEndStop(unsigned int token, int* resumed_count);
 // until validated across Vita firmware and exception states.
 int vdKernelGetThreadRegisters(unsigned int token, SceUID target_user_thread,
                                struct vd_thread_registers* registers);
+
+// Capture a read-only VFP candidate layout for a thread suspended and owned by
+// the caller's active stop session. The session token and target ownership are
+// checked exactly as for vdKernelGetThreadRegisters. This call never writes
+// target state. A normal kernel build returns VD_KERNEL_ERROR_VFP_DISABLED;
+// the candidate implementation and capability bit exist only in an explicit
+// VITADEBUG_EXPERIMENTAL_VFP_SNAPSHOT build until hardware validation passes.
+int vdKernelGetThreadVfpRegisters(
+    unsigned int token,
+    SceUID target_user_thread,
+    struct vd_thread_vfp_registers* registers);
 
 #ifdef __cplusplus
 }

@@ -10,6 +10,22 @@
 #define VD_SUSPEND_STATUS 0x1002
 #define VD_MIN_LEASE_MS 250u
 #define VD_MAX_LEASE_MS 5000u
+#ifdef VD_KERNEL_ENABLE_EXPERIMENTAL_VFP_SNAPSHOT
+#define VD_VFP_PREFIX_GUARD_WORDS 64
+#define VD_VFP_SUFFIX_GUARD_WORDS 1024
+#define VD_VFP_GUARD_VALUE 0x56465047u
+
+struct vd_vfp_scratch {
+    unsigned int prefix_guard[VD_VFP_PREFIX_GUARD_WORDS];
+    uint64_t d[VD_KERNEL_VFP_D_REGISTER_COUNT];
+    unsigned int suffix_guard[VD_VFP_SUFFIX_GUARD_WORDS];
+};
+
+// The undocumented callee's output size is not declared by VitaSDK. Keep the
+// candidate buffer out of the small syscall stack and surround D0-D31 with a
+// full page of trailing canaries. The session lock serializes all access.
+static struct vd_vfp_scratch vfp_scratch __attribute__((aligned(64)));
+#endif
 
 struct vd_stop_session {
     SceUID pid;
@@ -140,6 +156,9 @@ int vdKernelGetStatus(struct vd_kernel_status* status)
                         VD_KERNEL_CAP_THREAD_REGISTERS |
                         VD_KERNEL_CAP_STOP_RECONCILE |
                         VD_KERNEL_CAP_HW_DEBUG_DISCOVERY |
+#ifdef VD_KERNEL_ENABLE_EXPERIMENTAL_VFP_SNAPSHOT
+                        VD_KERNEL_CAP_THREAD_VFP_REGISTERS |
+#endif
                         VD_KERNEL_CAP_PROBE_SUSPEND,
         .max_threads = VD_KERNEL_MAX_THREADS,
         .reserved = 0,
@@ -499,6 +518,20 @@ int vdKernelEndStop(unsigned int token, int* resumed_count)
     return result;
 }
 
+static SceUID find_session_thread_locked(SceUID target_user_thread)
+{
+    if(target_user_thread < 0)
+        return -1;
+    for(int i = 0; i < stop_session.suspended_count; ++i)
+    {
+        SceUID candidate = stop_session.suspended[i];
+        SceUID candidate_user = ksceKernelGetUserThreadId(candidate);
+        if(candidate_user >= 0 && candidate_user == target_user_thread)
+            return candidate;
+    }
+    return -1;
+}
+
 int vdKernelGetThreadRegisters(unsigned int token, SceUID target_user_thread,
                                struct vd_thread_registers* registers)
 {
@@ -516,16 +549,7 @@ int vdKernelGetThreadRegisters(unsigned int token, SceUID target_user_thread,
     if(stop_session.active && stop_session.pid == caller_pid &&
        stop_session.token == token)
     {
-        SceUID target_guid = -1;
-        for(int i = 0; i < stop_session.suspended_count; ++i)
-        {
-            SceUID candidate = stop_session.suspended[i];
-            if(ksceKernelGetUserThreadId(candidate) == target_user_thread)
-            {
-                target_guid = candidate;
-                break;
-            }
-        }
+        SceUID target_guid = find_session_thread_locked(target_user_thread);
         if(target_guid >= 0)
         {
             SceThreadCpuRegisters kernel_registers;
@@ -544,4 +568,93 @@ int vdKernelGetThreadRegisters(unsigned int token, SceUID target_user_thread,
     unlock_sessions();
     EXIT_SYSCALL(syscall_state);
     return result;
+}
+
+int vdKernelGetThreadVfpRegisters(
+    unsigned int token,
+    SceUID target_user_thread,
+    struct vd_thread_vfp_registers* registers)
+{
+    uint32_t syscall_state;
+    ENTER_SYSCALL(syscall_state);
+    if(!token || !registers)
+    {
+        EXIT_SYSCALL(syscall_state);
+        return -1;
+    }
+
+#ifndef VD_KERNEL_ENABLE_EXPERIMENTAL_VFP_SNAPSHOT
+    (void)target_user_thread;
+    EXIT_SYSCALL(syscall_state);
+    return VD_KERNEL_ERROR_VFP_DISABLED;
+#else
+
+    int result = -5;
+    SceUID caller_pid = ksceKernelGetProcessId();
+    lock_sessions();
+    if(stop_session.active && stop_session.pid == caller_pid &&
+       stop_session.token == token)
+    {
+        SceUID target_guid = find_session_thread_locked(target_user_thread);
+        if(target_guid >= 0)
+        {
+            // VitaSDK intentionally leaves this API's output type undocumented.
+            // Keep guards on both sides so a layout other than D0-D31 is
+            // detected and rejected without exposing unknown bytes to user mode.
+            for(int i = 0; i < VD_VFP_PREFIX_GUARD_WORDS; ++i)
+                vfp_scratch.prefix_guard[i] = VD_VFP_GUARD_VALUE;
+            for(int i = 0; i < VD_KERNEL_VFP_D_REGISTER_COUNT; ++i)
+                vfp_scratch.d[i] = 0;
+            for(int i = 0; i < VD_VFP_SUFFIX_GUARD_WORDS; ++i)
+                vfp_scratch.suffix_guard[i] = VD_VFP_GUARD_VALUE;
+
+            result = ksceKernelGetVfpRegisterForDebugger(target_guid,
+                                                          vfp_scratch.d);
+            if(result >= 0)
+            {
+                for(int i = 0; i < VD_VFP_PREFIX_GUARD_WORDS; ++i)
+                    if(vfp_scratch.prefix_guard[i] != VD_VFP_GUARD_VALUE)
+                    {
+                        result = -7;
+                        break;
+                    }
+            }
+            if(result >= 0)
+                for(int i = 0; i < VD_VFP_SUFFIX_GUARD_WORDS; ++i)
+                    if(vfp_scratch.suffix_guard[i] != VD_VFP_GUARD_VALUE)
+                    {
+                        result = -7;
+                        break;
+                    }
+
+            SceThreadCpuRegisters cpu_registers;
+            if(result >= 0)
+                result = ksceKernelGetThreadCpuRegisters(target_guid,
+                                                          &cpu_registers);
+            if(result >= 0)
+            {
+                struct vd_thread_vfp_registers kernel_registers;
+                kernel_registers.layout_version =
+                    VD_KERNEL_VFP_LAYOUT_D32_V1;
+                kernel_registers.d_register_count =
+                    VD_KERNEL_VFP_D_REGISTER_COUNT;
+                for(int i = 0; i < VD_KERNEL_VFP_D_REGISTER_COUNT; ++i)
+                    kernel_registers.d[i] = vfp_scratch.d[i];
+                for(int i = 0; i < 2; ++i)
+                    kernel_registers.fpscr_entry[i] =
+                        cpu_registers.entry[i].fpscr;
+                result = ksceKernelMemcpyKernelToUser(registers,
+                                                       &kernel_registers,
+                                                       sizeof(kernel_registers));
+            }
+        }
+        else
+        {
+            result = -3;
+        }
+    }
+    unlock_sessions();
+    EXIT_SYSCALL(syscall_state);
+    return result;
+#endif
 }

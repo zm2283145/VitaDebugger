@@ -18,3 +18,4 @@ vitadebug_kernel:
         - vdKernelEndStop: 0x76A3D006
         - vdKernelGetThreadRegisters: 0x76A3D007
         - vdKernelGetHardwareDebugInfo: 0x76A3D008
+        - vdKernelGetThreadVfpRegisters: 0x76A3D009

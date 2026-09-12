@@ -11,13 +11,23 @@ endif()
 project(vitadebug_kernel C)
 include("${VITASDK}/share/vita.cmake" REQUIRED)
 
+option(VITADEBUG_EXPERIMENTAL_VFP_SNAPSHOT
+  "Compile the unverified ksceKernelGetVfpRegisterForDebugger layout probe"
+  OFF
+)
+
 add_executable(vitadebug_kernel
   src/main.c
 )
 
 target_compile_options(vitadebug_kernel PRIVATE
-  -Wall -Wextra -Werror -O2 -fno-optimize-sibling-calls
+  -Wall -Wextra -Werror -O2 -ffreestanding -fno-optimize-sibling-calls
 )
+if(VITADEBUG_EXPERIMENTAL_VFP_SNAPSHOT)
+  target_compile_definitions(vitadebug_kernel PRIVATE
+    VD_KERNEL_ENABLE_EXPERIMENTAL_VFP_SNAPSHOT=1
+  )
+endif()
 target_link_options(vitadebug_kernel PRIVATE -Wl,-q -nostdlib)
 
 target_include_directories(vitadebug_kernel PRIVATE
@@ -63,6 +73,34 @@ vita_create_vpk(vitadebug-kernel-probe.vpk "VDCP00001"
   VERSION "01.00"
   NAME "VitaDebugger kernel probe"
 )
+
+if(VITADEBUG_EXPERIMENTAL_VFP_SNAPSHOT)
+  # Keep the undocumented VFP layout check in a separate, disposable probe.
+  # Besides making the risk explicit, this keeps the stable boundary/watchdog
+  # probe usable if a toolchain cannot package the VFP test instructions.
+  add_executable(vitadebug_vfp_probe
+    test/vfp_probe.c
+    ${VITASDK}/share/gcc-arm-vita-eabi/samples/common/debugScreen.c
+  )
+  target_compile_options(vitadebug_vfp_probe PRIVATE
+    -Wall -Wextra -Werror -O2
+  )
+  add_dependencies(vitadebug_vfp_probe vitadebug_stubs)
+  target_include_directories(vitadebug_vfp_probe PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${VITASDK}/share/gcc-arm-vita-eabi/samples/common
+  )
+  target_link_libraries(vitadebug_vfp_probe
+    ${CMAKE_BINARY_DIR}/vitadebug_stubs/libvitadebug_kernel_stub.a
+    SceDisplay_stub
+  )
+  vita_create_self(vitadebug-vfp-probe-eboot.bin vitadebug_vfp_probe UNSAFE)
+  vita_create_vpk(vitadebug-vfp-probe.vpk "VDCP00002"
+    vitadebug-vfp-probe-eboot.bin
+    VERSION "01.00"
+    NAME "VitaDebugger guarded VFP probe"
+  )
+endif()
 
 install(DIRECTORY ${CMAKE_BINARY_DIR}/vitadebug_stubs/
   DESTINATION lib

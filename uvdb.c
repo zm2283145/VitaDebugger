@@ -11,8 +11,29 @@
 #include <psp2/kernel/modulemgr.h>
 #include <kubridge.h>
 #include "uvdb.h"
+#include "uvdb_rsp.h"
 #ifdef UVDB_KERNEL_THREAD_CONTROL
 #include "vitadebug_kernel.h"
+#endif
+
+#if defined(UVDB_KERNEL_VFP_READS) && !defined(UVDB_KERNEL_THREAD_CONTROL)
+#error "UVDB_KERNEL_VFP_READS requires UVDB_KERNEL_THREAD_CONTROL"
+#endif
+
+#ifdef UVDB_KERNEL_VFP_READS
+static const char uvdb_arm_vfp_target_xml[] =
+#include "protocol/arm_vfp_target_xml.inc"
+;
+static int uvdb_rsp_vfp_enabled;
+
+static void uvdb_refresh_rsp_vfp_capability(void)
+{
+    struct vd_kernel_status status;
+    uvdb_rsp_vfp_enabled =
+        vdKernelGetStatus(&status) >= 0 &&
+        status.abi_version == VD_KERNEL_ABI_VERSION &&
+        (status.capabilities & VD_KERNEL_CAP_THREAD_VFP_REGISTERS) != 0;
+}
 #endif
 
 #define UVDB_DEFAULT_PORT 1234
@@ -528,7 +549,7 @@ static struct stream parse_stream(char* s)
     return ans;
 }
 
-static void stream_write(struct stream* st, char* buf, size_t sz)
+static void stream_write(struct stream* st, const char* buf, size_t sz)
 {
     uint64_t chunk_start = st->cur;
     uint64_t chunk_end = chunk_start + sz;
@@ -639,10 +660,42 @@ static void skip_hex(char** p, size_t cnt)
     *p += strnlen(*p, 2*cnt);
 }
 
+#ifndef UVDB_KERNEL_THREAD_CONTROL
 static void write_x(size_t sz)
 {
     while(sz--)
         buffer_write(&out_buf, "xx", 2);
+}
+#endif
+
+static int write_rsp_register_packet(
+    const struct uvdb_rsp_core_registers* core,
+    const struct uvdb_rsp_vfp_registers* vfp)
+{
+    char packet[UVDB_RSP_VFP_PACKET_HEX_SIZE];
+    size_t packet_size = 0;
+#ifdef UVDB_KERNEL_VFP_READS
+    const int include_vfp = uvdb_rsp_vfp_enabled;
+#else
+    const int include_vfp = 0;
+    (void)vfp;
+#endif
+    if(uvdb_rsp_encode_register_packet(packet, sizeof(packet), core, vfp,
+                                        include_vfp, &packet_size) < 0)
+        return -1;
+    buffer_write(&out_buf, packet, packet_size);
+    return 0;
+}
+
+static int write_exception_thread_registers(KuKernelExceptionContext* ctx)
+{
+    struct uvdb_rsp_core_registers core;
+    memcpy(core.r, &ctx->r0, sizeof(core.r));
+    core.cpsr = ctx->SPSR;
+    // Kubridge's exception context does not currently expose the interrupted
+    // thread's saved VFP bank. Preserve the negotiated shape but mark it
+    // unavailable in experimental VFP builds.
+    return write_rsp_register_packet(&core, NULL);
 }
 
 #ifdef UVDB_KERNEL_THREAD_CONTROL
@@ -654,16 +707,34 @@ static int write_kernel_thread_registers(SceUID thread_id)
     if(!token || vdKernelGetThreadRegisters(token, thread_id, &registers) < 0)
         return -1;
 
-    /* ksceKernelGetThreadCpuRegisters entry 1 is the saved user-mode bank.
-     * Keep VFP registers unavailable until their kernel layout is validated. */
+    /* ksceKernelGetThreadCpuRegisters entry 1 is the hardware-validated saved
+     * user-mode bank. */
     const struct vd_arm_registers* user = &registers.entry[1];
-    write_hex((char*)user->r, sizeof(user->r));
-    write_hex((char*)&user->sp, sizeof(user->sp));
-    write_hex((char*)&user->lr, sizeof(user->lr));
-    write_hex((char*)&user->pc, sizeof(user->pc));
-    write_x(25 * 4);
-    write_hex((char*)&user->cpsr, sizeof(user->cpsr));
-    return 0;
+    struct uvdb_rsp_core_registers core;
+    memcpy(core.r, user->r, sizeof(user->r));
+    core.r[13] = user->sp;
+    core.r[14] = user->lr;
+    core.r[15] = user->pc;
+    core.cpsr = user->cpsr;
+
+#ifdef UVDB_KERNEL_VFP_READS
+    if(uvdb_rsp_vfp_enabled)
+    {
+        struct vd_thread_vfp_registers snapshot;
+        if(vdKernelGetThreadVfpRegisters(token, thread_id, &snapshot) < 0 ||
+           snapshot.layout_version != VD_KERNEL_VFP_LAYOUT_D32_V1 ||
+           snapshot.d_register_count != VD_KERNEL_VFP_D_REGISTER_COUNT)
+            return -1;
+        struct uvdb_rsp_vfp_registers vfp;
+        memcpy(vfp.d, snapshot.d, sizeof(vfp.d));
+        /* Hardware validation found FPSCR in raw entry 0. This intentionally
+         * differs from the saved user-mode ARM core state in entry 1. */
+        vfp.fpscr =
+            snapshot.fpscr_entry[VD_KERNEL_VFP_FPSCR_ENTRY_D32_V1];
+        return write_rsp_register_packet(&core, &vfp);
+    }
+#endif
+    return write_rsp_register_packet(&core, NULL);
 }
 #endif
 
@@ -1225,6 +1296,12 @@ static void uvdb_kernel_end_stop(void) { }
 
 static void uvdb_main_loop(KuKernelExceptionContext* ctx, int stop_signal)
 {
+#ifdef UVDB_KERNEL_VFP_READS
+    // Negotiate the extended register shape only with the exact matching ABI
+    // and an explicitly enabled experimental kernel. A mismatched/default
+    // plugin transparently retains the legacy core-only packet contract.
+    uvdb_refresh_rsp_vfp_capability();
+#endif
     for(;;)
     {
         char* pkt;
@@ -1244,7 +1321,13 @@ static void uvdb_main_loop(KuKernelExceptionContext* ctx, int stop_signal)
         else if(STARTSWITH("qXfer:features:read:target.xml:"))
         {
             struct stream st = parse_stream(pkt + sizeof("qXfer:features:read:target.xml:") - 1);
-            stream_write(&st, STRING("<?xml version=\"1.0\"?>\n<!DOCTYPE target SYSTEM \"gdb-target.dtd\">\n<target>\n<architecture>armv7</architecture>\n<osabi>GNU/Linux</osabi>\n</target>\n"));
+#ifdef UVDB_KERNEL_VFP_READS
+            if(uvdb_rsp_vfp_enabled)
+                stream_write(&st, uvdb_arm_vfp_target_xml,
+                             sizeof(uvdb_arm_vfp_target_xml) - 1);
+            else
+#endif
+                stream_write(&st, STRING("<?xml version=\"1.0\"?>\n<!DOCTYPE target SYSTEM \"gdb-target.dtd\">\n<target>\n<architecture>armv7</architecture>\n<osabi>GNU/Linux</osabi>\n</target>\n"));
             stream_close(&st);
         }
         else if(STARTSWITH("qXfer:libraries:read::"))
@@ -1339,9 +1422,8 @@ static void uvdb_main_loop(KuKernelExceptionContext* ctx, int stop_signal)
 #endif
             else
             {
-                write_hex((void*)ctx, 16*4);
-                write_x(25*4);
-                write_hex((void*)&ctx->SPSR, 4);
+                if(write_exception_thread_registers(ctx) < 0)
+                    buffer_write(&out_buf, STRING("E16"));
             }
         }
         else if(STARTSWITH("m"))
@@ -1365,15 +1447,27 @@ static void uvdb_main_loop(KuKernelExceptionContext* ctx, int stop_signal)
         }
         else if(STARTSWITH("G"))
         {
-            if(uvdb_general_thread > 0 && uvdb_general_thread != uvdb_stopped_thread)
-                buffer_write(&out_buf, STRING("E16"));
-            else
+#ifdef UVDB_KERNEL_VFP_READS
+            if(uvdb_rsp_vfp_enabled)
             {
-                char* p = pkt + 1;
-                read_hex(&p, (void*)ctx, 16*4);
-                skip_hex(&p, 25*4);
-                read_hex(&p, (void*)&ctx->SPSR, 4);
-                buffer_write(&out_buf, "OK", 2);
+                // Do not acknowledge a full register write while VFP writes
+                // are unsupported; that would silently discard its VFP tail.
+                buffer_write(&out_buf, STRING("E16"));
+            }
+            else
+#endif
+            {
+                if(uvdb_general_thread > 0 &&
+                   uvdb_general_thread != uvdb_stopped_thread)
+                    buffer_write(&out_buf, STRING("E16"));
+                else
+                {
+                    char* p = pkt + 1;
+                    read_hex(&p, (void*)ctx, 16*4);
+                    skip_hex(&p, 25*4);
+                    read_hex(&p, (void*)&ctx->SPSR, 4);
+                    buffer_write(&out_buf, "OK", 2);
+                }
             }
         }
         else if(STARTSWITH("M"))

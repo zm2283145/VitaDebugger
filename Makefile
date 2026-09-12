@@ -33,10 +33,19 @@ override CFLAGS += -DUVDB_KERNEL_THREAD_CONTROL -I $(VITADEBUG_KERNEL_DIR)/inclu
 EXTRA_LDFLAGS += $(VITADEBUG_KERNEL_BUILD_DIR)/vitadebug_stubs/libvitadebug_kernel_stub.a
 endif
 
+ifeq ($(UVDB_KERNEL_VFP_READS),1)
+ifneq ($(UVDB_KERNEL_THREAD_CONTROL),1)
+$(error UVDB_KERNEL_VFP_READS=1 requires UVDB_KERNEL_THREAD_CONTROL=1)
+endif
+override CFLAGS += -DUVDB_KERNEL_VFP_READS
+endif
+
 override CFLAGS += -I $(KUBRIDGE_DIR) -Wall -Wextra -g
 
 %.o: %.c *.h
 	arm-vita-eabi-gcc $< $(CFLAGS) -c -o $@
+
+uvdb.o: protocol/arm_vfp_target_xml.inc
 
 test.o: test.c *.h
 	arm-vita-eabi-gcc $< $(CFLAGS) $(EXTRA_CFLAGS) -c -o $@
@@ -47,7 +56,7 @@ psvDebugScreen.o: $(VITASDK)/share/gcc-arm-vita-eabi/samples/common/debugScreen.
 tests/thumb_step_returns.o: tests/thumb_step_returns.S
 	arm-vita-eabi-gcc $< $(CFLAGS) -c -o $@
 
-libuvdb.a: uvdb.o uvdb_debugnet.o stdio_redirect.o
+libuvdb.a: uvdb.o uvdb_rsp.o uvdb_debugnet.o stdio_redirect.o
 	arm-vita-eabi-ar rcs $@ $^
 
 test.elf: psvDebugScreen.o test.o tests/thumb_step_returns.o libuvdb.a
