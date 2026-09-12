@@ -134,11 +134,13 @@ plugin combination are already supported.
 The first disposable disabled-comparator round-trip attempt on 2026-09-12
 [rebooted during its kernel critical section](docs/hardware/hw-disabled-probe-attempt-1.md).
 Its valid pre-probe journal proves entry but not the exact failing instruction or
-any comparator write. Because the earlier v7 DIDR read passed, the follow-up is
-the separate, strictly sequential
-[staged read-only ladder](kernel/staged-readonly-probe/README.md); enabled
-hardware debugging remains blocked until those gates identify the first
-inaccessible register class.
+any comparator write. The separate, strictly sequential
+[staged read-only ladder](docs/hardware/hw-read-ladder-attempt-2.md) then passed
+its lifecycle, MIDR, DIDR, and DSCRint gates before rebooting at the first
+`DBGVCR` read on core 1. This matches an ARM boundary for denied extended CP14
+debug access; the exact authentication, OS Lock, or debug-power cause is not yet
+identified. Comparator rungs were not run, and enabled hardware debugging
+remains blocked.
 
 The preceding [FPSCR discovery run](docs/hardware/kernel-vfp-probe-v8-fpscr-bank-discovery.jpg)
 is retained separately because its one failed expectation established that the
@@ -798,8 +800,9 @@ exact matching unstripped ELF on the development computer.
   separate known-pattern hardware gate, but the opt-in GDB mapping still needs
   a live foreign-thread D0/D31/FPSCR read and lifecycle test before promotion.
 - Hardware breakpoint/watchpoint encoding and a guarded kernel session engine
-  are implemented experimentally, but no enabled comparator has passed the
-  retail-hardware trap/restoration gates, so GDB does not advertise them yet.
+  are implemented experimentally, but the staged retail probe rebooted at the
+  first DSE-dependent `DBGVCR` read. No comparator access or enabled comparator
+  has passed a hardware gate, so GDB does not advertise `Z1`-`Z4`.
 - Software stepping does not decode every instruction capable of writing PC.
   Important remaining cases are concentrated in shifted PC-writing data-
   processing forms, register-offset PC loads, and uncommon ARM/Thumb control
@@ -848,10 +851,15 @@ exact matching unstripped ELF on the development computer.
    tests proving that target output cannot block while the debugger is stopped.
 5. Complete ARM and Thumb-2 control-flow decoding, then add `p`/`P` register
    access and independently validate any foreign-thread mutation/restoration.
-6. Complete the staged [KVDB feature-parity](docs/kvdb-feature-parity.md)
-   hardware gates: disabled-register restore, one context-scoped execution
-   breakpoint, one data watchpoint, correct stop replies, and lease/detach
-   cleanup before exposing `Z1`-`Z4` to GDB.
+6. Keep hardware `Z1`-`Z4` fail-closed while researching offline whether Vita's
+   DSE/authentication, OS Lock, or debug-power state has a documented safe
+   control path. Do not resume CP14 comparator, debug-status, or memory-mapped
+   debug probes without that evidence. Only then restart the staged
+   [KVDB feature-parity](docs/kvdb-feature-parity.md) gates for disabled-register
+   restore, one context-scoped execution breakpoint, one data watchpoint,
+   correct stop replies, and lease/detach cleanup. In parallel, evaluate a
+   page-protection/data-abort software-watchpoint fallback with strict page
+   ownership, access decoding, single-step/rearm, and false-positive tests.
 7. Complete ASLR-aware symbol relocation: reconcile `qOffsets` and
    `qXfer:libraries:read` with every loaded module segment, automate matching
    unstripped ELF loading, and verify relocated breakpoints across relaunches.
