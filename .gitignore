@@ -8,6 +8,7 @@ eboot.bin
 param.sfo
 /build*/
 kernel/build*/
+kernel/**/build*/
 profiler/build/
 local/
 __pycache__/
@@ -15,3 +16,10 @@ __pycache__/
 *.exe
 /test-rsp
 /test-rsp.exe
+/test-rsp-console
+/test-register-bank
+/test-thread-control
+/test-console-queue
+/kernel/dipsw-read-probe/test-record
+/kernel/dipsw-set-restore-probe/test-record
+/kernel/dipsw-dbgvcr-probe/test-record

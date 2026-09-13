@@ -69,11 +69,18 @@ hardware. Its current status includes:
 - A hardware-tested kernel companion providing ABI discovery,
   caller-process-only thread enumeration, tokenized stop/resume sessions, and
   watchdog recovery from an abandoned session.
+- Fail-closed library startup validation for the exact kernel ABI, required
+  thread-control capabilities, and 64-entry inventory contract.
 - Hardware-tested GDB all-stop integration: initial attach, live Ctrl-C,
   lease renewal during long stops, continue, detach, reconnect, and recovery
   after forced client termination.
+- A bounded unified thread inventory with hardware-tested `Hg`/`Hc` and
+  `vCont;c;s` behavior. Deterministic live tests stepped two distinct foreign
+  worker paths and attributed each stop to the requested thread; true
+  scheduler-locked execution isolation remains pending.
 - Hardware-tested read-only GDB register integration for main and worker
-  threads owned by an active stop session, including symbolized stack frames.
+  threads owned by an active stop session, including state-dependent selection
+  of runnable/current and syscall-return ARM banks plus symbolized stack frames.
 - Hardware-tested stop-session reconciliation: threads created after the
   initial snapshot are discovered and suspended by the next lease renewal.
 - Hardware-tested read-only ARM debug-resource discovery reporting six
@@ -120,7 +127,7 @@ hardware. These unedited Vita screenshots record the completed probe results:
 | v2 | [Single-thread suspend](docs/hardware/kernel-probe-v2-single-thread-suspend.jpg) | `0x1002` suspended state, normal resume to state 0, disposable worker behavior |
 | v3 | [Stop session and watchdog](docs/hardware/kernel-probe-v3-stop-session-watchdog.jpg) | Tokenized process stop/end and automatic recovery of an abandoned lease |
 | v4 | [Lease-keeper exemption](docs/hardware/kernel-probe-v4-lease-exemption.jpg) | A validated exempt thread remains active to renew long GDB stop sessions |
-| v5 | [Saved register banks](docs/hardware/kernel-probe-v5-register-banks.jpg) | Session ownership checks and both raw ARM banks; bank 1 contains the saved user-mode PC, SP, CPSR, and general registers |
+| v5 | [Saved register banks](docs/hardware/kernel-probe-v5-register-banks.jpg) | Session ownership checks and both raw ARM banks; the sleeping syscall-bound worker's resumable user state was observed in entry 1, while later runnable-worker tests established that selection is state-dependent |
 | v6 | [Late-thread reconciliation](docs/hardware/kernel-probe-v6-late-thread-reconcile.jpg) | A thread created after stop begins is discovered on renewal, suspended, tracked, and resumed with the session |
 | v7 | [Hardware-debug discovery](docs/hardware/kernel-probe-v7-hw-debug-discovery.jpg) | Read-only CP14 identification and the Vita's six breakpoint, four watchpoint, and two context-aware comparator counts |
 | VFP v8 | [Corrected D32/FPSCR probe](docs/hardware/kernel-vfp-probe-v8-bank0-pass.jpg) | Guarded D0-D31 capture, raw FPSCR entry-0 mapping, ownership rejection, two-thread stop/resume, and clean worker restoration |
@@ -136,24 +143,32 @@ The first disposable disabled-comparator round-trip attempt on 2026-09-12
 Its valid pre-probe journal proves entry but not the exact failing instruction or
 any comparator write. The separate, strictly sequential
 [staged read-only ladder](docs/hardware/hw-read-ladder-attempt-2.md) then passed
-its lifecycle, MIDR, DIDR, and DSCRint gates before rebooting at the first
-`DBGVCR` read on core 1. This matches an ARM boundary for denied extended CP14
-debug access; the exact authentication, OS Lock, or debug-power cause is not yet
-identified. Comparator rungs were not run, and enabled hardware debugging
-remains blocked. A subsequent KBL source audit identified DIP switch 228
+its lifecycle, MIDR, DIDR, and DSCRint gates before rebooting at its first
+`DBGVCR` read on core 1. Comparator rungs were never run.
+
+A subsequent KBL source audit identified DIP switch 228
 (`SYSTEM_FLAG_ENABLE_HW_BREAKPOINTS`) as the strongest Vita-specific control
 lead. It is bit 4 (`0x10`) of the system-control word at KBL offset `0x5C`, not
-the unrelated KBL field at offset `0xE4`. The safe next rung is a read-only
-DIP-switch state inventory. That isolated `VDCP00005`
-[probe app](kernel/dipsw-read-probe/README.md) is source-complete, uses a
-checksummed A/B lifecycle journal, and is pending its first hardware run. It is
-followed only after review by a documented
-set/readback/exact-restore test that performs no CP14 access. The
-[bit-228 report](docs/hardware/dipsw-228-hw-debug.md) records the evidence,
-boot-versus-runtime timing uncertainty, and staged gates. DEVTOOL identity is
-now a secondary control rather than the first experiment. None of these leads
-is evidence that comparator access is safe, and the hardware report records why
-blind MMIO/register writes remain outside the project's safety boundary.
+the unrelated KBL field at offset `0xE4`. On 2026-09-13, the isolated read-only
+`VDCP00005` [inventory](kernel/dipsw-read-probe/README.md) found bits 203 and
+228 clear and consistent. The separately audited `VDCP00006` rung proved that
+the installed kernel API changes only system-control mask `0x10`, observes bit
+228 high, and restores the exact original state; a clean reboot and read-only
+sample confirmed restoration.
+
+The final late-runtime A/B used `VDCP00007`: after a durable `READ_PENDING`
+record, it performed the already-proven Set/readback operation, a same-core IRQ
+guard, and exactly one DBGVCR read before its unconditional Clear path. The Vita
+rebooted and never committed `COMPLETE`; both journals remained valid and
+unchanged, and the post-reboot inventory again found both bits and words clear.
+Because the design intentionally performs no I/O while bit 228 is high, the
+journal cannot identify one exact instruction inside that short critical path.
+Paired with the prior API result and audited single-MRC binary, however, this is
+consistent with the same DBGVCR access boundary and shows that late runtime bit
+228 did not produce a safely returning path on this retail Vita. The
+[bit-228 report](docs/hardware/dipsw-228-hw-debug.md) preserves the exact
+evidence and timing limitations. Hardware `Z1`-`Z4` remains disabled; no
+comparator was accessed or modified.
 
 The preceding [FPSCR discovery run](docs/hardware/kernel-vfp-probe-v8-fpscr-bank-discovery.jpg)
 is retained separately because its one failed expectation established that the
@@ -200,9 +215,10 @@ The current implementation derives process ownership in kernel context,
 excludes the calling debugger thread, records only threads it successfully
 suspends, rolls back partial failures, requires a process-owned session token,
 and automatically resumes an abandoned session when its short lease expires.
-Foreign-thread register reads use the hardware-validated user-mode saved bank
-in experimental kernel-integrated builds. Foreign-thread writes remain
-disabled until mutation and restoration are independently validated.
+Foreign-thread register reads dynamically select the hardware-validated
+current/resumable user-mode state from the two raw kernel banks in experimental
+kernel-integrated builds. Foreign-thread writes remain disabled until mutation
+and restoration are independently validated.
 
 ### `libvitaprofiler`
 
@@ -436,7 +452,10 @@ do not enable it in a normal application build.
 Application builds must add `-DUVDB_KERNEL_THREAD_CONTROL`, include
 `kernel/include`, and link the generated
 `libvitadebug_kernel_stub.a`. Keep the application library and plugin ABI from
-the same VitaDebugger revision.
+the same VitaDebugger revision. The library itself validates the loaded
+companion's exact ABI, required thread-control capability mask, and thread
+capacity before direct entry or server startup; a mismatch fails closed before
+opening a debugger socket or creating helper threads.
 
 ### Building the experimental kernel companion
 
@@ -451,9 +470,10 @@ cmake --build kernel/build
 This produces `vitadebug.skprx` plus strong and weak user import libraries.
 The current companion provides ABI/capability queries, caller-process thread
 enumeration, lease-protected stop sessions, renewal-time reconciliation of new
-threads, and token-protected reads of both saved ARM register banks for a
-session-owned suspended thread. ABI v1.8 also reserves a read-only candidate
-VFP snapshot call. A normal build compiles that undocumented path out, omits
+threads, and token-protected reads of both raw, state-dependent ARM register
+banks for a session-owned suspended thread. ABI v1.8 also reserves a read-only
+candidate VFP snapshot call. A normal build compiles that undocumented path
+out, omits
 its capability bit, and returns `VD_KERNEL_ERROR_VFP_DISABLED` if called. Keep
 a known-good taiHEN configuration backup while testing kernel builds.
 
@@ -647,12 +667,11 @@ compiled with `UVDB_KERNEL_THREAD_CONTROL=1` and linked to the matching kernel
 stub use lease-protected process all-stop. A dedicated exempt keeper renews the
 lease while GDB is stopped; continue, detach, shutdown, and I/O failure end the
 session, while the kernel watchdog recovers an abandoned client. Experimental
-builds can also return the validated user-mode register bank for a selected
-suspended thread. A VFP D32 target description and packet serializer are
-available only with `UVDB_KERNEL_VFP_READS=1`; leave that flag off until the
-separate known-pattern probe passes on the target firmware, and continue to
-treat it as experimental until the live GDB lifecycle gate passes. Foreign
-register writes remain disabled.
+builds can also return the dynamically selected current/resumable user-mode
+register bank for a suspended thread. A VFP D32 target description and packet
+serializer are available only with `UVDB_KERNEL_VFP_READS=1`; leave that flag
+off in normal builds and continue to treat the mapping as experimental until
+the live GDB lifecycle gate passes. Foreign register writes remain disabled.
 Later calls while connected act as intentional software breakpoints. Calling it
 before graphics initialization normally leaves a black screen while waiting;
 this is expected.
@@ -715,9 +734,10 @@ static void *worker(void *argument) {
 The implementation supports GDB thread listing, names, liveness checks,
 selection, and identification of the thread that entered the exception
 handler. Kernel-integrated builds suspend the other process threads coherently
-and can report a selected suspended thread's saved general registers, PC, SP,
-LR, and CPSR. The new kernel boundary can capture a selected thread's candidate
-D0-D31 state and both raw saved FPSCR bank values without changing them. GDB
+and can report a selected suspended thread's dynamically selected current or
+syscall-return general registers, PC, SP, LR, and CPSR. The new kernel boundary
+can capture a selected thread's candidate D0-D31 state and both raw FPSCR bank
+values without changing them. GDB
 exposure remains compile-time opt-in pending the live GDB lifecycle gate;
 foreign register writes are rejected.
 
@@ -793,16 +813,21 @@ exact matching unstripped ELF on the development computer.
   to an arbitrary unmodified process.
 - Kernel all-stop is opt-in and requires the matching `vitadebug.skprx` ABI;
   library-only builds continue to provide application-side stopping.
-- Thread discovery is not yet one coherent source of truth. The application
-  registry is bounded to 32 cooperative entries while the kernel boundary can
-  enumerate 64 threads; stale registrations and the debugger's own helper
-  threads still need stricter filtering. A newly created thread is folded into
-  all-stop only at the next lease renewal, leaving a brief interval before it
-  is suspended.
-- GDB's continue-thread selection is recorded, but per-thread stepping and the
-  full `Hc`/`vCont` state model are not complete. Stop-session creation or lease
-  renewal failure also needs to abort the client session consistently rather
-  than allowing partially stopped debugging to continue.
+- Kernel-assisted thread discovery now treats the complete 64-entry
+  caller-process inventory as authoritative, uses the 32-entry cooperative
+  registry only for names, deduplicates IDs, and filters debugger helpers.
+  Library-only builds retain cooperative discovery. A newly created thread is
+  folded into all-stop by background renewal or the synchronous renewal before
+  the next thread-sensitive RSP operation.
+- `Hg`, `Hc`, and the advertised `vCont;c;s` subset share one bounded selection
+  model and fail closed on uncovered or multi-step action sets. Selected foreign
+  Thumb-thread decoding and stop attribution pass on two deterministic,
+  non-overlapping worker paths. The temporary breakpoint is still process-wide
+  and the current kernel boundary resumes the whole process; true
+  scheduler-locked per-thread execution isolation remains unimplemented.
+- Positive `Hc` followed by legacy `c` or `s` is rejected because it implies a
+  selective resume. The supported explicit all-stop form is `vCont;s:T;c`,
+  which steps thread `T` while continuing every other inventoried thread.
 - The initial accept path and exception/RSP path still hold a global spin lock
   across blocking work. Shutdown, registration, nested faults, and handler
   chaining need a bounded state-machine refactor before this is suitable for
@@ -811,13 +836,17 @@ exact matching unstripped ELF on the development computer.
   register write packets still need strict length, syntax, overflow, page-
   boundary, and breakpoint-overlap validation plus parser fuzzing.
 - Foreign-thread register writes are not implemented. Foreign-thread general
-  register reads are hardware tested; the guarded VFP snapshot passed its
-  separate known-pattern hardware gate, but the opt-in GDB mapping still needs
-  a live foreign-thread D0/D31/FPSCR read and lifecycle test before promotion.
+  register reads are hardware tested in both runnable/current and
+  sleeping/syscall-return states; the guarded VFP snapshot passed its separate
+  known-pattern hardware gate, but the opt-in GDB mapping still needs a live
+  foreign-thread D0/D31/FPSCR read and lifecycle test before promotion.
 - Hardware breakpoint/watchpoint encoding and a guarded kernel session engine
   are implemented experimentally, but the staged retail probe rebooted at the
-  first DSE-dependent `DBGVCR` read. No comparator access or enabled comparator
-  has passed a hardware gate, so GDB does not advertise `Z1`-`Z4`.
+  first DSE-dependent `DBGVCR` read. A separate API test proved cached DIP 228
+  set/readback/restore, yet the audited late-runtime DIP 228 + DBGVCR A/B also
+  rebooted without returning to its final journal write. No comparator access
+  or enabled comparator has passed a hardware gate, so GDB does not advertise
+  `Z1`-`Z4`.
 - Software stepping does not decode every instruction capable of writing PC.
   Important remaining cases are concentrated in shifted PC-writing data-
   processing forms, register-offset PC loads, and uncommon ARM/Thumb control
@@ -854,9 +883,14 @@ exact matching unstripped ELF on the development computer.
 1. Hardware-test opt-in GDB D0/D31/FPSCR reads on a foreign stopped thread,
    including continue, detach, reconnect, and watchdog recovery, then promote
    the read-only mapping from experimental status.
-2. Replace the split cooperative/kernel thread bookkeeping with a coherent
-   stop-state machine, complete `Hc`/`vCont` selection, and make stop or lease
-   failure fail closed with bounded resume and disconnect cleanup.
+2. Complete the remaining
+   [thread-control validation gate](docs/gdb-thread-control-validation.md).
+   Unified inventory, `Hg`/`Hc`, `vCont;c;s`, fail-closed selection,
+   abandoned-client recovery, and deterministic selected foreign-Thumb-thread
+   stepping are hardware tested. ARM-state stepping, controlled renew/end
+   failures, cleanup fault injection, and longer stress runs remain. Then design
+   scheduler-locked selective resume or displaced stepping so a process-wide
+   temporary breakpoint cannot be won by another running thread.
 3. Move blocking accept/RSP work outside the global spin lock; add nested-fault
    handling, previous-handler chaining, strict packet parsing, fake-kernel host
    tests, fuzzing, and long reconnect/shutdown/multithread hardware soaks.
@@ -866,10 +900,12 @@ exact matching unstripped ELF on the development computer.
    reconnect, truncation/drop accounting, and shutdown behavior on Vita.
 5. Complete ARM and Thumb-2 control-flow decoding, then add `p`/`P` register
    access and independently validate any foreign-thread mutation/restoration.
-6. Keep hardware `Z1`-`Z4` fail-closed while researching offline whether Vita's
-   DSE/authentication, OS Lock, or debug-power state has a documented safe
-   control path. Do not resume CP14 comparator, debug-status, or memory-mapped
-   debug probes without that evidence. Only then restart the staged
+6. Keep hardware `Z1`-`Z4` fail-closed. The late-runtime DIP 228 path has now
+   been tested and did not yield a safely returning DBGVCR read. Research
+   boot-time policy, DSE/authentication, OS Lock, and debug-power state offline;
+   do not resume CP14 comparator, debug-status, identity-spoof, boot patch, or
+   memory-mapped probes without a separately reviewed safe path. Only then
+   restart the staged
    [KVDB feature-parity](docs/kvdb-feature-parity.md) gates for disabled-register
    restore, one context-scoped execution breakpoint, one data watchpoint,
    correct stop replies, and lease/detach cleanup. In parallel, evaluate a
@@ -898,6 +934,10 @@ exact matching unstripped ELF on the development computer.
 
 - `uvdb.c`: protocol server, safe memory access, breakpoints, stepping, and
   exception handling.
+- `uvdb_registers.c` / `uvdb_registers.h`: host-testable selection of the valid
+  user context from the Vita kernel's two raw ARM register banks.
+- `uvdb_thread_control.c` / `uvdb_thread_control.h`: bounded thread inventory,
+  selector parsing, and fail-closed resume/step planning.
 - `uvdb_rsp.c` / `uvdb_rsp.h`: host-testable ARM and VFP register-packet
   serialization.
 - `uvdb_console.c` / `uvdb_console.h`: internal fixed-memory, generation-scoped

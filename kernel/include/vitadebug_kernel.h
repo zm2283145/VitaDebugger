@@ -36,6 +36,12 @@ enum vd_kernel_capability {
     VD_KERNEL_CAP_PROBE_SUSPEND = 1u << 31,
 };
 
+#define VD_KERNEL_REQUIRED_THREAD_CONTROL_CAPABILITIES \
+    (VD_KERNEL_CAP_THREAD_LIST | \
+     VD_KERNEL_CAP_THREAD_CONTROL | \
+     VD_KERNEL_CAP_THREAD_REGISTERS | \
+     VD_KERNEL_CAP_STOP_RECONCILE)
+
 struct vd_arm_registers {
     unsigned int r[13];
     unsigned int sp;
@@ -51,8 +57,10 @@ struct vd_thread_registers {
 
 // Experimental read-only VFP snapshot. A known-pattern hardware probe
 // validated the D0-D31 ordering and established that the D32 v1 FPSCR value is
-// in raw CPU-register entry 0, even though saved user-mode ARM core state is in
-// entry 1. Both raw FPSCR entries remain available as validation evidence.
+// in raw CPU-register entry 0. ARM core-register selection is independent and
+// state-dependent: runnable/current user state may be in entry 0, while a
+// syscall-return user context may be in entry 1. Both raw FPSCR entries remain
+// available as validation evidence.
 struct vd_thread_vfp_registers {
     unsigned int layout_version;
     unsigned int d_register_count;
@@ -179,8 +187,9 @@ int vdKernelRenewStop(unsigned int token, unsigned int lease_ms);
 // Resume only threads suspended by the matching session token.
 int vdKernelEndStop(unsigned int token, int* resumed_count);
 
-// Read both saved ARM register banks for a thread suspended and owned by the
-// caller's active stop session. Bank interpretation is intentionally left raw
+// Read both raw, state-dependent ARM register banks for a thread suspended and
+// owned by the caller's active stop session. Bank interpretation is
+// intentionally left raw
 // until validated across Vita firmware and exception states.
 int vdKernelGetThreadRegisters(unsigned int token, SceUID target_user_thread,
                                struct vd_thread_registers* registers);

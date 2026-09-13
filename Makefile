@@ -1,7 +1,7 @@
 all: libuvdb.a
 
 clean:
-	rm -f *.o tests/*.o *.a *.elf *.velf eboot.bin param.sfo *.vpk *.psp2dmp test-rsp test-rsp.exe test-rsp-console test-rsp-console.exe test-console-queue test-console-queue.exe kernel/dipsw-read-probe/test-record kernel/dipsw-read-probe/test-record.exe
+	rm -f *.o tests/*.o *.a *.elf *.velf eboot.bin param.sfo *.vpk *.psp2dmp test-rsp test-rsp.exe test-rsp-console test-rsp-console.exe test-register-bank test-register-bank.exe test-thread-control test-thread-control.exe test-console-queue test-console-queue.exe kernel/dipsw-read-probe/test-record kernel/dipsw-read-probe/test-record.exe kernel/dipsw-set-restore-probe/test-record kernel/dipsw-set-restore-probe/test-record.exe kernel/dipsw-dbgvcr-probe/test-record kernel/dipsw-dbgvcr-probe/test-record.exe
 
 package: uvdb-test.vpk
 
@@ -14,7 +14,7 @@ fetch_dumps:
 KUBRIDGE_DIR ?= ../kubridge-review
 KUBRIDGE_LIB_DIR ?= $(KUBRIDGE_DIR)/build-local
 VITADEBUG_KERNEL_DIR ?= kernel
-VITADEBUG_KERNEL_BUILD_DIR ?= $(VITADEBUG_KERNEL_DIR)/build-short
+VITADEBUG_KERNEL_BUILD_DIR ?= $(VITADEBUG_KERNEL_DIR)/build
 
 EXTRA_CFLAGS := -O0 -g -Wall -Wextra -I $(VITASDK)/share/gcc-arm-vita-eabi/samples/common -I $(KUBRIDGE_DIR)
 EXTRA_LDFLAGS := $(CFLAGS) -Wl,-q -L $(KUBRIDGE_LIB_DIR) -lSceDisplay_stub -lSceNetPs_stub -lSceKernelModulemgr_stub -lkubridge_stub -pthread
@@ -52,6 +52,18 @@ override CFLAGS += -I $(KUBRIDGE_DIR) -Wall -Wextra -g
 %.o: %.c *.h
 	arm-vita-eabi-gcc $< $(CFLAGS) -c -o $@
 
+# This compact example Makefile shares object names across plain, kernel, and
+# VFP configurations. Always rebuild the two configuration-sensitive objects so
+# changing feature flags cannot silently reuse an incompatible prior object.
+.PHONY: force-feature-objects
+force-feature-objects:
+
+uvdb.o test.o: force-feature-objects
+
+ifeq ($(UVDB_KERNEL_THREAD_CONTROL),1)
+uvdb.o test.o: $(VITADEBUG_KERNEL_DIR)/include/vitadebug_kernel.h
+endif
+
 uvdb.o: protocol/arm_vfp_target_xml.inc
 
 test.o: test.c *.h
@@ -63,7 +75,7 @@ psvDebugScreen.o: $(VITASDK)/share/gcc-arm-vita-eabi/samples/common/debugScreen.
 tests/thumb_step_returns.o: tests/thumb_step_returns.S
 	arm-vita-eabi-gcc $< $(CFLAGS) -c -o $@
 
-libuvdb.a: uvdb.o uvdb_rsp.o uvdb_console.o uvdb_debugnet.o stdio_redirect.o
+libuvdb.a: uvdb.o uvdb_registers.o uvdb_rsp.o uvdb_thread_control.o uvdb_console.o uvdb_debugnet.o stdio_redirect.o
 	arm-vita-eabi-ar rcs $@ $^
 
 HOST_CC ?= cc
@@ -78,9 +90,9 @@ HOST_EXEEXT ?=
 HOST_CC_RUN ?= $(HOST_CC)
 endif
 
-.PHONY: host-tests host-test-rsp host-test-rsp-console host-test-console-queue host-test-dipsw-probe-record
+.PHONY: host-tests host-test-rsp host-test-rsp-console host-test-register-bank host-test-thread-control host-test-console-queue host-test-dipsw-probe-record host-test-dipsw-set-restore-record host-test-dipsw-dbgvcr-record
 
-host-tests: host-test-rsp host-test-rsp-console host-test-console-queue host-test-dipsw-probe-record
+host-tests: host-test-rsp host-test-rsp-console host-test-register-bank host-test-thread-control host-test-console-queue host-test-dipsw-probe-record host-test-dipsw-set-restore-record host-test-dipsw-dbgvcr-record
 
 host-test-rsp: test-rsp$(HOST_EXEEXT)
 	./test-rsp$(HOST_EXEEXT)
@@ -88,11 +100,23 @@ host-test-rsp: test-rsp$(HOST_EXEEXT)
 host-test-rsp-console: test-rsp-console$(HOST_EXEEXT)
 	./test-rsp-console$(HOST_EXEEXT)
 
+host-test-register-bank: test-register-bank$(HOST_EXEEXT)
+	./test-register-bank$(HOST_EXEEXT)
+
+host-test-thread-control: test-thread-control$(HOST_EXEEXT)
+	./test-thread-control$(HOST_EXEEXT)
+
 host-test-console-queue: test-console-queue$(HOST_EXEEXT)
 	./test-console-queue$(HOST_EXEEXT)
 
 host-test-dipsw-probe-record: kernel/dipsw-read-probe/test-record$(HOST_EXEEXT)
 	./kernel/dipsw-read-probe/test-record$(HOST_EXEEXT)
+
+host-test-dipsw-set-restore-record: kernel/dipsw-set-restore-probe/test-record$(HOST_EXEEXT)
+	./kernel/dipsw-set-restore-probe/test-record$(HOST_EXEEXT)
+
+host-test-dipsw-dbgvcr-record: kernel/dipsw-dbgvcr-probe/test-record$(HOST_EXEEXT)
+	./kernel/dipsw-dbgvcr-probe/test-record$(HOST_EXEEXT)
 
 test-rsp$(HOST_EXEEXT): uvdb_rsp.c uvdb_rsp.h tests/host/test_rsp_registers.c
 	$(HOST_CC_RUN) $(HOST_CFLAGS) uvdb_rsp.c tests/host/test_rsp_registers.c -o $@
@@ -100,11 +124,23 @@ test-rsp$(HOST_EXEEXT): uvdb_rsp.c uvdb_rsp.h tests/host/test_rsp_registers.c
 test-rsp-console$(HOST_EXEEXT): uvdb_rsp.c uvdb_rsp.h tests/host/test_rsp_console.c
 	$(HOST_CC_RUN) $(HOST_CFLAGS) uvdb_rsp.c tests/host/test_rsp_console.c -o $@
 
+test-register-bank$(HOST_EXEEXT): uvdb_registers.c uvdb_registers.h tests/host/test_register_bank.c
+	$(HOST_CC_RUN) $(HOST_CFLAGS) uvdb_registers.c tests/host/test_register_bank.c -o $@
+
+test-thread-control$(HOST_EXEEXT): uvdb_thread_control.c uvdb_thread_control.h tests/host/test_thread_control.c
+	$(HOST_CC_RUN) $(HOST_CFLAGS) uvdb_thread_control.c tests/host/test_thread_control.c -o $@
+
 test-console-queue$(HOST_EXEEXT): uvdb_console.c uvdb_console.h tests/host/test_console_queue.c
 	$(HOST_CC_RUN) $(HOST_CFLAGS) -DUVDB_CONSOLE_TESTING uvdb_console.c tests/host/test_console_queue.c $(HOST_THREAD_FLAGS) -o $@
 
 kernel/dipsw-read-probe/test-record$(HOST_EXEEXT): kernel/dipsw-read-probe/test_record.c kernel/dipsw-read-probe/include/vd_dipsw_probe_record.h
 	$(HOST_CC_RUN) $(HOST_CFLAGS) kernel/dipsw-read-probe/test_record.c -o $@
+
+kernel/dipsw-set-restore-probe/test-record$(HOST_EXEEXT): kernel/dipsw-set-restore-probe/test_record.c kernel/dipsw-set-restore-probe/include/vd_dipsw_set_probe_record.h
+	$(HOST_CC_RUN) $(HOST_CFLAGS) kernel/dipsw-set-restore-probe/test_record.c -o $@
+
+kernel/dipsw-dbgvcr-probe/test-record$(HOST_EXEEXT): kernel/dipsw-dbgvcr-probe/test_record.c kernel/dipsw-dbgvcr-probe/include/vd_dipsw_dbgvcr_record.h
+	$(HOST_CC_RUN) $(HOST_CFLAGS) kernel/dipsw-dbgvcr-probe/test_record.c -o $@
 
 test.elf: psvDebugScreen.o test.o tests/thumb_step_returns.o libuvdb.a
 	arm-vita-eabi-gcc $^ $(LDFLAGS) $(EXTRA_LDFLAGS) -o $@

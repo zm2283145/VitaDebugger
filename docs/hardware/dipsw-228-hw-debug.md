@@ -1,8 +1,36 @@
 # KBL DIP switch 228 hardware-debug lead
 
-Status: the isolated read-only inventory app is source-complete and pending its
-first hardware run. No DIP switch, boot file, persistent kernel plugin, or
-comparator register has been changed.
+Status: the read-only inventory and owner-attended API set/read/restore rungs
+passed on hardware on 2026-09-13. A clean reboot and second read-only inventory
+confirmed bits 203 and 228 restored to zero. The next, separately reviewed rung
+is one DBGVCR read while cached bit 228 is temporarily high. No boot file,
+persistent kernel plugin, device identity, or comparator register has been
+changed.
+
+## Hardware results through the API round trip
+
+The clean pre-mutation `VDCP00005` sample completed with result zero and all
+expected validity flags. Debug word 6 and system-control word 7 were both zero;
+direct bits 203 and 228 were both zero and agreed with their containing words.
+
+The one-shot `VDCP00006` transaction then completed with primary and restoration
+results both zero. It recorded exactly one Set and one Clear call. During the
+set window, system-control word 7 changed from `0x00000000` to exactly
+`0x00000010` and direct bit 228 read as one. After Clear, the complete captured
+state exactly matched the baseline. Both journal slots remained byte-for-byte
+stable across the following reboot.
+
+A post-reboot `VDCP00005` sample again recorded debug word 6 and system-control
+word 7 as zero, with direct bits 203 and 228 both zero. This proves that the
+documented API can change the kernel-visible cached bit at runtime and that this
+probe restored it. It does not prove that `DBGSWENABLE`, debug authentication,
+or the ARM debug-register access policy changed.
+
+The raw checksummed evidence and decoded summaries are preserved under:
+
+- `kernel/dipsw-read-probe/hardware-results/2026-09-13-pre-set-baseline/`
+- `kernel/dipsw-set-restore-probe/hardware-results/2026-09-13-first-run/`
+- `kernel/dipsw-read-probe/hardware-results/2026-09-13-post-set-reboot/`
 
 ## Finding
 
@@ -110,29 +138,35 @@ passing rung authorizes only the next listed rung.
    This rung is implemented as the disposable `VDCP00005` app in
    [`kernel/dipsw-read-probe`](../../kernel/dipsw-read-probe/README.md). It uses
    an explicit X-button gate and a two-slot checksummed lifecycle journal. Its
-   packaged one-shot kernel module returns non-resident and has not yet been run
-   on hardware.
+   packaged one-shot kernel module returns non-resident. This rung passed before
+   and after the mutation test on 2026-09-13.
 2. **Kernel DIP-state API round trip.** First inspect the tested firmware's
    `ksceKernelSetDipsw` implementation because the VitaSDK declaration promises
    neither persistence nor absence of hardware side effects. If bit 228 is
    already set, record that fact and skip this mutation rung. Otherwise snapshot
    the original word, call `ksceKernelSetDipsw(228)`, verify that only mask
    `0x10` changed, clear it, and verify exact restoration. Do not read DBGVCR.
-   Journal each phase.
-3. **Fresh-target runtime authorization test.** Only after confirming the
-   setter's scope and reboot persistence behavior, set and verify bit 228 before
-   launching a fresh disposable target so ProcessMgr and ThreadMgr can observe
-   it during target/thread creation. With best-effort watchdog restoration and
-   a fresh journal already active, perform one DBGVCR read. If execution returns,
-   restore the original bit immediately and stop; do not touch comparators. If
-   the Vita reboots, the watchdog cannot run: stop this runtime branch, recover
-   the journal, and re-read bits 228 and 203 before any other test.
-4. **Boot-time bit-only A/B.** If runtime state changes but DBGVCR remains
+   Journal each phase. This rung passed on 2026-09-13; exact restoration was
+   independently confirmed after reboot.
+3. **Immediate same-context authorization test.** In a separate one-shot title,
+   durably record `READ_PENDING`, set and exactly validate bit 228, mask local
+   interrupts, verify execution has not migrated, and perform exactly one
+   DBGVCR read. If execution returns, restore the original bit immediately and
+   stop; do not touch comparators. If the Vita reboots or hangs at the MRC, the
+   journal must remain at `READ_PENDING`: reboot, preserve both slots, and
+   re-read bits 228 and 203 before any other test. This narrow rung tests whether
+   the cached switch changes the immediate CPU access result. It does not create
+   a fresh target or prove ProcessMgr/ThreadMgr initialized debug context.
+4. **Fresh-target runtime authorization test.** Only if the immediate result
+   leaves a lifecycle question, use a separately designed experiment that makes
+   bit 228 visible before a disposable target/thread is created. Do not reuse
+   the immediate-read title or infer fresh-target behavior from it.
+5. **Boot-time bit-only A/B.** If runtime state changes but DBGVCR remains
    inaccessible, statically locate the SKBL check and decide whether an earlier
    boot change can reach it. Patch only system-control mask `0x10`, with exact
    backup, hashes, bypass, and restoration prepared in advance. Do not combine
    this with a device-type change.
-5. **Device identity only as a control.** Use the documented Enso_ex DEVTOOL
+6. **Device identity only as a control.** Use the documented Enso_ex DEVTOOL
    runbook only if bit 228 evidence leaves an identity-derived policy question.
 
 ## Explicit safety boundaries

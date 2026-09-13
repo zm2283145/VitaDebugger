@@ -15,15 +15,15 @@ failure, cleanup, and restoration paths have passed on a retail Vita.
 | --- | --- | --- |
 | GDB Remote Serial Protocol | Hardware tested over direct TCP | Harden packet parsing and remove blocking network work from the global debugger lock |
 | 32 ARM/Thumb software breakpoints | Implemented; 32 slots | Add breakpoint-overlap, malformed-packet, disconnect-cleanup, and stress tests |
-| Hardware data watchpoints (`Z2`/`Z3`/`Z4`) | Guarded encoder and kernel-session engine remain compile-time experimental; the staged retail ladder passed DIDR/DSCRint but rebooted at the first DBGVCR read on core 1, so no comparator access is advertised | Keep fail-closed while researching DSE/authentication, OS Lock, and debug-power state offline; only with a supported safe platform access path resume disabled-register, trap/restore, all-core/context-isolation, and watchdog gates |
+| Hardware data watchpoints (`Z2`/`Z3`/`Z4`) | Guarded encoder and kernel-session engine remain compile-time experimental; the staged retail ladder rebooted at DBGVCR, and a later audited runtime DIP 228 set/readback plus one-read A/B also rebooted without a final journal record; no comparator access is advertised | Keep fail-closed while researching boot-time policy, DSE/authentication, OS Lock, and debug-power state offline; only with a supported safe platform access path resume disabled-register, trap/restore, all-core/context-isolation, and watchdog gates |
 | Hardware execution breakpoints (`Z1`) | Planned beyond KVDB's documented `Z2`-`Z4` handlers, but blocked by the same observed DSE-dependent register boundary | Require the same platform-access proof and staged safety gates, then advertise only the number of slots actually validated |
-| ARM/Thumb software single-step | Broad decoder implemented and hardware tested for many common control-flow forms | Finish remaining PC-writing forms and multithread/per-thread step behavior |
+| ARM/Thumb software single-step | Broad decoder implemented and hardware tested for many common control-flow forms; `Hc0` and `vCont;s:T;c` now hardware-step selected foreign Thumb workers through distinct paths using state-dependent raw-bank selection | Hardware-test the selected ARM-state path, add scheduler-locked isolation or displaced stepping, and finish remaining PC-writing forms |
 | VFP/NEON register reads | D0-D31/FPSCR layout and kernel snapshot gate pass | Complete live GDB read, continue, detach, reconnect, and restoration validation |
 | Prefetch abort, data abort, and undefined-instruction handling | Implemented with GDB signal and structured fault reporting | Add nested-fault containment and explicit previous-handler chaining |
-| ARM register read/write | Current exception-thread read/write plus read-only foreign-thread snapshots | Add strict `p`/`P` packets and independently validate foreign-thread mutation/restoration |
+| ARM register read/write | Current exception-thread read/write plus hardware-tested read-only foreign snapshots in runnable/current bank-0 and sleeping/syscall-return bank-1 states | Add strict `p`/`P` packets and independently validate foreign-thread mutation/restoration |
 | Application memory read/write | Implemented | Add strict syntax, overflow, page-boundary, and breakpoint-overlap validation plus fuzzing |
 | Relocation/module information | `qOffsets` plus chunk-safe `qXfer:libraries:read` implemented; module discovery hardware tested | Automate symbol loading for matching unstripped modules |
-| Thread enumeration, selection, names, and state | Cooperative and kernel-assisted discovery hardware tested | Unify bookkeeping and complete `Hc`/`vCont` and per-thread stepping |
+| Thread enumeration, selection, names, and state | Hardware-tested discovery feeds a bounded kernel-authoritative inventory (with cooperative name annotations); exact `Hg`/`Hc`, `vCont;c;s`, fail-closed selection, and deterministic foreign-thread stop attribution pass live hardware tests | Complete controlled renew/end failure injection and long stress gates, then design isolated per-thread execution |
 | Launch a target by path | Signed VitaDevDeploy can install and launch a build; arbitrary kernel-side attach/launch is not implemented | Finish deploy recovery tests, then add an IDE orchestration layer and optional unmodified-process attachment |
 | Clean detach and reuse | Persistent detach/reconnect and abrupt-client recovery hardware tested | Complete long-duration multithread/fault-injection soaks |
 | stdout to GDB console (`O` packets) | Fixed-memory generation-scoped queue and `O`-payload encoder pass host tests and VitaSDK cross-build; current file-I/O bridge remains experimental and is not wired to them | Single-owner no-ack RSP integration, restorable nonblocking stdout/stderr capture, fake-socket/real-GDB reconnect tests, and proof that target writers never wait on GDB |
@@ -35,8 +35,11 @@ failure, cleanup, and restoration paths have passed on a retail Vita.
 ## Implementation order
 
 1. Complete the read-only VFP live-GDB lifecycle gate.
-2. Unify cooperative and kernel thread inventory with one stop-session state
-   model; complete honest `Hc`/`vCont` behavior and fail-closed lease cleanup.
+2. Complete the remaining thread-control lifecycle gates. Unified inventory,
+   honest `Hc`/`vCont` behavior, fail-closed selection, abandoned-client
+   recovery, dynamic register-bank selection, and deterministic foreign-Thumb
+   stepping are hardware tested; selected ARM-state stepping, controlled
+   renew/end failures, cleanup fault injection, and longer stress runs remain.
 3. Harden RSP parsing and move blocking socket operations outside the global
    debugger lock, with fake-transport tests and fuzzing.
 4. Add bounded stdout/stderr `O`-packet delivery and the read-only monitor
@@ -44,17 +47,18 @@ failure, cleanup, and restoration paths have passed on a retail Vita.
 5. Finish remaining ARM/Thumb software-step decoding and strict `p`/`P`
    register access; expose foreign-thread writes only after independent
    mutation and restoration validation.
-6. Keep CP14 and memory-mapped hardware-debug access disabled. The staged
-   ladder rebooted at its first DBGVCR read before any comparator access. First
-   inventory KBL DIP switch 228 read-only; only after review, validate its
-   documented runtime setter with an exact set/readback/restore rung that does
-   not touch CP14. A separately approved, journaled DBGVCR A/B may follow only
-   if that rung passes. If runtime timing is too late, statically trace the SKBL
-   consumer before considering a bit-only boot-time test. DEVTOOL identity is a
-   secondary control, not proof of access. Resume comparator restore/trap tests
-   only after a supported safe DSE/authentication path passes every earlier
-   gate. Develop page-protection/data-abort software watchpoints independently
-   behind their own safety gates.
+6. Keep CP14 and memory-mapped hardware-debug access disabled. Read-only DIP
+   inventory, exact runtime Set(228)/readback/Clear, and post-reboot restoration
+   passed. The separately reviewed one-read A/B then rebooted after its durable
+   `READ_PENDING` record and did not reach `COMPLETE`; recovery again found bits
+   203/228 clear. The no-I/O critical window cannot journal the exact failing
+   instruction, but the audited single-MRC path did not establish safe DBGVCR
+   access and no comparator was touched. Research the earlier SKBL/boot-time
+   consumer offline. Treat DEVTOOL identity only as a secondary control, not
+   proof of access. Resume comparator restore/trap tests only after a supported
+   safe DSE/authentication path passes every earlier gate. Develop page-
+   protection/data-abort software watchpoints independently behind their own
+   safety gates.
 7. Complete ASLR-aware module symbol loading and relocated-breakpoint tests.
 8. Add PMU ownership and restore gates, then connect the counters to both
    `monitor perf` and `libvitaprofiler`.

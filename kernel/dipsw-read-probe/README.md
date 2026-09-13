@@ -1,6 +1,8 @@
 # Read-only KBL DIP-switch probe
 
-Status: source-complete and not yet hardware-tested.
+Status: source-complete, host-tested, and successfully exercised on hardware on
+2026-09-13 before and after the DIP 228 set/restore rung. The raw checksummed
+records and decoded summaries are preserved under `hardware-results/`.
 
 This disposable title reads the current KBL/DIP-switch policy state needed for
 the hardware-breakpoint investigation. It does not set or clear any DIP switch

@@ -7,6 +7,9 @@
 #include <psp2/kernel/modulemgr.h>
 #include "debugScreen.h"
 #include "uvdb.h"
+#ifdef UVDB_KERNEL_THREAD_CONTROL
+#include "vitadebug_kernel.h"
+#endif
 
 #if defined(UVDB_GDB_VFP_FIXTURE) && !defined(UVDB_KERNEL_VFP_READS)
 #error "UVDB_GDB_VFP_FIXTURE requires UVDB_KERNEL_VFP_READS"
@@ -19,6 +22,18 @@
 static volatile int test_value;
 volatile int trigger_fault;
 static volatile int worker_values[2];
+static volatile unsigned int worker_ready_mask;
+/*
+ * GDB-visible controls for the deterministic foreign-thread step fixture.
+ * These are deliberately exported (rather than static) so a test operator can
+ * arm and release either worker with ordinary RSP memory writes.  The workers
+ * keep their normal counter/sleep behavior while the corresponding arm value
+ * is zero.
+ */
+volatile unsigned int uvdb_worker_step_arm[2];
+volatile unsigned int uvdb_worker_step_ready[2];
+volatile unsigned int uvdb_worker_step_release[2];
+volatile unsigned int uvdb_worker_step_result[2];
 #ifdef UVDB_GDB_VFP_FIXTURE
 static volatile unsigned int gdb_vfp_fixture_ready;
 static volatile unsigned int gdb_vfp_fixture_release;
@@ -40,13 +55,66 @@ void arm_step_mov_fixture(void);
 void arm_step_ldm_fixture(void);
 void arm_step_ldr_pc_fixture(void);
 
+__attribute__((noreturn)) static void hold_failed_gate(void)
+{
+    psvDebugScreenPrintf("Gate failed; debugger not started. Close the app after recording this screen.\n");
+    for(;;)
+        usleep(1000000);
+}
+
+/*
+ * Keep these paths as separate, externally visible functions.  Once a ready
+ * value is published, worker 0 can execute only path 0 and worker 1 can execute
+ * only path 1.  Consequently a temporary breakpoint calculated for one
+ * worker's spin loop cannot be reached by the other worker while vCont resumes
+ * the process around a selected-thread software step.
+ */
+__attribute__((noinline, noclone, used))
+unsigned int uvdb_worker_step_path_0(unsigned int seed)
+{
+    uvdb_worker_step_ready[0] = 1;
+    __asm__ volatile("dmb ish" ::: "memory");
+    while(uvdb_worker_step_release[0] == 0)
+        __asm__ volatile("nop" ::: "memory");
+    __asm__ volatile("dmb ish" ::: "memory");
+    uvdb_worker_step_ready[0] = 0;
+    return (seed + 0x101u) ^ 0x13579bdfu;
+}
+
+__attribute__((noinline, noclone, used))
+unsigned int uvdb_worker_step_path_1(unsigned int seed)
+{
+    uvdb_worker_step_ready[1] = 1;
+    __asm__ volatile("dmb ish" ::: "memory");
+    while(uvdb_worker_step_release[1] == 0)
+        __asm__ volatile("nop\n\tnop" ::: "memory");
+    __asm__ volatile("dmb ish" ::: "memory");
+    uvdb_worker_step_ready[1] = 0;
+    return (seed ^ 0x2468ace0u) + 0x202u;
+}
+
 static void* worker_main(void* argument)
 {
     intptr_t index = (intptr_t)argument;
-    uvdb_register_thread(index == 0 ? "test worker 0" : "test worker 1");
+    if(uvdb_register_thread(index == 0 ? "test worker 0" :
+                                        "test worker 1") < 0)
+        return NULL;
+    __atomic_fetch_or(&worker_ready_mask, 1u << (unsigned int)index,
+                      __ATOMIC_SEQ_CST);
     for(;;)
     {
         worker_values[index]++;
+        if(__atomic_load_n(&uvdb_worker_step_arm[index], __ATOMIC_ACQUIRE))
+        {
+            unsigned int seed = (unsigned int)worker_values[index];
+            unsigned int result = index == 0
+                ? uvdb_worker_step_path_0(seed)
+                : uvdb_worker_step_path_1(seed);
+            __atomic_store_n(&uvdb_worker_step_result[index], result,
+                             __ATOMIC_RELEASE);
+            __atomic_store_n(&uvdb_worker_step_arm[index], 0,
+                             __ATOMIC_RELEASE);
+        }
 #ifdef UVDB_DEBUGNET_LIFECYCLE_TEST
         if(debugnet_stress)
             uvdb_debugnet_printf(UVDB_LOG_DEBUG,
@@ -137,6 +205,30 @@ int main(void)
     getsockname(sock, (void*)&sin, &l);
     close(sock);
     psvDebugScreenInit();
+#ifdef UVDB_KERNEL_THREAD_CONTROL
+    struct vd_kernel_status kernel_status = {0};
+    int kernel_status_result = vdKernelGetStatus(&kernel_status);
+    const unsigned int required_capabilities =
+        VD_KERNEL_REQUIRED_THREAD_CONTROL_CAPABILITIES;
+    int kernel_gate_pass = kernel_status_result >= 0 &&
+        kernel_status.abi_version == VD_KERNEL_ABI_VERSION &&
+        (kernel_status.capabilities & required_capabilities) ==
+            required_capabilities &&
+        kernel_status.max_threads == VD_KERNEL_MAX_THREADS;
+    psvDebugScreenPrintf(
+        "Kernel thread gate: %s result=%08X ABI=%08X caps=%08X max=%u\n",
+        kernel_gate_pass ? "PASS" : "FAIL", kernel_status_result,
+        kernel_status.abi_version, kernel_status.capabilities,
+        kernel_status.max_threads);
+    if(!kernel_gate_pass)
+    {
+        psvDebugScreenPrintf(
+            "Expected ABI=%08X caps&%08X max=%u; debugger not started.\n",
+            VD_KERNEL_ABI_VERSION, required_capabilities,
+            VD_KERNEL_MAX_THREADS);
+        hold_failed_gate();
+    }
+#endif
     SceUID modules[128];
     SceSize module_count = sizeof(modules) / sizeof(modules[0]);
     int module_result = sceKernelGetModuleList(0xff, modules, &module_count);
@@ -170,10 +262,30 @@ int main(void)
                          "VitaDebugger hardware test started (modules=%u)\n",
                          (unsigned int)module_count);
 #endif
-    uvdb_register_thread("test main");
+    int main_thread_result = uvdb_register_thread("test main");
     pthread_t workers[2];
-    pthread_create(&workers[0], NULL, worker_main, (void*)0);
-    pthread_create(&workers[1], NULL, worker_main, (void*)1);
+    worker_ready_mask = 0;
+    int worker_result_0 = pthread_create(&workers[0], NULL, worker_main,
+                                          (void*)0);
+    int worker_result_1 = pthread_create(&workers[1], NULL, worker_main,
+                                          (void*)1);
+    for(int wait = 0; worker_result_0 == 0 && worker_result_1 == 0 &&
+                         __atomic_load_n(&worker_ready_mask,
+                                         __ATOMIC_SEQ_CST) != 3u &&
+                         wait < 2000; ++wait)
+        usleep(1000);
+    unsigned int worker_state = __atomic_load_n(&worker_ready_mask,
+                                                 __ATOMIC_SEQ_CST);
+    int worker_gate_pass = main_thread_result == 0 && worker_result_0 == 0 &&
+                           worker_result_1 == 0 && worker_state == 3u;
+    psvDebugScreenPrintf(
+        "Thread fixture: %s main=%d create=%d,%d ready=%u\n",
+        worker_gate_pass ? "PASS" : "FAIL", main_thread_result,
+        worker_result_0, worker_result_1, worker_state);
+    if(!worker_gate_pass)
+        hold_failed_gate();
+    psvDebugScreenPrintf(
+        "Worker step fixture: ready (distinct paths; arm from GDB)\n");
 #ifdef UVDB_GDB_VFP_FIXTURE
     for(unsigned int i = 0; i < 32; ++i)
         gdb_vfp_fixture_pattern[i] = 0xD00D000000000000ULL |

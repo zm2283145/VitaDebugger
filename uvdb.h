@@ -96,7 +96,9 @@ int uvdb_get_last_fault(struct uvdb_fault_info* info);
 // Start an opt-in debugger service thread. The service keeps accepting clean
 // reconnects and converts GDB's Ctrl-C byte into a debugger stop while the
 // application is running. Networking must already be initialized.
-// Returns 0 on success (including when already running), or -1 on failure.
+// Kernel-integrated builds first require the exact companion ABI, thread-control
+// capabilities, and inventory size. Returns 0 on success (including when already
+// running), or -1 on failure.
 int uvdb_start_server(void);
 
 // Stop and delete the debugger service thread. Any active GDB connection is
@@ -109,7 +111,10 @@ int uvdb_stop_server(void);
 // Call only from normal application code, never from an exception handler.
 void uvdb_shutdown(void);
 
-//uvdb_enter acts as a software breakpoint. on first hit, the program will wait for GDB to connect. on subsequent hits, it will simply act as a software breakpoint
+// uvdb_enter acts as a software breakpoint. On first hit, the program waits for
+// GDB to connect; subsequent hits act as software breakpoints. A kernel-enabled
+// build fails closed with UVDB_STATE_ERROR before opening a socket when the
+// loaded companion ABI or required capabilities do not match.
 void uvdb_enter(void);
 
 //gdb exposes a remote syscall api to call some (whitelisted) syscalls on the host

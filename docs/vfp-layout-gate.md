@@ -70,9 +70,9 @@ reconnect, and watchdog recovery. Register writes remain out of scope.
 The first known-pattern run passed the D0-D31 bit-pattern, guarded snapshot,
 ownership-rejection, session-end/resume, and worker-restoration checks. Its raw
 display was `fpscr=00400000/00000000`. The sole FPSCR check failed because that
-probe build expected entry 1. This establishes the deliberately asymmetric
-mapping used by D32 v1: saved ARM core registers come from entry 1, but FPSCR
-comes from entry 0.
+probe build expected entry 1. This establishes the deliberately independent
+mapping used by D32 v1: ARM core registers use state-dependent raw-bank
+selection, while FPSCR comes from entry 0.
 
 A later launch of that same older installed build again returned the exact D32
 patterns and `fpscr=00400000/00000000`, with zero return codes for begin,
