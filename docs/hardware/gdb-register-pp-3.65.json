@@ -1,0 +1,160 @@
+{
+  "artifacts": {
+    "elf": {
+      "sha256": "18f91426599d90397e22ff225efee0dd8638ace7494e4037149ce112ccb5058a",
+      "size_bytes": 459168
+    },
+    "kernel_plugin": {
+      "sha256": "b4bf79a53d88ef34c0f1ac00d29557f8b709e60acb35e14222e292d1f47792bf",
+      "size_bytes": 7908
+    },
+    "vpk": {
+      "sha256": "c272bc6db5db36b51a4ff99ee8734c52be88badb61dfafafb01762873cdec725",
+      "size_bytes": 226850
+    }
+  },
+  "build": {
+    "configuration": [
+      "UVDB_KERNEL_THREAD_CONTROL=1",
+      "UVDB_KERNEL_VFP_READS=1",
+      "UVDB_GDB_VFP_FIXTURE=1"
+    ],
+    "source_commit": "9fb5c36"
+  },
+  "finished_utc": "2026-09-14T06:11:26.5525960Z",
+  "gdb": {
+    "register_packets_forced": true,
+    "version": "GNU gdb (GDB) 15.2"
+  },
+  "hardware": {
+    "device_class": "retail-handheld",
+    "firmware": "3.65",
+    "kernel_abi": "0x0001000b"
+  },
+  "observations": {
+    "breakpoint_step_over": {
+      "result": "fail_closed_E16",
+      "scope": "The first continue from the disposable software breakpoint was rejected by the separate software-step path. Removing that breakpoint before continue produced normal application progress. This did not alter the p/P result."
+    },
+    "post_detach_health": {
+      "application_progress_hex": "0x00000f43",
+      "clean_detach": true,
+      "individual_p0_reply": "a0860100",
+      "reconnect": true
+    }
+  },
+  "register_layout": "arm-d32",
+  "result": "PASS",
+  "schema": "vitadebugger-register-pp-live-gdb-v1",
+  "sessions": [
+    {
+      "application_progress": {
+        "after_resume_hex": "0x00000b23",
+        "before_resume_hex": "0x00000ad7",
+        "changed": true
+      },
+      "core": {
+        "cpsr": {
+          "mutated_hex": "0x70030030",
+          "mutation_bit": "V",
+          "original_hex": "0x60030030",
+          "read_back": true,
+          "restored": true,
+          "restoration_read_back": true,
+          "write_reply": "OK"
+        },
+        "r0": {
+          "mutated_hex": "0x13579bdf",
+          "original_hex": "0x00000ad6",
+          "read_back": true,
+          "restored": true,
+          "restoration_read_back": true,
+          "write_reply": "OK"
+        }
+      },
+      "kind": "gdb_register_commands_and_clean_detach",
+      "private_rsp_log": {
+        "line_count": 217,
+        "sha256": "5d5f83024837e6c447166220f7f631002475a63fe978f28ef873a78b7bd90dfc",
+        "size_bytes": 20020
+      },
+      "safety": {
+        "all_temporary_writable_state_restored_before_resume": true,
+        "clean_detach": true
+      },
+      "vfp_write_policy": {
+        "d0": {
+          "after": "1",
+          "before": "1",
+          "reply": "E16"
+        },
+        "d31": {
+          "after": "2",
+          "before": "2",
+          "reply": "E16"
+        },
+        "fpscr": {
+          "after_hex": "0x00400000",
+          "before_hex": "0x00400000",
+          "reply": "E16"
+        }
+      }
+    },
+    {
+      "core": {
+        "cpsr": {
+          "mutated_reply": "30000370",
+          "original_reply": "30000360",
+          "register_number": "19",
+          "restore_reply": "OK",
+          "restored_reply": "30000360",
+          "write_reply": "OK"
+        },
+        "r0": {
+          "mutated_reply": "df9b5713",
+          "original_reply": "0a0e0000",
+          "register_number": "0",
+          "restore_reply": "OK",
+          "restored_reply": "0a0e0000",
+          "write_reply": "OK"
+        }
+      },
+      "foreign_thread_policy": {
+        "core_r0": {
+          "after_reply": "28110c81",
+          "before_reply": "28110c81",
+          "write_reply": "E16"
+        },
+        "d0": {
+          "after_reply": "000000000000f03f",
+          "before_reply": "000000000000f03f",
+          "register_number": "1a",
+          "write_reply": "E16"
+        },
+        "d31": {
+          "after_reply": "0000000000000040",
+          "before_reply": "0000000000000040",
+          "register_number": "39",
+          "write_reply": "E16"
+        },
+        "fpscr": {
+          "after_reply": "00004000",
+          "before_reply": "00004000",
+          "register_number": "3a",
+          "write_reply": "E16"
+        }
+      },
+      "kind": "direct_rsp_after_clean_reconnect",
+      "private_rsp_log": {
+        "line_count": 157,
+        "sha256": "3d6c176321ab832195816fc5eb9b8b354d780a50157974706dfb4660573ac99e",
+        "size_bytes": 9887
+      },
+      "safety": {
+        "all_temporary_writable_state_restored_before_detach": true,
+        "clean_detach": true
+      }
+    }
+  ],
+  "started_utc": "2026-09-14T06:03:35.7943612Z"
+}

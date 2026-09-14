@@ -89,9 +89,11 @@ status includes:
   threads owned by an active stop session, including state-dependent selection
   of runnable/current and syscall-return ARM banks plus symbolized stack frames.
 - Strict individual-register `p` reads for ARM core, CPSR, legacy unavailable
-  FPA slots, and opt-in D0-D31/FPSCR, plus `P` writes to the selected exception
-  thread's core/CPSR context. Foreign-thread and floating-point writes are
-  rejected until a separately restorable kernel mutation path is validated.
+  FPA slots, and opt-in D0-D31/FPSCR. Selected exception-thread R0/CPSR `P`
+  writes pass live mutation, read-back, exact restoration, clean detach, and
+  reconnect on retail 3.65. Foreign-thread core and floating-point writes are
+  hardware-confirmed fail-closed and remain disabled pending a separately
+  restorable kernel mutation path.
 - Hardware-tested stop-session reconciliation: threads created after the
   initial snapshot are discovered and suspended by the next lease renewal.
 - Hardware-tested read-only ARM debug-resource discovery reporting six
@@ -165,6 +167,7 @@ unedited Vita screenshots record the completed probe results:
 | v7 | [Hardware-debug discovery](docs/hardware/kernel-probe-v7-hw-debug-discovery.jpg) | Read-only CP14 identification and the Vita's six breakpoint, four watchpoint, and two context-aware comparator counts |
 | VFP v8 | [Corrected D32/FPSCR probe](docs/hardware/kernel-vfp-probe-v8-bank0-pass.jpg) | Guarded D0-D31 capture, raw FPSCR entry-0 mapping, ownership rejection, two-thread stop/resume, and clean worker restoration |
 | VFP live GDB | [Lifecycle evidence](docs/hardware/gdb-vfp-live-3.65.json) | Foreign-thread D0/D31/FPSCR reads across continue/interrupt, detach/reconnect, transport loss without `D`, recovery, and final detach |
+| Individual `p`/`P` | [Transactional evidence](docs/hardware/gdb-register-pp-3.65.json) | Direct R0/CPSR packet mutation, byte-exact read-back and restoration in two sessions, clean detach/reconnect, and unchanged foreign core/VFP state after rejected writes |
 | ASLR + user SUPRX | [Lifecycle evidence](docs/hardware/gdb-aslr-suprx-3.65.json) | Main and loaded-user-module source breakpoints in five GDB sessions, stable same-process layout, automatic symbols after relaunch, explicit-symbol regeneration, and observed main/SUPRX address changes on both relaunches |
 | DebugNet v24 | [Sustained UDP stream](docs/hardware/debugnet-v24-sustained-stream.jpg) | Logging remains live after a loaded stop/restart cycle, with the displayed queue draining and no packet drops or send errors |
 | Profiler v1 | [User-mode profiler probe](docs/hardware/profiler-user-mode-probe-v1.jpg) | Eleven passing checks for live zones, frames, counters, memory/thread snapshots, wire encoding, four-producer pressure/drop accounting, uniqueness, and ring reuse without kernel calls |
@@ -582,7 +585,7 @@ VFP bank. At each stop, the stub also verifies the exact kernel ABI and
 capability bit before negotiating the extended packet; a normal fail-closed
 plugin retains the legacy core-only contract. See
 [GDB individual register access](docs/gdb-register-access.md) for the exact
-read/write matrix and remaining live-hardware gate.
+read/write matrix and completed retail 3.65 transactional gate.
 
 The repository test application can additionally compile a diagnostic-only
 registered worker with deterministic D0, D31, and FPSCR values. Add
@@ -968,9 +971,11 @@ exact matching unstripped ELF on the development computer.
   sleeping/syscall-return states; guarded foreign-thread VFP reads passed both
   the known-pattern kernel gate and the live GDB lifecycle gate. Individual
   core/CPSR writes are implemented only for the selected exception thread and
-  still need their live GDB mutation/read-back/restore gate. VFP writes remain
-  deliberately unsupported, and the read path remains opt-in because its
-  kernel snapshot ABI is undocumented.
+  pass the retail 3.65 mutation/read-back/exact-restoration gate across clean
+  detach/reconnect. The same gate confirms that foreign core and VFP writes
+  fail closed without changing state. VFP writes remain deliberately
+  unsupported, and the read path remains opt-in because its kernel snapshot
+  ABI is undocumented.
 - Hardware breakpoint/watchpoint encoding and a guarded kernel session engine
   are implemented experimentally, but the staged retail probe rebooted at the
   first DSE-dependent `DBGVCR` read. A separate API test proved cached DIP 228
@@ -1053,12 +1058,12 @@ exact matching unstripped ELF on the development computer.
    longer on-device pressure, abrupt-disconnect, restore/retry, and shutdown
    soaks. Decide whether queue/transport loss counters need a stable public API;
    retain DebugNet as the sustained-log and profiler path.
-5. Keep the new strict `p` reads and exception-thread core/CPSR `P` writes
-   reproducible, then run their live GDB mutation/read-back/restore gate. Finish
-   the remaining fail-closed ARM/Thumb-2 PC-writer semantic decoders and their
-   hardware fixtures. Design a new kernel ABI with snapshot, write, read-back,
-   rollback, lease-expiry, and detach restoration before enabling any foreign-
-   thread or VFP write.
+5. Keep the completed strict `p` and selected exception-thread core/CPSR `P`
+   retail 3.65 transactional gate reproducible. Finish the remaining
+   fail-closed ARM/Thumb-2 PC-writer semantic decoders and their hardware
+   fixtures. Design a new kernel ABI with snapshot, write, read-back, rollback,
+   lease-expiry, and detach restoration before enabling any foreign-thread or
+   VFP write.
 6. Keep hardware `Z1`-`Z4` fail-closed. The late-runtime DIP 228 path has now
    been tested and did not yield a safely returning DBGVCR read. Research
    boot-time policy, DSE/authentication, OS Lock, and debug-power state offline;
@@ -1112,7 +1117,7 @@ exact matching unstripped ELF on the development computer.
 - `uvdb.h`: public application API.
 - `protocol/arm_vfp_target_xml.inc`: exact opt-in GDB D32 target description.
 - `docs/gdb-register-access.md`: `p`/`P` numbering, thread-scope, mutation
-  policy, and validation gate.
+  policy, transactional validation gate, and retail 3.65 evidence.
 - `stdio_redirect.c` / `stdio_redirect.h`: restorable nonblocking Vita newlib
   `stdout`/`stderr` capture and internal-helper inventory filtering.
 - `uvdb_debugnet.c`: bounded asynchronous UDP logs for DebugNet-style receivers.

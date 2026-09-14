@@ -55,12 +55,30 @@ writes, and exact inverse restoration of core/CPSR mutations. The complete host
 suite and Vita cross-build pass for library-only, kernel-thread-control, and
 kernel-thread-control-plus-VFP configurations.
 
-The remaining hardware gate must use a matching unstripped ELF and real
-VitaSDK GDB. Stop at a disposable fixture, force GDB's fetch-register and
-set-register packets on, mutate a harmless core value with `P`, read it back
-with `p`, restore the original value before continuing, and verify the fixture
-result. Repeat across detach/reconnect. In the opt-in VFP build, verify D0, D31,
-and FPSCR with individual `p` packets, attempt their `P` writes, require an
-error, and confirm every value and the target's execution state are unchanged.
-Do not describe core writes as hardware validated, or VFP writes as supported,
-until those separate results are recorded.
+The live gate now passes on retail 3.65 using the matching unstripped ELF and
+VitaSDK GDB 15.2. Two stopped exception-thread sessions, separated by a clean
+detach and reconnect, forced individual packets and completed this exact
+transaction for both R0 and CPSR:
+
+1. Read the original value with `p`.
+2. Write a temporary value with `P` and require `OK`.
+3. Read the temporary value back byte-for-byte with `p`.
+4. Restore the exact original with `P` before any resume or detach.
+5. Read the original back byte-for-byte with `p`.
+
+The CPSR transaction changed only the V flag. A third connection verified that
+the application was still progressing after the second clean detach. On the
+foreign VFP fixture, individual `p` packets returned R0, D0, D31, and FPSCR;
+the corresponding core/VFP `P` attempts returned `E16`, and every subsequent
+read matched its original value. This validates the implemented policy; it does
+not add foreign-thread or VFP writes.
+
+The portable [retail 3.65 evidence](hardware/gdb-register-pp-3.65.json) records
+the artifact identities, exact packet replies, restoration assertions, clean
+detach/reconnect, and hashes of the private wire logs. It intentionally omits
+the Vita address, local paths, and raw transcripts.
+
+Every future firmware or kernel-ABI baseline must repeat the gate. If a
+temporary write or restoration read-back ever fails, keep the target stopped:
+do not continue, detach, or terminate GDB until the exact original value has
+been restored and independently read back.
