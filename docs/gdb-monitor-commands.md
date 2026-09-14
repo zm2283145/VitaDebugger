@@ -11,9 +11,10 @@ monitor threads
 monitor modules
 ```
 
-These commands are host-tested. Their live-GDB validation on Vita hardware is
-still pending, so this document does not treat them as a completed hardware
-gate.
+These commands are host-tested and hardware-tested on a retail Vita running
+system software 3.65. The live gate passed two complete raw-RSP sessions and an
+interactive-display check through GDB 15.2. Other firmware versions remain
+untested.
 
 ## Command output
 
@@ -118,7 +119,7 @@ rejection, every report shape, name sanitization, snapshot bounds, query
 failure reporting, non-mutation of input snapshots, exact-capacity output, and
 line-safe truncation.
 
-## Pending live-GDB gate
+## Live-GDB gate
 
 Build and install the matching full-feature test application with kernel thread
 control and guarded VFP reads enabled, load its matching compatible kernel
@@ -146,13 +147,18 @@ info sharedlibrary
 detach
 ```
 
-The hardware gate should verify that all four commands return without a
+The hardware gate verifies that all four commands return without a
 transport error; `status` reports the actual stopped kernel session; `threads`
 agrees with `qfThreadInfo`; `modules` contains the names returned by
 `qXfer:libraries:read`; normal output is not unexpectedly truncated; malformed
 and unknown commands return bounded help-directed errors without changing the
-thread inventory; and clean detach plus a fresh reconnect work afterward. A
-separate bounded fixture can exercise the visible truncation marker if the
-normal target does not naturally fill a packet. Archive device firmware, build
-identity, captured command output, and reconnect results before promoting this
-feature to hardware-tested status.
+thread inventory or selected PC; and clean detach plus a fresh reconnect work
+afterward. The retail 3.65 run passed with five stopped threads, 14 loaded
+modules, kernel ABI `0x0001000b`, a healthy stop session, and guarded VFP reads
+enabled. GDB 15.2 displayed each report and detached normally. The archived
+machine-readable result is
+[`hardware/gdb-monitor-commands-3.65.json`](hardware/gdb-monitor-commands-3.65.json).
+A separate bounded fixture can exercise the visible truncation marker if the
+normal target does not naturally fill a packet. Future hardware runs should
+archive the device firmware, build identity, captured command output, and
+reconnect results alongside the existing evidence.

@@ -30,7 +30,7 @@ stacks remain unvalidated unless an individual result says otherwise.
 | Launch a target by path | Signed VitaDevDeploy can install and launch a build; arbitrary kernel-side attach/launch is not implemented | Finish deploy recovery tests, then add an IDE orchestration layer and optional unmodified-process attachment |
 | Clean detach and reuse | Persistent detach/reconnect and abrupt-client recovery hardware tested | Complete long-duration multithread/fault-injection soaks |
 | stdout to GDB console (`O` packets) | Completed bounded queue, single-owner no-ack transport, and restorable nonblocking stdout/stderr capture; the two-session retail 3.65 gate passed output, Ctrl-C, stopped-state silence, detach, and reconnect | Add longer pressure, abrupt-disconnect, restore/retry, and shutdown hardware soaks; keep DebugNet for sustained logging |
-| Debugger monitor commands | Fixed read-only `qRcmd` registry implemented for `help`, `status`, `threads`, and `modules`; bounded parsing/rendering and line-safe truncation pass host tests, while the live Vita gate remains pending | Verify all four reports, malformed/unknown-command rejection, state preservation, clean detach, and reconnect in one automated two-session run before calling this hardware-tested; keep every future command explicit and read-only by default |
+| Debugger monitor commands | Hardware-tested fixed read-only `qRcmd` registry for `help`, `status`, `threads`, and `modules`; bounded host tests plus two raw-RSP sessions and a real GDB 15.2 session passed on retail 3.65 with state preservation, clean detach, and reconnect | Keep the live gate reproducible and every future command explicit and read-only by default |
 | Framebuffer/display diagnostics | Information path not implemented | Add a read-only `monitor display` equivalent without exposing unrestricted kernel memory |
 | Cortex-A9 PMU counters | User-mode profiler foundation passes its first hardware probe; raw PMU ownership is not implemented | Inventory PMU state, define exclusive ownership/restoration, then add guarded cycle/event counters and profiler integration |
 | UART or named-pipe transport | Not a core requirement because VitaDebugger has direct TCP and separate DebugNet UDP | Consider optional UART only if it materially helps recovery or kernel-plugin debugging |
@@ -49,9 +49,9 @@ stacks remain unvalidated unless an individual result says otherwise.
 3. Harden RSP parsing and move blocking socket operations outside the global
    debugger lock, with fake-transport tests and fuzzing.
 4. Extend the completed bounded stdout/stderr `O`-packet path with long hardware
-   soaks. Keep the host-tested read-only `qRcmd` registry bounded and run its
-   pending live `help`/`status`/`threads`/`modules`, state-preservation,
-   detach, and reconnect gate before extending it.
+   soaks. Keep the completed read-only `qRcmd` registry bounded and its two-
+   session `help`/`status`/`threads`/`modules`, state-preservation, detach, and
+   reconnect hardware gate reproducible before extending it.
 5. Keep the expanded ARM/Thumb decoder's host matrix, exact positive-`Hc`
    step-over, representative A32 live fixtures, and strict `p` plus selected-
    exception-thread core/CPSR `P` gates reproducible. Add injected memory-read,

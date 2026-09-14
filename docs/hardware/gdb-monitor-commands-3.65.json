@@ -1,0 +1,96 @@
+{
+  "artifacts": {
+    "eboot": {
+      "sha256": "82389a4e1ec435d3ea525163cdc88dfd58f20e8365941f9136c7fc3c4189dbdb",
+      "size_bytes": 585466
+    },
+    "elf": {
+      "sha256": "a8d80bd50afc3aa96781d41a84f337c51774727b77fcf7dbf4ea2a06bec9e91d",
+      "size_bytes": 517024
+    },
+    "vpk": {
+      "sha256": "eb671db908851176046ca80ece7d4b37d7b5213740bf6f88c95bede6c7aadb40",
+      "size_bytes": 254895
+    }
+  },
+  "build": {
+    "configuration": [
+      "CFLAGS=-Og",
+      "UVDB_KERNEL_THREAD_CONTROL=1",
+      "UVDB_KERNEL_VFP_READS=1",
+      "UVDB_GDB_VFP_FIXTURE=1"
+    ],
+    "source_commit": "b0a0023"
+  },
+  "deployment": {
+    "agent": "VitaDevDeploy",
+    "agent_session": "reused",
+    "job_id": "cce07fb62fd7b78149cb10b235d922e5",
+    "manifest_sha256": "9add0ee00a08d3456ef1f427845d05d1f8c3f2051e5a7c7047d128f6d20db128",
+    "result": "installed_and_launched",
+    "title_id": "SLRS00001"
+  },
+  "gdb": {
+    "frontend_commands": [
+      "monitor help",
+      "monitor status",
+      "monitor threads",
+      "monitor modules",
+      "detach"
+    ],
+    "frontend_result": "PASS",
+    "version": "GNU gdb (GDB) 15.2"
+  },
+  "hardware": {
+    "device_class": "retail-handheld",
+    "firmware": "3.65",
+    "kernel_abi": "0x0001000b"
+  },
+  "observations": {
+    "module_count": 14,
+    "normal_output_truncated": false,
+    "status": {
+      "kernel_compatible": true,
+      "stop_session_active": true,
+      "stop_session_healthy": true,
+      "vfp_reads_enabled": true
+    },
+    "thread_count": 5
+  },
+  "recorded_utc": "2026-09-14T15:51:39.6861017Z",
+  "result": "PASS",
+  "safety": {
+    "commands_are_fixed_read_only_registry": true,
+    "kernel_plugin_changed_for_test": false,
+    "malformed_command_rejected": true,
+    "selected_pc_preserved": true,
+    "status_snapshot_preserved": true,
+    "thread_inventory_preserved": true,
+    "unknown_command_rejected": true
+  },
+  "schema": "vitadebugger-gdb-monitor-live-v1",
+  "sessions": {
+    "gdb_frontend": {
+      "clean_detach": true,
+      "reports_displayed": [
+        "help",
+        "status",
+        "threads",
+        "modules"
+      ]
+    },
+    "raw_rsp": {
+      "clean_detach_count": 2,
+      "no_ack_negotiated_count": 2,
+      "reconnect": true,
+      "session_count": 2,
+      "stop_reply": "T05"
+    }
+  },
+  "validation": {
+    "complete_host_suite": "PASS",
+    "focused_monitor_suite": "PASS",
+    "python_smoke_compile": "PASS",
+    "result": "PASS"
+  }
+}

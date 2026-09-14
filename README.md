@@ -134,8 +134,10 @@ status includes:
   detached cleanly before the fresh reconnect.
 - A fixed read-only GDB `qRcmd` registry for `monitor help`, `status`,
   `threads`, and `modules`. Exact command parsing, bounded snapshots, safe name
-  rendering, and line-safe response truncation pass native host tests. The
-  automated live Vita detach/reconnect validation gate is still pending.
+  rendering, and line-safe response truncation pass native host tests. On a
+  retail Vita running system software 3.65, the automated two-session gate and
+  a real GDB 15.2 session passed all four commands, state preservation, clean
+  detach, and reconnect with five stopped threads and 14 loaded modules.
 - Hardware-tested DebugNet-compatible UDP logging with bounded messages,
   concurrent producers, stop/restart under load, and GDB attach/detach
   coexistence.
@@ -941,7 +943,7 @@ and loaded-module segments. They do not execute arbitrary command text. Output
 is returned as one bounded final hex-encoded `qRcmd` reply and ends with an
 explicit truncation marker if the full report cannot fit. See the
 [GDB monitor-command guide](docs/gdb-monitor-commands.md) for the exact
-read-only boundary, report fields, host tests, and pending live-hardware gate.
+read-only boundary, report fields, host tests, and live-hardware evidence.
 The automated two-session gate is:
 
 ```powershell
@@ -1065,8 +1067,9 @@ exact matching unstripped ELF on the development computer.
   `threads`, and `modules` registry. Arguments and unregistered commands are
   rejected; decoded command text is never executed or forwarded. Reports use
   fixed snapshot and packet bounds and visibly truncate at a complete line when
-  possible. Host validation passes, but the live Vita state-preservation,
-  detach, and reconnect gate remains pending.
+  possible. The retail 3.65 live gate passed state preservation, two clean raw-
+  RSP detach/reconnect sessions, and display through GDB 15.2. Other firmware
+  versions remain untested.
 - The optional stdio bridge uses Vita newlib's private descriptor map because
   Vita newlib does not export `dup2`. Its current close/retry behavior was
   audited against newlib commit
@@ -1123,9 +1126,9 @@ exact matching unstripped ELF on the development computer.
    tests, fuzzing, and long reconnect/shutdown/multithread hardware soaks.
 4. Extend the completed single-owner, no-ack GDB `O`-packet console bridge with
    longer on-device pressure, abrupt-disconnect, restore/retry, and shutdown
-   soaks. Run the host-tested read-only `qRcmd` registry's pending live
-   `help`/`status`/`threads`/`modules`, state-preservation, detach, and reconnect
-   gate before extending its command set. Decide whether console
+   soaks. Keep the completed read-only `qRcmd`
+   `help`/`status`/`threads`/`modules` two-session hardware gate reproducible,
+   and require the same gate before extending its command set. Decide whether console
    queue/transport loss counters need a stable public API; retain DebugNet as
    the sustained-log and profiler path.
 5. Keep the completed strict `p` and selected exception-thread core/CPSR `P`
@@ -1194,7 +1197,7 @@ exact matching unstripped ELF on the development computer.
 - `docs/gdb-register-access.md`: `p`/`P` numbering, thread-scope, mutation
   policy, transactional validation gate, and retail 3.65 evidence.
 - `docs/gdb-monitor-commands.md`: monitor command reference, security boundary,
-  response limits, native tests, and pending live-GDB validation gate.
+  response limits, native tests, and live-GDB validation evidence.
 - `stdio_redirect.c` / `stdio_redirect.h`: restorable nonblocking Vita newlib
   `stdout`/`stderr` capture and internal-helper inventory filtering.
 - `uvdb_debugnet.c`: bounded asynchronous UDP logs for DebugNet-style receivers.
