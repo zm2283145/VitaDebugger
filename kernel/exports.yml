@@ -23,3 +23,8 @@ vitadebug_kernel:
         - vdKernelRenewHardwareDebug: 0x76A3D00B
         - vdKernelUpdateHardwarePoint: 0x76A3D00C
         - vdKernelReleaseHardwareDebug: 0x76A3D00D
+        - vdKernelGetThreadMutationInfo: 0x76A3D00E
+        - vdKernelBeginThreadMutation: 0x76A3D00F
+        - vdKernelStageThreadMutation: 0x76A3D010
+        - vdKernelCommitThreadMutation: 0x76A3D011
+        - vdKernelRestoreThreadMutation: 0x76A3D012

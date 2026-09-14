@@ -7,6 +7,7 @@
 #include <psp2/kernel/error.h>
 
 #include "vitadebug_kernel.h"
+#include "thread_mutation.h"
 #ifdef VD_KERNEL_ENABLE_EXPERIMENTAL_HW_DEBUG
 #include "hw_debug.h"
 #endif
@@ -48,6 +49,11 @@ struct vd_stop_session {
 };
 
 static struct vd_stop_session stop_session;
+static struct vd_thread_mutation_session thread_mutation_session;
+// VitaSDK currently exposes no supported foreign-thread CPU or VFP setter.
+// Keep both writer capabilities absent until a separately validated backend
+// can provide snapshot, write, read-back verification, and exact restoration.
+static const struct vd_thread_mutation_backend thread_mutation_backend = {0};
 static volatile int session_lock;
 static volatile int watchdog_stop;
 static SceUID watchdog_thread = -1;
@@ -103,7 +109,24 @@ static int resume_session_locked(void)
     int membership_known = total >= 0 &&
                            total <= VD_KERNEL_MAX_THREADS &&
                            current_count >= 0 &&
-                           current_count <= VD_KERNEL_MAX_THREADS;
+                           current_count <= VD_KERNEL_MAX_THREADS &&
+                           current_count == total;
+    if(vdThreadMutationIsActive(&thread_mutation_session))
+    {
+        // Cleanup consults the backend's retained exact target object. Fresh
+        // UID inventory is insufficient here because an integer UID may be
+        // destroyed and reused while a restore obligation is outstanding.
+        int mutation_result = vdThreadMutationCleanup(
+            &thread_mutation_session, stop_session.pid, stop_session.token,
+            &thread_mutation_backend);
+        if(mutation_result < 0)
+        {
+            // Keep the lease expired. The watchdog will retry exact restore
+            // and no target owned by this stop session may resume first.
+            stop_session.deadline_us = 0;
+            return mutation_result;
+        }
+    }
     int first_error = 0;
     for(int i = stop_session.suspended_count - 1; i >= 0; --i)
     {
@@ -218,6 +241,7 @@ int module_start(SceSize args, void* argp)
 {
     (void)args;
     (void)argp;
+    vdThreadMutationInit(&thread_mutation_session);
 #ifdef VD_KERNEL_ENABLE_EXPERIMENTAL_HW_DEBUG
     if(vdHwDebugStart() < 0)
         return SCE_KERNEL_START_FAILED;
@@ -261,7 +285,8 @@ int module_stop(SceSize args, void* argp)
     stop_session.hardware_restore_pending = 0;
     stop_session.hardware_token = 0;
 #endif
-    if(stop_session.active)
+    if(stop_session.active ||
+       vdThreadMutationIsActive(&thread_mutation_session))
         resume_result = resume_session_locked();
     unlock_sessions();
     if(resume_result < 0)
@@ -299,7 +324,14 @@ int vdKernelGetStatus(struct vd_kernel_status* status)
                                 VD_KERNEL_CAP_THREAD_REGISTERS |
                                 VD_KERNEL_CAP_STOP_RECONCILE |
                                 VD_KERNEL_CAP_HW_DEBUG_DISCOVERY |
+                                VD_KERNEL_CAP_THREAD_MUTATION_LIFECYCLE |
                                 VD_KERNEL_CAP_PROBE_SUSPEND;
+    unsigned int mutation_banks = vdThreadMutationSupportedBanks(
+        &thread_mutation_backend);
+    if((mutation_banks & VD_KERNEL_THREAD_MUTATION_CORE) != 0)
+        capabilities |= VD_KERNEL_CAP_THREAD_CORE_WRITE;
+    if((mutation_banks & VD_KERNEL_THREAD_MUTATION_VFP) != 0)
+        capabilities |= VD_KERNEL_CAP_THREAD_VFP_WRITE;
 #ifdef VD_KERNEL_ENABLE_EXPERIMENTAL_VFP_SNAPSHOT
     capabilities |= VD_KERNEL_CAP_THREAD_VFP_REGISTERS;
 #endif
@@ -508,7 +540,8 @@ int vdKernelBeginStop(unsigned int lease_ms, SceUID exempt_user_thread,
     }
 
     lock_sessions();
-    if(stop_session.active)
+    if(stop_session.active ||
+       vdThreadMutationIsActive(&thread_mutation_session))
     {
         kernel_result.failure_code = -2;
         unlock_sessions();
@@ -696,14 +729,37 @@ static SceUID find_session_thread_locked(SceUID target_user_thread)
 {
     if(target_user_thread < 0)
         return -1;
-    for(int i = 0; i < stop_session.suspended_count; ++i)
+
+    // The retained stop-session list alone is not proof that a GUID still
+    // names the original target: a thread can exit while stopped and its UID
+    // can later be reused. Reconcile it against one complete, current
+    // enumeration of the exact owning PID and require the candidate to remain
+    // debug-suspended before any register snapshot or mutation.
+    SceUID current_threads[VD_KERNEL_MAX_THREADS];
+    int copied = 0;
+    int total = ksceKernelGetThreadIdList(
+        stop_session.pid, current_threads, VD_KERNEL_MAX_THREADS, &copied);
+    if(total < 0 || total > VD_KERNEL_MAX_THREADS || copied < 0 ||
+       copied != total)
+        return -1;
+
+    SceUID match = -1;
+    for(int i = 0; i < copied; ++i)
     {
-        SceUID candidate = stop_session.suspended[i];
+        SceUID candidate = current_threads[i];
+        if(!thread_list_contains(stop_session.suspended,
+                                 stop_session.suspended_count, candidate) ||
+           ksceKernelIsThreadDebugSuspended(candidate) <= 0)
+            continue;
         SceUID candidate_user = ksceKernelGetUserThreadId(candidate);
         if(candidate_user >= 0 && candidate_user == target_user_thread)
-            return candidate;
+        {
+            if(match >= 0)
+                return -1;
+            match = candidate;
+        }
     }
-    return -1;
+    return match;
 }
 
 int vdKernelGetThreadRegisters(unsigned int token, SceUID target_user_thread,
@@ -847,10 +903,12 @@ static unsigned int read_full_context_id(void)
     __asm__ volatile("mrc p15, 0, %0, c13, c0, 1" : "=r"(context_id));
     return context_id;
 }
+#endif
 
 static int stop_session_is_current_locked(SceUID caller_pid,
                                           unsigned int stop_token,
-                                          uint64_t now_us)
+                                          uint64_t now_us,
+                                          int require_mutation_idle)
 {
     SceUID threads[VD_KERNEL_MAX_THREADS];
     int copied = 0;
@@ -861,13 +919,16 @@ static int stop_session_is_current_locked(SceUID caller_pid,
        now_us >= stop_session.deadline_us ||
        stop_session.hardware_mutation ||
        stop_session.hardware_restore_pending ||
+       (require_mutation_idle &&
+         vdThreadMutationIsActive(&thread_mutation_session)) ||
        stop_session.exempt_thread >= 0 ||
        stop_session.controller_thread != ksceKernelGetThreadId())
         return 0;
 
     total = ksceKernelGetThreadIdList(caller_pid, threads,
                                       VD_KERNEL_MAX_THREADS, &copied);
-    if(total < 0 || total > VD_KERNEL_MAX_THREADS)
+    if(total < 0 || total > VD_KERNEL_MAX_THREADS || copied < 0 ||
+       copied != total)
         return 0;
     for(int i = 0; i < copied; ++i)
     {
@@ -879,7 +940,274 @@ static int stop_session_is_current_locked(SceUID caller_pid,
     }
     return 1;
 }
-#endif
+
+static struct vd_thread_mutation_identity mutation_identity_locked(
+    SceUID caller_pid, SceUID caller_thread, unsigned int stop_token,
+    SceUID target_user_thread, SceUID target_guid)
+{
+    const struct vd_thread_mutation_identity identity = {
+        .owner_pid = caller_pid,
+        .owner_thread = caller_thread,
+        .stop_token = stop_token,
+        .target_user_thread = target_user_thread,
+        .target_guid = target_guid,
+    };
+    return identity;
+}
+
+int vdKernelGetThreadMutationInfo(
+    struct vd_kernel_thread_mutation_info* info)
+{
+    uint32_t syscall_state;
+    ENTER_SYSCALL(syscall_state);
+    if(!info)
+    {
+        EXIT_SYSCALL(syscall_state);
+        return VD_KERNEL_ERROR_MUTATION_INVALID;
+    }
+
+    const struct vd_kernel_thread_mutation_info kernel_info = {
+        .abi_version = VD_KERNEL_THREAD_MUTATION_ABI_VERSION,
+        .struct_size = sizeof(kernel_info),
+        .supported_banks = vdThreadMutationSupportedBanks(
+            &thread_mutation_backend),
+        .max_transactions = VD_KERNEL_THREAD_MUTATION_MAX_TRANSACTIONS,
+        .core_bank_count = VD_KERNEL_THREAD_MUTATION_CORE_BANK_COUNT,
+        .core_register_count =
+            VD_KERNEL_THREAD_MUTATION_CORE_REGISTER_COUNT,
+        .vfp_register_count =
+            VD_KERNEL_THREAD_MUTATION_VFP_REGISTER_COUNT,
+        .features = VD_KERNEL_THREAD_MUTATION_SNAPSHOT_BEFORE_WRITE |
+                    VD_KERNEL_THREAD_MUTATION_VERIFY_AFTER_WRITE |
+                    VD_KERNEL_THREAD_MUTATION_EXPLICIT_RESTORE |
+                    VD_KERNEL_THREAD_MUTATION_STOP_LEASE_CLEANUP |
+                    VD_KERNEL_THREAD_MUTATION_RETAINED_TARGET |
+                    VD_KERNEL_THREAD_MUTATION_SINGLE_BANK,
+    };
+    int result = ksceKernelMemcpyKernelToUser(info, &kernel_info,
+                                               sizeof(kernel_info));
+    EXIT_SYSCALL(syscall_state);
+    return result;
+}
+
+int vdKernelBeginThreadMutation(
+    const struct vd_kernel_thread_mutation_begin_request* request,
+    struct vd_kernel_thread_mutation_handle* handle)
+{
+    uint32_t syscall_state;
+    ENTER_SYSCALL(syscall_state);
+    if(!request || !handle)
+    {
+        EXIT_SYSCALL(syscall_state);
+        return VD_KERNEL_ERROR_MUTATION_INVALID;
+    }
+
+    struct vd_kernel_thread_mutation_begin_request kernel_request;
+    int result = ksceKernelMemcpyUserToKernel(&kernel_request, request,
+                                               sizeof(kernel_request));
+    if(result < 0)
+    {
+        EXIT_SYSCALL(syscall_state);
+        return result;
+    }
+
+    SceUID caller_pid = ksceKernelGetProcessId();
+    SceUID caller_thread = ksceKernelGetThreadId();
+    struct vd_kernel_thread_mutation_handle kernel_handle;
+    struct vd_thread_mutation_identity identity;
+    int began = 0;
+    lock_sessions();
+    uint64_t now = (uint64_t)ksceKernelGetSystemTimeWide();
+    if(!stop_session_is_current_locked(caller_pid,
+                                       kernel_request.stop_token, now, 1))
+        result = VD_KERNEL_ERROR_MUTATION_STOP_REQUIRED;
+    else
+    {
+        SceUID target_guid = find_session_thread_locked(
+            kernel_request.target_thread);
+        if(target_guid < 0)
+            result = VD_KERNEL_ERROR_MUTATION_TARGET;
+        else
+        {
+            identity = mutation_identity_locked(
+                caller_pid, caller_thread, kernel_request.stop_token,
+                kernel_request.target_thread, target_guid);
+            result = vdThreadMutationBegin(
+                &thread_mutation_session, &identity, &kernel_request,
+                &thread_mutation_backend, &kernel_handle);
+            began = result >= 0;
+        }
+    }
+    unlock_sessions();
+
+    if(result >= 0)
+        result = ksceKernelMemcpyKernelToUser(handle, &kernel_handle,
+                                               sizeof(kernel_handle));
+    if(result < 0 && began)
+    {
+        // A failed result copy must not strand an undiscoverable transaction.
+        // Begin and stage never write target state, so this exact handle-based
+        // cancellation cannot itself create a restore obligation.
+        lock_sessions();
+        vdThreadMutationRestore(&thread_mutation_session, &identity,
+                                &kernel_handle, &thread_mutation_backend);
+        unlock_sessions();
+    }
+    EXIT_SYSCALL(syscall_state);
+    return result;
+}
+
+int vdKernelStageThreadMutation(
+    const struct vd_kernel_thread_mutation_write_request* request)
+{
+    uint32_t syscall_state;
+    ENTER_SYSCALL(syscall_state);
+    if(!request)
+    {
+        EXIT_SYSCALL(syscall_state);
+        return VD_KERNEL_ERROR_MUTATION_INVALID;
+    }
+
+    struct vd_kernel_thread_mutation_write_request kernel_request;
+    int result = ksceKernelMemcpyUserToKernel(&kernel_request, request,
+                                               sizeof(kernel_request));
+    if(result < 0)
+    {
+        EXIT_SYSCALL(syscall_state);
+        return result;
+    }
+
+    SceUID caller_pid = ksceKernelGetProcessId();
+    SceUID caller_thread = ksceKernelGetThreadId();
+    lock_sessions();
+    uint64_t now = (uint64_t)ksceKernelGetSystemTimeWide();
+    if(!stop_session_is_current_locked(
+           caller_pid, kernel_request.handle.stop_token, now, 0))
+        result = VD_KERNEL_ERROR_MUTATION_STOP_REQUIRED;
+    else
+    {
+        SceUID target_guid = find_session_thread_locked(
+            kernel_request.handle.target_thread);
+        if(target_guid < 0)
+            result = VD_KERNEL_ERROR_MUTATION_TARGET;
+        else
+        {
+            const struct vd_thread_mutation_identity identity =
+                mutation_identity_locked(
+                    caller_pid, caller_thread,
+                    kernel_request.handle.stop_token,
+                    kernel_request.handle.target_thread, target_guid);
+            result = vdThreadMutationStage(&thread_mutation_session,
+                                            &identity, &kernel_request,
+                                            &thread_mutation_backend);
+        }
+    }
+    unlock_sessions();
+    EXIT_SYSCALL(syscall_state);
+    return result;
+}
+
+int vdKernelCommitThreadMutation(
+    const struct vd_kernel_thread_mutation_handle* handle)
+{
+    uint32_t syscall_state;
+    ENTER_SYSCALL(syscall_state);
+    if(!handle)
+    {
+        EXIT_SYSCALL(syscall_state);
+        return VD_KERNEL_ERROR_MUTATION_INVALID;
+    }
+
+    struct vd_kernel_thread_mutation_handle kernel_handle;
+    int result = ksceKernelMemcpyUserToKernel(&kernel_handle, handle,
+                                               sizeof(kernel_handle));
+    if(result < 0)
+    {
+        EXIT_SYSCALL(syscall_state);
+        return result;
+    }
+
+    SceUID caller_pid = ksceKernelGetProcessId();
+    SceUID caller_thread = ksceKernelGetThreadId();
+    lock_sessions();
+    uint64_t now = (uint64_t)ksceKernelGetSystemTimeWide();
+    if(!stop_session_is_current_locked(caller_pid,
+                                       kernel_handle.stop_token, now, 0))
+        result = VD_KERNEL_ERROR_MUTATION_STOP_REQUIRED;
+    else
+    {
+        SceUID target_guid = find_session_thread_locked(
+            kernel_handle.target_thread);
+        if(target_guid < 0)
+            result = VD_KERNEL_ERROR_MUTATION_TARGET;
+        else
+        {
+            const struct vd_thread_mutation_identity identity =
+                mutation_identity_locked(
+                    caller_pid, caller_thread, kernel_handle.stop_token,
+                    kernel_handle.target_thread, target_guid);
+            result = vdThreadMutationCommit(
+                &thread_mutation_session, &identity, &kernel_handle,
+                &thread_mutation_backend);
+        }
+    }
+    unlock_sessions();
+    EXIT_SYSCALL(syscall_state);
+    return result;
+}
+
+int vdKernelRestoreThreadMutation(
+    const struct vd_kernel_thread_mutation_handle* handle)
+{
+    uint32_t syscall_state;
+    ENTER_SYSCALL(syscall_state);
+    if(!handle)
+    {
+        EXIT_SYSCALL(syscall_state);
+        return VD_KERNEL_ERROR_MUTATION_INVALID;
+    }
+
+    struct vd_kernel_thread_mutation_handle kernel_handle;
+    int result = ksceKernelMemcpyUserToKernel(&kernel_handle, handle,
+                                               sizeof(kernel_handle));
+    if(result < 0)
+    {
+        EXIT_SYSCALL(syscall_state);
+        return result;
+    }
+
+    SceUID caller_pid = ksceKernelGetProcessId();
+    SceUID caller_thread = ksceKernelGetThreadId();
+    lock_sessions();
+    if(!stop_session.active || stop_session.pid != caller_pid ||
+       stop_session.token != kernel_handle.stop_token ||
+       stop_session.controller_thread != caller_thread ||
+       stop_session.exempt_thread >= 0 ||
+       stop_session.hardware_mutation ||
+       stop_session.hardware_restore_pending)
+        result = VD_KERNEL_ERROR_MUTATION_STOP_REQUIRED;
+    else
+    {
+        SceUID target_guid = find_session_thread_locked(
+            kernel_handle.target_thread);
+        if(target_guid < 0 ||
+           ksceKernelIsThreadDebugSuspended(target_guid) <= 0)
+            result = VD_KERNEL_ERROR_MUTATION_TARGET;
+        else
+        {
+            const struct vd_thread_mutation_identity identity =
+                mutation_identity_locked(
+                    caller_pid, caller_thread, kernel_handle.stop_token,
+                    kernel_handle.target_thread, target_guid);
+            result = vdThreadMutationRestore(
+                &thread_mutation_session, &identity, &kernel_handle,
+                &thread_mutation_backend);
+        }
+    }
+    unlock_sessions();
+    EXIT_SYSCALL(syscall_state);
+    return result;
+}
 
 int vdKernelAcquireHardwareDebug(
     unsigned int lease_ms,
@@ -973,7 +1301,7 @@ int vdKernelUpdateHardwarePoint(
     uint64_t now;
     lock_sessions();
     now = (uint64_t)ksceKernelGetSystemTimeWide();
-    if(!stop_session_is_current_locked(caller_pid, stop_token, now))
+    if(!stop_session_is_current_locked(caller_pid, stop_token, now, 1))
     {
         unlock_sessions();
         EXIT_SYSCALL(syscall_state);

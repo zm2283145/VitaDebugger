@@ -23,8 +23,10 @@ uvdb-symbols.gdb.state.json
 /test-register-bank
 /test-thread-control
 /test-vfp-policy
+/test-kernel-thread-mutation
 /test-console-queue
 /test-console-transport
+/attach/test-attach-broker
 /kernel/dipsw-read-probe/test-record
 /kernel/dipsw-set-restore-probe/test-record
 /kernel/dipsw-dbgvcr-probe/test-record

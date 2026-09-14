@@ -6,7 +6,7 @@
 extern "C" {
 #endif
 
-#define VD_KERNEL_ABI_VERSION 0x0001000Bu
+#define VD_KERNEL_ABI_VERSION 0x0001000Cu
 #define VD_KERNEL_MAX_THREADS 64
 #define VD_KERNEL_HW_CORE_COUNT 3
 #define VD_KERNEL_HW_BREAKPOINT_COUNT 6
@@ -24,6 +24,15 @@ extern "C" {
 #define VD_KERNEL_ERROR_HW_CORE (-14)
 #define VD_KERNEL_ERROR_HW_RESTORE (-15)
 #define VD_KERNEL_ERROR_HW_RANGE (-16)
+#define VD_KERNEL_ERROR_MUTATION_UNSUPPORTED (-17)
+#define VD_KERNEL_ERROR_MUTATION_INVALID (-18)
+#define VD_KERNEL_ERROR_MUTATION_BUSY (-19)
+#define VD_KERNEL_ERROR_MUTATION_OWNER (-20)
+#define VD_KERNEL_ERROR_MUTATION_STOP_REQUIRED (-21)
+#define VD_KERNEL_ERROR_MUTATION_TARGET (-22)
+#define VD_KERNEL_ERROR_MUTATION_STATE (-23)
+#define VD_KERNEL_ERROR_MUTATION_RESTORE (-24)
+#define VD_KERNEL_ERROR_MUTATION_VERIFY (-25)
 // Public normalized VFP-unavailable result. Use VitaSDK's stable ThreadMgr
 // error encoding so the value survives the user/kernel syscall boundary.
 #define VD_KERNEL_ERROR_VFP_CONTEXT_UNAVAILABLE ((int)0x80028031u)
@@ -37,6 +46,11 @@ enum vd_kernel_capability {
     VD_KERNEL_CAP_THREAD_VFP_REGISTERS = 1u << 5,
     VD_KERNEL_CAP_HW_BREAKPOINT = 1u << 6,
     VD_KERNEL_CAP_HW_WATCHPOINT = 1u << 7,
+    // The versioned snapshot/stage/commit/restore transaction ABI is present.
+    // The two following bits independently authorize actual target mutation.
+    VD_KERNEL_CAP_THREAD_MUTATION_LIFECYCLE = 1u << 8,
+    VD_KERNEL_CAP_THREAD_CORE_WRITE = 1u << 9,
+    VD_KERNEL_CAP_THREAD_VFP_WRITE = 1u << 10,
     VD_KERNEL_CAP_PROBE_SUSPEND = 1u << 31,
 };
 
@@ -104,6 +118,91 @@ struct vd_kernel_hw_debug_info {
     unsigned int watchpoint_count;
     unsigned int context_breakpoint_count;
 };
+
+#define VD_KERNEL_THREAD_MUTATION_ABI_VERSION 1u
+#define VD_KERNEL_THREAD_MUTATION_MAX_TRANSACTIONS 1u
+#define VD_KERNEL_THREAD_MUTATION_CORE_BANK_COUNT 2u
+#define VD_KERNEL_THREAD_MUTATION_CORE_REGISTER_COUNT 17u
+#define VD_KERNEL_THREAD_MUTATION_CPSR_WRITABLE_MASK 0xF80F0000u
+#define VD_KERNEL_THREAD_MUTATION_VFP_REGISTER_COUNT \
+    (VD_KERNEL_VFP_D_REGISTER_COUNT + 1u)
+#define VD_KERNEL_THREAD_MUTATION_VFP_FPSCR_INDEX \
+    VD_KERNEL_VFP_D_REGISTER_COUNT
+
+enum vd_kernel_thread_mutation_bank {
+    VD_KERNEL_THREAD_MUTATION_CORE = 1u << 0,
+    VD_KERNEL_THREAD_MUTATION_VFP = 1u << 1,
+};
+
+enum vd_kernel_thread_mutation_feature {
+    VD_KERNEL_THREAD_MUTATION_SNAPSHOT_BEFORE_WRITE = 1u << 0,
+    VD_KERNEL_THREAD_MUTATION_VERIFY_AFTER_WRITE = 1u << 1,
+    VD_KERNEL_THREAD_MUTATION_EXPLICIT_RESTORE = 1u << 2,
+    VD_KERNEL_THREAD_MUTATION_STOP_LEASE_CLEANUP = 1u << 3,
+    VD_KERNEL_THREAD_MUTATION_RETAINED_TARGET = 1u << 4,
+    VD_KERNEL_THREAD_MUTATION_SINGLE_BANK = 1u << 5,
+};
+
+struct vd_kernel_thread_mutation_info {
+    unsigned int abi_version;
+    unsigned int struct_size;
+    unsigned int supported_banks;
+    unsigned int max_transactions;
+    unsigned int core_bank_count;
+    unsigned int core_register_count;
+    unsigned int vfp_register_count;
+    unsigned int features;
+};
+
+struct vd_kernel_thread_mutation_begin_request {
+    unsigned int struct_size;
+    unsigned int abi_version;
+    unsigned int stop_token;
+    SceUID target_thread;
+    // Exactly one bank is allowed per transaction. Core and VFP snapshots
+    // contain overlapping FPSCR views, so mixing them is rejected until a
+    // firmware-validated canonical alias contract exists.
+    unsigned int bank_mask;
+    unsigned int flags;
+};
+
+// Every operation after begin repeats the complete handle. The process,
+// controller thread, stop token, target user ID/GUID, transaction token, and
+// generation are also retained in kernel memory and must all still match.
+struct vd_kernel_thread_mutation_handle {
+    unsigned int struct_size;
+    unsigned int abi_version;
+    unsigned int token;
+    unsigned int generation;
+    unsigned int stop_token;
+    SceUID target_thread;
+    unsigned int bank_mask;
+    unsigned int reserved;
+};
+
+// One bounded register update staged in the kernel-owned desired snapshot.
+// Core indices 0-15 are R0-PC and 16 is CPSR. Core bank must be the same
+// deterministic resumable user bank selected from the original raw snapshot;
+// value_high must be zero. VFP indices 0-31 are D0-D31 and index 32 is FPSCR;
+// VFP bank must be zero and FPSCR's value_high must be zero.
+struct vd_kernel_thread_mutation_write_request {
+    struct vd_kernel_thread_mutation_handle handle;
+    unsigned int bank;
+    unsigned int register_bank;
+    unsigned int register_index;
+    unsigned int value_low;
+    unsigned int value_high;
+    unsigned int flags;
+};
+
+typedef char vd_kernel_thread_mutation_info_size_must_be_32[
+    sizeof(struct vd_kernel_thread_mutation_info) == 32 ? 1 : -1];
+typedef char vd_kernel_thread_mutation_begin_request_size_must_be_24[
+    sizeof(struct vd_kernel_thread_mutation_begin_request) == 24 ? 1 : -1];
+typedef char vd_kernel_thread_mutation_handle_size_must_be_32[
+    sizeof(struct vd_kernel_thread_mutation_handle) == 32 ? 1 : -1];
+typedef char vd_kernel_thread_mutation_write_request_size_must_be_56[
+    sizeof(struct vd_kernel_thread_mutation_write_request) == 56 ? 1 : -1];
 
 enum vd_kernel_hw_point_operation {
     VD_KERNEL_HW_POINT_INSERT = 1,
@@ -210,6 +309,41 @@ int vdKernelGetThreadVfpRegisters(
     unsigned int token,
     SceUID target_user_thread,
     struct vd_thread_vfp_registers* registers);
+
+// Negotiate the separately versioned foreign-thread mutation ABI. A zero
+// supported_banks field is intentional when the installed VitaSDK/kernel
+// combination exposes snapshots but no safe write primitive.
+int vdKernelGetThreadMutationInfo(
+    struct vd_kernel_thread_mutation_info* info);
+
+// Snapshot one requested bank before accepting staged changes. The target must
+// be an exact thread owned and suspended by the caller's current all-stop
+// session, and that session must not have an additional exempt thread. A
+// writable backend must retain the exact process/thread objects for the whole
+// transaction so UID reuse cannot redirect a write or rollback. Begin never
+// changes target state.
+int vdKernelBeginThreadMutation(
+    const struct vd_kernel_thread_mutation_begin_request* request,
+    struct vd_kernel_thread_mutation_handle* handle);
+
+// Apply one provisional register change and verify its read-back while keeping
+// the original snapshot recoverable. A target write/read-back failure attempts
+// immediate rollback. Validation errors leave any earlier verified stages
+// active and recoverable; disconnect, stop-lease expiry, or explicit restore
+// rolls them all back before target resume.
+int vdKernelStageThreadMutation(
+    const struct vd_kernel_thread_mutation_write_request* request);
+
+// Accept all staged changes after one final exact read-back. Success retires
+// the restore snapshot so the next explicit EndStop resumes the changed state.
+// Any failure attempts an immediate exact rollback.
+int vdKernelCommitThreadMutation(
+    const struct vd_kernel_thread_mutation_handle* handle);
+
+// Restore and verify the exact pre-mutation snapshot. This also cancels a
+// transaction that has not committed. It is safe to retry after an error.
+int vdKernelRestoreThreadMutation(
+    const struct vd_kernel_thread_mutation_handle* handle);
 
 // Acquire exclusive, lease-protected ownership of the experimental ARMv7
 // debug comparators for the calling process. The default kernel build returns

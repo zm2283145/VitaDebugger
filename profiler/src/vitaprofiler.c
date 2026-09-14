@@ -130,6 +130,32 @@ static void vp_write_u64_le(uint8_t* output, uint64_t value)
     vp_write_u32_le(output + 4, (uint32_t)(value >> 32));
 }
 
+static uint16_t vp_read_u16_le(const uint8_t* input)
+{
+    return (uint16_t)((uint16_t)input[0] |
+                      ((uint16_t)input[1] << 8));
+}
+
+static uint32_t vp_read_u32_le(const uint8_t* input)
+{
+    return (uint32_t)input[0] | ((uint32_t)input[1] << 8) |
+           ((uint32_t)input[2] << 16) | ((uint32_t)input[3] << 24);
+}
+
+static uint64_t vp_read_u64_le(const uint8_t* input)
+{
+    return (uint64_t)vp_read_u32_le(input) |
+           ((uint64_t)vp_read_u32_le(input + 4) << 32);
+}
+
+static int64_t vp_decode_i64_le(const uint8_t* input)
+{
+    uint64_t raw = vp_read_u64_le(input);
+    if (raw <= (uint64_t)INT64_MAX)
+        return (int64_t)raw;
+    return -1 - (int64_t)(UINT64_MAX - raw);
+}
+
 int vp_init(struct vp_context* context, const struct vp_config* config)
 {
     uint32_t i;
@@ -427,5 +453,128 @@ int vp_encode_event_le(const struct vp_event* event,
     vp_write_u32_le(output + 24, event->correlation_id);
     vp_write_u16_le(output + 28, event->type);
     vp_write_u16_le(output + 30, event->flags);
+    return VP_RESULT_OK;
+}
+
+int vp_decode_wire_header_le(const uint8_t* input, size_t input_size,
+                             struct vp_wire_header* header)
+{
+    struct vp_wire_header decoded;
+    if (header != NULL)
+        memset(header, 0, sizeof(*header));
+    if (input == NULL || header == NULL)
+        return VP_ERROR_INVALID_ARGUMENT;
+    if (input_size < VP_WIRE_HEADER_SIZE)
+        return VP_ERROR_MALFORMED;
+
+    decoded.magic = vp_read_u32_le(input);
+    decoded.version = vp_read_u16_le(input + 4);
+    decoded.header_size = vp_read_u16_le(input + 6);
+    decoded.event_size = vp_read_u16_le(input + 8);
+    decoded.flags = vp_read_u16_le(input + 10);
+    decoded.clock_hz = vp_read_u32_le(input + 12);
+    decoded.stream_start_us = vp_read_u64_le(input + 16);
+    decoded.reserved = vp_read_u64_le(input + 24);
+
+    if (decoded.magic != VP_WIRE_MAGIC)
+        return VP_ERROR_MALFORMED;
+    if (decoded.version != VP_WIRE_VERSION ||
+        decoded.header_size != VP_WIRE_HEADER_SIZE ||
+        decoded.event_size != VP_WIRE_EVENT_SIZE ||
+        decoded.flags != VP_WIRE_FLAG_LITTLE_ENDIAN ||
+        decoded.clock_hz != VP_CLOCK_HZ)
+        return VP_ERROR_UNSUPPORTED;
+    if (decoded.reserved != 0u)
+        return VP_ERROR_MALFORMED;
+    *header = decoded;
+    return VP_RESULT_OK;
+}
+
+int vp_decode_event_le(const uint8_t* input, size_t input_size,
+                       struct vp_event* event)
+{
+    if (event != NULL)
+        memset(event, 0, sizeof(*event));
+    if (input == NULL || event == NULL)
+        return VP_ERROR_INVALID_ARGUMENT;
+    if (input_size < VP_WIRE_EVENT_SIZE)
+        return VP_ERROR_MALFORMED;
+
+    event->timestamp_us = vp_read_u64_le(input);
+    event->value = vp_decode_i64_le(input + 8);
+    event->name_id = vp_read_u32_le(input + 16);
+    event->thread_id = vp_read_u32_le(input + 20);
+    event->correlation_id = vp_read_u32_le(input + 24);
+    event->type = vp_read_u16_le(input + 28);
+    event->flags = vp_read_u16_le(input + 30);
+    return VP_RESULT_OK;
+}
+
+int vp_wire_validate_le(const uint8_t* input, size_t input_size,
+                        struct vp_wire_info* info)
+{
+    struct vp_wire_header header;
+    size_t payload_size;
+    int result;
+    if (info != NULL)
+        memset(info, 0, sizeof(*info));
+    if (input == NULL)
+        return VP_ERROR_INVALID_ARGUMENT;
+    result = vp_decode_wire_header_le(input, input_size, &header);
+    if (result != VP_RESULT_OK)
+        return result;
+    payload_size = input_size - VP_WIRE_HEADER_SIZE;
+    if (payload_size % VP_WIRE_EVENT_SIZE != 0u)
+        return VP_ERROR_MALFORMED;
+    if (info != NULL) {
+        info->stream_start_us = header.stream_start_us;
+        info->event_count = payload_size / VP_WIRE_EVENT_SIZE;
+        info->total_size = input_size;
+        info->clock_hz = header.clock_hz;
+        info->version = header.version;
+        info->flags = header.flags;
+    }
+    return VP_RESULT_OK;
+}
+
+int vp_wire_cursor_init(struct vp_wire_cursor* cursor, const uint8_t* input,
+                        size_t input_size, struct vp_wire_info* info)
+{
+    struct vp_wire_info parsed;
+    int result;
+    if (cursor == NULL)
+        return VP_ERROR_INVALID_ARGUMENT;
+    memset(cursor, 0, sizeof(*cursor));
+    result = vp_wire_validate_le(input, input_size, &parsed);
+    if (result != VP_RESULT_OK)
+        return result;
+    cursor->data = input;
+    cursor->total_size = input_size;
+    cursor->offset = VP_WIRE_HEADER_SIZE;
+    cursor->remaining = parsed.event_count;
+    if (info != NULL)
+        *info = parsed;
+    return VP_RESULT_OK;
+}
+
+int vp_wire_cursor_next(struct vp_wire_cursor* cursor,
+                        struct vp_event* event)
+{
+    int result;
+    if (event != NULL)
+        memset(event, 0, sizeof(*event));
+    if (cursor == NULL || event == NULL || cursor->data == NULL)
+        return VP_ERROR_INVALID_ARGUMENT;
+    if (cursor->remaining == 0u)
+        return VP_RESULT_END;
+    if (cursor->offset > cursor->total_size ||
+        cursor->total_size - cursor->offset < VP_WIRE_EVENT_SIZE)
+        return VP_ERROR_MALFORMED;
+    result = vp_decode_event_le(cursor->data + cursor->offset,
+                                cursor->total_size - cursor->offset, event);
+    if (result != VP_RESULT_OK)
+        return result;
+    cursor->offset += VP_WIRE_EVENT_SIZE;
+    --cursor->remaining;
     return VP_RESULT_OK;
 }

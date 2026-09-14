@@ -40,11 +40,14 @@ has been validated and the exception context has been updated. A selected
 foreign thread, a legacy FPA register, D0-D31, or FPSCR receives an error. The
 stub never reports `OK` for a discarded floating-point tail.
 
-Foreign core and VFP mutation need a new kernel contract rather than a parser
-change. That contract must prove target-thread ownership and suspension,
-snapshot the original bank, apply one write, read it back, restore it on normal
-resume/detach and lease expiry, and survive an abandoned client before the
-capability can be advertised.
+Foreign core and VFP mutation need a kernel contract rather than a parser
+change. A separately versioned transaction scaffold now implements the bounded
+snapshot, one-bank stage, exact read-back, commit-or-restore, retained-target
+lifetime, and lease-cleanup rules under native tests. The Vita backend still
+advertises zero writable banks: it cannot be promoted until a supported setter
+and durable exact process/thread-object provider pass the corresponding hardware
+failure gates. The transaction also requires a fully stopped process with no
+additional exempt thread.
 
 ## Validation status
 

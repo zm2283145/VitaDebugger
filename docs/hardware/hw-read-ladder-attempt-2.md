@@ -120,6 +120,20 @@ watchpoint design is also a possible retail fallback, but it needs separate
 MMU ownership, access-decoding, page-contention, rearm, and recovery gates
 before it can be exposed through GDB.
 
+## 2026-09-14 research addendum
+
+Debug-power, authorization, monitor-mode, and Vita-specific exception policy
+remain worth static investigation. The Cortex-A9 TRM marks the OS Lock
+registers RAZ/WI and unimplemented on this core, so OS Lock is no longer a sound
+primary explanation. ARM Cortex-A9 erratum 764319 also says that reads of both
+`DBGPRSR` and `DBGOSLSR` can themselves raise Undefined Instruction when
+`DBGSWENABLE` is low. Upstream Linux therefore protects its generic OS-Lock
+probe with an Undefined Instruction hook on affected CPUs. The existing ladder
+remains locked; neither register is authorized for a live read until a Vita-
+specific, unload-safe 3.65 exception recovery path has passed independent
+lifecycle tests. See the
+[full research review](research-review-2026-09-14.md).
+
 ## KBL DIP-switch 228 lead
 
 After this run, the HENkaku KBL documentation was found to name global DIP

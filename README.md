@@ -163,6 +163,17 @@ status includes:
   concurrent producers, stop/restart under load, and GDB attach/detach
   coexistence.
 - A debugger-enabled larger application build as a real-world integration test.
+- A separately versioned kernel thread-mutation transaction ABI with bounded
+  snapshot, provisional stage, exact read-back verification, commit, explicit
+  restore, retained-target lifetime checking, and stop-lease cleanup. Each
+  transaction covers exactly one register bank and requires a fully stopped
+  process with no extra exempt thread. Its lifecycle and rollback behavior pass
+  native tests. The current Vita backend intentionally advertises zero writable
+  register banks because no documented, typed, hardware-validated foreign-
+  thread core/VFP setter and durable target-object provider are available; no
+  new on-device write capability is claimed yet. VitaSDK's NID database contains
+  an untyped VM-context setter lead whose 3.65 ABI still requires static
+  verification.
 - A standalone allocation-free profiler foundation for named zones, counters,
   frame markers, Vita memory snapshots, and known-thread statistics.
 - A hardware-tested user-mode Vita profiler self-test covering event order,
@@ -171,6 +182,19 @@ status includes:
   bounded name dictionary. All 13 on-device checks pass, including live
   resolution of every captured custom and built-in event ID, without calling
   the kernel plugin.
+- A host-tested profiler capture pipeline: an allocation-free callback drain,
+  bounded TCP receiver, named text summaries, complete decoded JSON, and Chrome
+  Trace/Perfetto export. Cooperative CPU-side VitaGL/SceGxm hook points and a
+  fail-closed PMU provider/lease boundary are implemented. A public-ScePerf,
+  application-owned PMU adapter is host-tested, Vita-cross-built, and linked,
+  but not yet hardware-validated. The Vita-side network owner, automatic
+  graphics interposition, and a dedicated desktop GUI are not implemented.
+- A read-only external-attach protocol and allocation-free broker core with
+  exact-title discovery, kernel-ABI/capability negotiation, short-lived identity
+  tickets, bounded host tooling, native tests, and a passing Vita cross-build.
+  Its Vita identity adapter fails closed: no resident listener, trusted foreign-
+  target identity provider, module injection, process mutation, or live GDB
+  attach is implemented yet.
 - A bundled, separately licensed VitaDevDeploy subproject. Its signed normal
   install-and-launch path has passed on retail hardware and its host-side
   validation, signing, startup, transport, and recovery logic has 73 automated
@@ -258,6 +282,15 @@ environment. The
 evidence and timing limitations. Hardware `Z1`-`Z4` remains disabled; no
 comparator was accessed or modified.
 
+A later [hardware-debug and foreign-VFP research review](docs/hardware/research-review-2026-09-14.md)
+retains the VM-context setter, cooperative target-thread VFP mutation, and
+mismatch breakpoints as useful leads while correcting the proposed safety
+order. The Cortex-A9 TRM marks its OS Lock registers unimplemented, and erratum
+764319 means `DBGPRSR` and `DBGOSLSR` may themselves raise Undefined Instruction
+when `DBGSWENABLE` is low. VitaSDK's public SceExcpmgr context is only documented
+for 3.60 and its installed headers have no matching release API. No new CP14 or
+exception-handler hardware test is enabled by that research.
+
 The preceding [FPSCR discovery run](docs/hardware/kernel-vfp-probe-v8-fpscr-bank-discovery.jpg)
 is retained separately because its one failed expectation established that the
 saved worker FPSCR is in raw entry 0 rather than entry 1. The corrected v8 row
@@ -304,9 +337,12 @@ excludes the calling debugger thread, records only threads it successfully
 suspends, rolls back partial failures, requires a process-owned session token,
 and automatically resumes an abandoned session when its short lease expires.
 Foreign-thread register reads dynamically select the hardware-validated
-current/resumable user-mode state from the two raw kernel banks in experimental
-kernel-integrated builds. Foreign-thread writes remain disabled until mutation
-and restoration are independently validated.
+  current/resumable user-mode state from the two raw kernel banks in experimental
+  kernel-integrated builds. A restorable mutation transaction boundary now
+  exists and is host-tested, but its default Vita backend exposes zero writable
+  banks until a supported setter and durable exact-target lifetime provider can
+  be implemented and independently validated. Transactions reject an additional
+  runnable exempt thread and mix neither core nor VFP state in one transaction.
 
 ### `libvitaprofiler`
 
@@ -1036,7 +1072,11 @@ exact matching unstripped ELF on the development computer.
 ## Current limitations
 
 - The library must currently be compiled into the application; it cannot attach
-  to an arbitrary unmodified process.
+  to an arbitrary unmodified process. The new `attach/` subtree defines and
+  host-tests the bounded, read-only discovery/identity boundary and an
+  allocation-free broker state machine. Its Vita identity provider deliberately
+  reports unavailable; no resident listener, injection loader, injected
+  debugger module, or live external attach exists yet.
 - Kernel all-stop is opt-in and requires the matching `vitadebug.skprx` ABI;
   library-only builds continue to provide application-side stopping.
 - Kernel-assisted thread discovery now treats the complete 64-entry
@@ -1075,7 +1115,15 @@ exact matching unstripped ELF on the development computer.
   validation. Memory and full-register `G` writes still need strict length,
   syntax, overflow, page-boundary, and breakpoint-overlap validation plus
   parser fuzzing.
-- Foreign-thread register writes are not implemented. Foreign-thread general
+- Foreign-thread register writes are not enabled. A separately versioned
+  snapshot/stage/verify/commit-or-restore kernel transaction ABI now passes
+  native failure and rollback tests. It requires a retained exact target object,
+  a fully stopped process with no additional exempt thread, and one register
+  bank per transaction so the overlapping FPSCR views cannot conflict. The
+  default Vita backend advertises zero writable banks because no documented,
+  typed, hardware-validated foreign-thread core/VFP setter or durable lifetime
+  provider is available. The untyped VM-context NID is a research lead, not an
+  enabled backend. Foreign-thread general
   register reads are hardware tested in both runnable/current and
   sleeping/syscall-return states; guarded foreign-thread VFP reads passed both
   the known-pattern kernel gate and the live GDB lifecycle gate. Individual
@@ -1154,12 +1202,16 @@ exact matching unstripped ELF on the development computer.
   encryption. DebugNet uses best-effort UDP. Use the tools only on a private,
   trusted LAN; pairing, peer allowlists, and a secured control plane remain
   release blockers.
-- `libvitaprofiler` currently records explicit zones, counters, frame markers,
-  memory snapshots, supplied known-thread statistics, and a bounded name
-  dictionary; its 13-check retail 3.65 probe resolved every captured custom and
-  built-in event ID. It does not yet have a binary network/file drain, desktop
-  viewer, arbitrary thread PC/call-stack sampling, PMU ownership, or automatic
-  VitaGL/SceGxm GPU instrumentation.
+- `libvitaprofiler` records explicit zones, counters, frame markers, memory
+  snapshots, supplied known-thread statistics, and a bounded name dictionary;
+  its 13-check retail 3.65 probe resolved every captured custom and built-in
+  event ID. A callback binary drain and PC-side bounded TCP receiver/viewer now
+  pass host tests and can emit text, decoded JSON, and Chrome Trace/Perfetto
+  output. The Vita-side socket/file owner, live hardware capture gate, arbitrary
+  thread PC/call-stack sampling, ScePerf PMU hardware gate, automatic
+  VitaGL/SceGxm interposition, true GPU timestamps, and a bespoke desktop GUI
+  remain pending. The PMU adapter requires explicit ownership because the
+  public API cannot read and restore a thread's previous selector/run state.
 - VitaDevDeploy currently depends on Vita Companion's unauthenticated FTP and
   command transport. Signed one-use jobs protect the install decision, but do
   not authenticate or encrypt Companion itself; use it only on a private LAN.
@@ -1197,8 +1249,12 @@ exact matching unstripped ELF on the development computer.
    parsers, and expand fake-transport, fake-kernel, and fuzz coverage.
 3. Run long on-device console pressure, abrupt-disconnect, restore/retry, and
    shutdown soaks while retaining DebugNet for sustained logging.
-4. Add a separately restorable kernel mutation ABI before foreign-thread core
-   or VFP writes, and add injected-memory/trap-rollback coverage before enabling
+4. Connect the host-tested restorable kernel mutation ABI to a supported Vita
+   core/VFP setter and a retained exact process/thread-object lifetime provider.
+   Keep bank capabilities disabled until that backend passes process exit,
+   thread exit, UID churn/reuse, forced inventory failure, exact rollback, and
+   lease-cleanup hardware gates, then route foreign-thread GDB writes through
+   it. Add injected-memory/trap-rollback coverage before enabling
    privileged exception returns, unsupported exclusive forms, or other unsafe
    instruction families.
 5. Keep hardware `Z1`-`Z4` fail-closed while researching a supported debug-
@@ -1209,16 +1265,23 @@ exact matching unstripped ELF on the development computer.
    same-process hot module load/unload churn and add automatic in-session symbol
    refresh. This is dynamic-module and IDE convenience work; the ASLR,
    verified-build, and initial VS Code hardware milestones are complete.
-7. Add the profiler binary drain/receiver and desktop viewer, host-application
-   instrumentation, guarded PC/PMU ownership and restoration, and explicit
-   VitaGL/SceGxm hooks.
+7. Add the Vita-side profiler TCP/file drain owner and hardware capture gate,
+   hardware-validate the opt-in public-ScePerf PMU adapter, integrate the
+   cooperative VitaGL/SceGxm hook points into real applications, and build a
+   dedicated desktop GUI on top of the working receiver, analyzer, and Perfetto
+   export.
 8. Complete protocol authentication/pairing and peer allowlists, isolated build
    directories, exported VitaSDK/CMake packages, CI and firmware coverage, and
    the project-wide licensing/release work.
 9. Hardware-stress the VitaDevDeploy GPU synchronization fix and startup/
    teardown lifecycle, then finish interrupted-install and bootstrap-recovery
    fault injection.
-10. Add optional attachment to applications not compiled with the library.
+10. Extend the read-only external-attach scaffold with authenticated pairing,
+    a shell-resident listener around the broker core, a trusted Vita target-
+    identity provider, a fixed identity-checked per-process debugger-module
+    loader, complete rollback/unload leases, and disposable-target hardware
+    gates before enabling attachment to applications not compiled with the
+    library.
 11. Validate LLDB remote-protocol behavior and add a Debug Adapter Protocol
     bridge without regressing GDB.
 
@@ -1264,7 +1327,13 @@ exact matching unstripped ELF on the development computer.
   ABI used only by the ASLR hardware test.
 - `tools/debugnet_listener.py`: cross-platform development-computer log receiver.
 - `profiler/`: standalone bounded user-mode profiler library, Vita adapter,
-  native tests, and integration documentation.
+  binary capture writer, PC-side receiver/viewer and Perfetto exporter,
+  cooperative graphics hooks, guarded PMU provider boundary, tests, and
+  integration documentation.
+- `attach/`: read-only external-application discovery/identity protocol,
+  allocation-free broker core and fail-closed Vita adapter, bounded host client,
+  security and API audits, and native tests; it contains no resident listener,
+  target identity provider, injection, or process-control implementation yet.
 - `deploy/`: self-contained signed host/Vita remote deployment subproject,
   including its agent, host CLI, tests, security documentation, and license.
 - `examples/vscode-debug-demo/`: isolated sample app plus generated-local VS

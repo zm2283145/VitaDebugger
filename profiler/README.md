@@ -21,10 +21,21 @@ The current increment provides:
 - A bounded caller-owned name dictionary, automatic names for the eight Vita
   metrics, and a separately versioned little-endian dictionary block for trace
   receivers. The event wire ABI remains version 1.
+- Allocation-free validation and decoding for complete `VPRF` event streams.
+- A callback-based drain that writes one combined `VPNM` + `VPRF` binary
+  capture and permanently fails on ambiguous sink errors.
+- A bounded TCP receiver plus text, complete decoded JSON, and Chrome Trace/Perfetto
+  viewer output with named zone, counter, frame, and built-in metric handling.
+- Cooperative, header-independent CPU wall-time hook interfaces for VitaGL and
+  SceGxm call sites.
+- A guarded PMU provider/lease abstraction plus an explicit application-owned
+  Vita user-mode adapter built on public ScePerf APIs. The adapter retains
+  failed cleanup obligations and is cross-built, but is not hardware-validated.
 
-It does not start threads, allocate memory, open files, use the network, stop an
-application, or call the VitaDebugger kernel companion. No kernel plugin change
-is part of this foundation.
+The Vita library does not start threads, allocate memory, open files, use the
+network, stop an application, or call the VitaDebugger kernel companion. The
+separate development-computer tool owns its TCP listener and output files. No
+kernel plugin change is part of this foundation.
 
 ## Quick start
 
@@ -87,6 +98,12 @@ hashing strings in hot paths.
 See [Profiler name dictionary](docs/name-dictionary.md) for complete lifecycle,
 wire-format, receiver, collision, and capacity details.
 
+See [Binary trace pipeline](docs/binary-trace.md) for the stream writer, TCP
+receiver, validation rules, summaries, and Perfetto export. See [Cooperative
+graphics hooks](docs/graphics-hooks.md) for safe VitaGL/SceGxm call-site
+instrumentation and [Guarded CPU/PMU provider boundary](docs/pmu-provider.md)
+for the explicit exact-restore versus application-owned counter lifecycle.
+
 Call `vp_vita_record_memory()` at a low frequency, such as once per second, not
 once per draw. Call `vp_vita_record_thread()` with `0` for the current thread or
 with an application-owned thread ID that is already known. Those VitaSDK
@@ -111,6 +128,8 @@ An exporter can encode each record with `vp_encode_event_le()` and send batches
 through a binary telemetry channel, a file, or a desktop trace viewer without
 changing instrumented game code. Export the sealed name dictionary with
 `vp_encode_name_dictionary_le()` so that receiver can label each numeric ID.
+`vitaprofiler_stream.h` packages that sequence into a checked single-consumer
+writer when a complete-buffer sink callback is available.
 
 ## Concurrency and overload behavior
 
@@ -184,8 +203,8 @@ built-in Vita sample names.
 | Renderer/audio/allocator metrics | Generic counters and zones are ready | Integration hooks in each subsystem |
 | All-process thread enumeration | Cooperative/known IDs only | Narrow process-owned enumeration |
 | Statistical PC/call-stack sampling | Not safely available | Tokenized, read-only sampler boundary |
-| PMU hardware counters | Not used | Per-core save/restore and ownership design |
-| GPU workload timing | App submission/wait zones only | VitaGL/SceGxm hooks; not inherently kernel work |
+| PMU hardware counters | Exact-restore/owned-reset provider boundary, named raw samples, and an opt-in public ScePerf adapter | Disposable hardware validation; exact coexistence remains unavailable because ScePerf cannot read prior selector/run state |
+| GPU workload timing | Explicit CPU-side VitaGL/SceGxm call-site hooks | GPU timestamps or automatic interposition are not implemented |
 
 `SceKernelThreadInfo.runClocks` is exported as a cumulative **raw** value because
 the public header's wording and behavior need hardware characterization before
@@ -215,7 +234,8 @@ This compiles both the portable core and the user-mode Vita adapter with
 `-Wall -Wextra -Werror`, then creates `build/vita/libvitaprofiler.a`. Link that
 archive into an application together with the VitaSDK stubs for KernelThreadMgr,
 LibKernel, Processmgr, and Sysmem (ordinary VitaSDK application links normally
-already include LibKernel).
+already include LibKernel). Applications which opt into the ScePerf PMU adapter
+must additionally link `ScePerf_stub`.
 
 On a Unix-like development host with a native C compiler:
 
@@ -225,8 +245,12 @@ make host-test
 
 The native tests check validation, bounded drop/reuse behavior, FIFO ordering,
 zone/frame semantics, exact event and dictionary wire bytes, dictionary
-collisions/capacity/truncation, concurrent multi-producer delivery, and
-concurrent read-only name resolution after sealing.
+collisions/capacity/truncation, concurrent multi-producer delivery, concurrent
+read-only name resolution after sealing, combined stream drain/decoding,
+fail-closed sink behavior, PMU ownership/restoration policy, public-ScePerf
+adapter sequencing and cleanup, and graphics hook emission.
+The Python suite adds corrupt/truncated capture rejection, fragmented loopback
+TCP reception, byte bounds, named zone analysis, and JSON/Perfetto output.
 
 From a Visual Studio Developer Command Prompt on Windows:
 
@@ -238,9 +262,15 @@ cl /nologo /std:c11 /O2 /W4 /WX /Iinclude src\vitaprofiler.c src\vitaprofiler_na
 build\host\test_vitaprofiler_names.exe
 ```
 
-The Vita adapter is intentionally excluded from the native executable because
-its public system calls exist only on Vita. The Vita cross-build is the compile
-gate for that file.
+That abbreviated MSVC example covers only the portable core and name table.
+Run `make host-test` in the validated VitaSDK/MSYS2 environment for the complete
+gate: all five native suites, the C-writer-to-Python-reader wire fixture, and
+the Python receiver/viewer tests.
+
+The native suite tests the ScePerf adapter's sequencing through injected calls;
+actual Vita system calls exist only on hardware. `make vita-check` cross-builds
+the implementation and links a small import check against `ScePerf_stub` and
+`SceKernelThreadMgr_stub`.
 
 ## Vita user-mode self-test
 

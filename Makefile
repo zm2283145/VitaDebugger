@@ -1,7 +1,9 @@
 all: libuvdb.a
 
 clean:
-	rm -f *.o src/*.o tests/*.o tests/vita/*.o *.a *.elf *.velf eboot.bin param.sfo *.vpk *.psp2dmp test-rsp test-rsp.exe test-rsp-console test-rsp-console.exe test-register-bank test-register-bank.exe test-thread-control test-thread-control.exe test-monitor test-monitor.exe test-breakpoint-patch test-breakpoint-patch.exe test-exclusive-step test-exclusive-step.exe test-console-queue test-console-queue.exe test-console-transport test-console-transport.exe test-vfp-policy test-vfp-policy.exe kernel/dipsw-read-probe/test-record kernel/dipsw-read-probe/test-record.exe kernel/dipsw-set-restore-probe/test-record kernel/dipsw-set-restore-probe/test-record.exe kernel/dipsw-dbgvcr-probe/test-record kernel/dipsw-dbgvcr-probe/test-record.exe $(UVDB_ASLR_FIXTURE_OBJECT) $(UVDB_ASLR_FIXTURE_ELF) $(UVDB_ASLR_FIXTURE_VELF) $(UVDB_ASLR_FIXTURE_SELF)
+	rm -f *.o src/*.o tests/*.o tests/vita/*.o *.a *.elf *.velf eboot.bin param.sfo *.vpk *.psp2dmp test-rsp test-rsp.exe test-rsp-console test-rsp-console.exe test-register-bank test-register-bank.exe test-thread-control test-thread-control.exe test-monitor test-monitor.exe test-breakpoint-patch test-breakpoint-patch.exe test-exclusive-step test-exclusive-step.exe test-console-queue test-console-queue.exe test-console-transport test-console-transport.exe test-vfp-policy test-vfp-policy.exe test-kernel-thread-mutation test-kernel-thread-mutation.exe kernel/dipsw-read-probe/test-record kernel/dipsw-read-probe/test-record.exe kernel/dipsw-set-restore-probe/test-record kernel/dipsw-set-restore-probe/test-record.exe kernel/dipsw-dbgvcr-probe/test-record kernel/dipsw-dbgvcr-probe/test-record.exe $(UVDB_ASLR_FIXTURE_OBJECT) $(UVDB_ASLR_FIXTURE_ELF) $(UVDB_ASLR_FIXTURE_VELF) $(UVDB_ASLR_FIXTURE_SELF)
+	$(MAKE) -C profiler clean
+	$(MAKE) -C attach clean
 
 package: uvdb-test.vpk
 
@@ -117,9 +119,9 @@ HOST_CC_RUN ?= $(HOST_CC)
 HOST_PYTHON ?= python3
 endif
 
-.PHONY: host-tests host-test-rsp host-test-rsp-console host-test-register-bank host-test-thread-control host-test-monitor host-test-breakpoint-patch host-test-exclusive-step host-test-vfp-policy host-test-console-queue host-test-console-transport host-test-symbols host-test-vfp-lifecycle host-test-aslr-lifecycle host-test-live-gates host-test-target-xml host-test-dipsw-probe-record host-test-dipsw-set-restore-record host-test-dipsw-dbgvcr-record aslr-fixture
+.PHONY: host-tests host-test-rsp host-test-rsp-console host-test-register-bank host-test-thread-control host-test-monitor host-test-breakpoint-patch host-test-exclusive-step host-test-vfp-policy host-test-kernel-thread-mutation host-test-console-queue host-test-console-transport host-test-symbols host-test-vfp-lifecycle host-test-aslr-lifecycle host-test-live-gates host-test-target-xml host-test-dipsw-probe-record host-test-dipsw-set-restore-record host-test-dipsw-dbgvcr-record host-test-profiler host-test-attach aslr-fixture
 
-host-tests: host-test-rsp host-test-rsp-console host-test-register-bank host-test-thread-control host-test-monitor host-test-breakpoint-patch host-test-exclusive-step host-test-vfp-policy host-test-console-queue host-test-console-transport host-test-symbols host-test-vfp-lifecycle host-test-aslr-lifecycle host-test-live-gates host-test-target-xml host-test-dipsw-probe-record host-test-dipsw-set-restore-record host-test-dipsw-dbgvcr-record
+host-tests: host-test-rsp host-test-rsp-console host-test-register-bank host-test-thread-control host-test-monitor host-test-breakpoint-patch host-test-exclusive-step host-test-vfp-policy host-test-kernel-thread-mutation host-test-console-queue host-test-console-transport host-test-symbols host-test-vfp-lifecycle host-test-aslr-lifecycle host-test-live-gates host-test-target-xml host-test-dipsw-probe-record host-test-dipsw-set-restore-record host-test-dipsw-dbgvcr-record host-test-profiler host-test-attach
 
 host-test-rsp: test-rsp$(HOST_EXEEXT)
 	./test-rsp$(HOST_EXEEXT)
@@ -144,6 +146,9 @@ host-test-exclusive-step: test-exclusive-step$(HOST_EXEEXT)
 
 host-test-vfp-policy: test-vfp-policy$(HOST_EXEEXT)
 	./test-vfp-policy$(HOST_EXEEXT)
+
+host-test-kernel-thread-mutation: test-kernel-thread-mutation$(HOST_EXEEXT)
+	./test-kernel-thread-mutation$(HOST_EXEEXT)
 
 host-test-console-queue: test-console-queue$(HOST_EXEEXT)
 	./test-console-queue$(HOST_EXEEXT)
@@ -180,6 +185,12 @@ host-test-dipsw-set-restore-record: kernel/dipsw-set-restore-probe/test-record$(
 host-test-dipsw-dbgvcr-record: kernel/dipsw-dbgvcr-probe/test-record$(HOST_EXEEXT)
 	./kernel/dipsw-dbgvcr-probe/test-record$(HOST_EXEEXT)
 
+host-test-profiler:
+	$(MAKE) -C profiler host-test HOST_CC=$(HOST_CC) PYTHON="$(HOST_PYTHON)"
+
+host-test-attach:
+	$(MAKE) -C attach host-test HOST_CC=$(HOST_CC) PYTHON="$(HOST_PYTHON)"
+
 test-rsp$(HOST_EXEEXT): src/uvdb_rsp.c src/uvdb_rsp.h tests/host/test_rsp_registers.c
 	$(HOST_CC_RUN) $(HOST_CFLAGS) src/uvdb_rsp.c tests/host/test_rsp_registers.c -o $@
 
@@ -203,6 +214,9 @@ test-exclusive-step$(HOST_EXEEXT): src/uvdb_exclusive_step.c src/uvdb_exclusive_
 
 test-vfp-policy$(HOST_EXEEXT): src/uvdb_vfp_policy.c src/uvdb_vfp_policy.h kernel/include/vitadebug_kernel.h tests/host/test_vfp_policy.c tests/host/include/psp2/types.h
 	$(HOST_CC_RUN) $(HOST_CFLAGS) -Itests/host/include -Ikernel/include src/uvdb_vfp_policy.c tests/host/test_vfp_policy.c -o $@
+
+test-kernel-thread-mutation$(HOST_EXEEXT): kernel/src/thread_mutation.c kernel/src/thread_mutation.h kernel/include/vitadebug_kernel.h tests/host/test_kernel_thread_mutation.c tests/host/include/psp2/types.h
+	$(HOST_CC_RUN) $(HOST_CFLAGS) -Itests/host/include -Ikernel/include -Ikernel/src kernel/src/thread_mutation.c tests/host/test_kernel_thread_mutation.c -o $@
 
 test-console-queue$(HOST_EXEEXT): src/uvdb_console.c src/uvdb_console.h tests/host/test_console_queue.c
 	$(HOST_CC_RUN) $(HOST_CFLAGS) -DUVDB_CONSOLE_TESTING src/uvdb_console.c tests/host/test_console_queue.c $(HOST_THREAD_FLAGS) -o $@

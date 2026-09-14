@@ -23,7 +23,7 @@ stacks remain unvalidated unless an individual result says otherwise.
 | ARM/Thumb software single-step | Broad practical decoder implemented. `Hc0` and `vCont;s:T;c` hardware-step deterministic foreign Thumb workers through distinct paths using state-dependent raw-bank selection. GDB's exact-stopped-thread positive-`Hc` hidden-breakpoint step-over passes without `E16`; representative A32 PC writers and bounded Thumb-2/A32 `LDREX`-through-`STREX` sequences also pass live GDB. The [retail 3.65 practical-gate record](hardware/gdb-step-register-exclusive-3.65.json) includes successful single stores and exact trap-byte restoration after abrupt disconnect. Host coverage includes conditional branches, interworking, immediate/immediate-shifted A32 PC ALU operations, register/immediate PC loads, IT placement, alignment checks, and conservative rejection of unsafe forms | Add injected memory/trap-rollback tests and more live encoding fixtures; design scheduler-locked arbitrary-foreign-thread resume or displaced stepping; keep privileged exception returns, `BXJ`, register-controlled A32 shifts, unsupported exclusive sequences, and other unsafe forms fail-closed until independently modeled |
 | VFP/NEON register reads | The guarded D0-D31/FPSCR kernel gate and automated foreign-thread live-GDB lifecycle gate pass on retail 3.65 | Keep the undocumented read path opt-in and revalidate each new firmware baseline; treat register writes as a separate mutation/restoration project |
 | Prefetch abort, data abort, and undefined-instruction handling | Implemented with GDB signal and structured fault reporting | Add nested-fault containment and explicit previous-handler chaining |
-| ARM register read/write | Strict `p` reads and selected exception-thread R0/CPSR `P` writes pass live retail 3.65 mutation/read-back/exact-restoration before resume or detach, including the [combined practical-gate record](hardware/gdb-step-register-exclusive-3.65.json). The gate also confirms fail-closed foreign core and VFP writes with unchanged read-back. Full-register legacy writes predate this gate. Read-only foreign snapshots are hardware tested in runnable/current bank-0 and sleeping/syscall-return bank-1 states | Revalidate the transactional gate for each firmware/kernel ABI; add a separately restorable kernel mutation ABI before enabling foreign-thread or VFP writes |
+| ARM register read/write | Strict `p` reads and selected exception-thread R0/CPSR `P` writes pass live retail 3.65 mutation/read-back/exact-restoration before resume or detach, including the [combined practical-gate record](hardware/gdb-step-register-exclusive-3.65.json). The gate also confirms fail-closed foreign core and VFP writes with unchanged read-back. Full-register legacy writes predate this gate. Read-only foreign snapshots are hardware tested in runnable/current bank-0 and sleeping/syscall-return bank-1 states. A separately versioned, one-bank kernel mutation transaction with retained-target lifetime and exact rollback is host-tested, while its default Vita backend exposes zero writable banks | Revalidate the existing live gate for each firmware/kernel ABI; connect the transaction only to a supported setter plus durable target-object provider, then pass target/process exit, UID churn, forced inventory failure, rollback, and lease-cleanup hardware gates before enabling foreign-thread writes |
 | Application memory read/write | Implemented | Add strict syntax, overflow, page-boundary, and breakpoint-overlap validation plus fuzzing |
 | Relocation/module information | ASLR correctness and verified-build identity are complete. `qOffsets`, chunk-safe `qXfer:libraries:read`, installed main/SUPRX hashing, mismatch rejection before RSP, idempotent refresh, and five main-plus-user-SUPRX source-breakpoint sessions across reconnect and two relaunches pass in the [retail 3.65 identity record](hardware/gdb-aslr-build-identity-3.65.json) | Stress same-process hot module load/unload churn and automate the existing command-driven refresh in IDE tasks as convenience integration, not as an ASLR correctness gate |
 | Thread enumeration, selection, names, and state | Hardware-tested discovery feeds a bounded kernel-authoritative inventory (with cooperative name annotations); exact `Hg`/`Hc`, `vCont;c;s`, fail-closed selection, and deterministic foreign-thread stop attribution pass live hardware tests | Complete controlled renew/end failure injection and long stress gates, then design isolated per-thread execution |
@@ -32,7 +32,7 @@ stacks remain unvalidated unless an individual result says otherwise.
 | stdout to GDB console (`O` packets) | Completed bounded queue, single-owner no-ack transport, restorable nonblocking stdout/stderr capture, and read-only `monitor console` queue/transport/loss statistics; the two-session retail 3.65 gates passed output, Ctrl-C, stopped-state silence, detach, reconnect, and counter inspection, with the monitor result archived in the [console/display record](hardware/gdb-monitor-console-display-3.65.json) | Add longer pressure, abrupt-disconnect, restore/retry, and shutdown hardware soaks; keep DebugNet for sustained logging |
 | Debugger monitor commands | Hardware-tested fixed read-only `qRcmd` registry for `help`, `status`, `threads`, `modules`, `console`, and `display`; bounded host tests, two raw-RSP sessions, and GDB 15.2 passed on retail 3.65 with state preservation, clean detach, and reconnect in the [console/display record](hardware/gdb-monitor-console-display-3.65.json) | Keep every future command explicit, bounded, and read-only by default |
 | Framebuffer/display diagnostics | Read-only `monitor display` metadata is host- and hardware-tested without a client-selected address or pixel read; the retail 3.65 gate reported coherent current/next 960x544 A8B8G8R8 buffers, 59.940 Hz, and advancing vcount | Keep pixel capture outside the monitor registry; add lifecycle stress and consume these diagnostics in the VitaDevDeploy display investigation |
-| Cortex-A9 PMU counters | The user-mode profiler foundation and its bounded name dictionary pass all 13 retail 3.65 checks, including resolution of every captured custom and built-in event ID; raw PMU ownership is not implemented | Inventory PMU state, define exclusive ownership/restoration, then add guarded cycle/event counters and profiler integration |
+| Cortex-A9 PMU counters | The user-mode profiler foundation and its bounded name dictionary pass all 13 retail 3.65 checks. An explicit dual-opt-in ScePerf adapter is native-tested and Vita-linked without CP15 access; it documents that starting a session resets application-owned selected-thread PMU state and does not claim restoration of an unknown prior configuration | Hardware-gate event selection, thread scope, reset effects, cleanup retries, unsupported events, and concurrent use in a disposable profiler application before calling the adapter supported |
 | UART or named-pipe transport | Not a core requirement because VitaDebugger has direct TCP and separate DebugNet UDP | Consider optional UART only if it materially helps recovery or kernel-plugin debugging |
 
 ## Implementation order
@@ -45,8 +45,10 @@ stacks remain unvalidated unless an individual result says otherwise.
    and expand fake-transport, fake-kernel, and fuzz coverage.
 3. Run long console pressure, abrupt-disconnect, restore/retry, and shutdown
    hardware soaks.
-4. Add a restorable kernel mutation ABI for foreign-thread core and VFP writes,
-   plus injected-memory/trap-rollback gates before enabling privileged exception
+4. Connect the host-tested restorable kernel mutation ABI to a supported setter
+   and durable target-object provider, then pass process/thread exit, UID churn,
+   forced inventory failure, rollback, and lease-cleanup hardware gates. Add
+   injected-memory/trap-rollback gates before enabling privileged exception
    returns, unsupported exclusive forms, or other unsafe instruction families.
 5. Continue offline hardware-debug access research while `Z1`-`Z4` stays
    disabled, and independently gate a page-protection/data-abort software
@@ -54,13 +56,19 @@ stacks remain unvalidated unless an individual result says otherwise.
 6. Stress same-process hot module load/unload churn and automate the existing
    command-driven refresh in IDE tasks. This is dynamic-module/IDE convenience
    work; ASLR and verified-build correctness are complete.
-7. Add the profiler binary drain/receiver, desktop viewer, host instrumentation,
-   guarded PC/PMU ownership and restoration, and explicit VitaGL/SceGxm hooks.
+7. Add the Vita-side profiler TCP/file drain owner and hardware capture gate;
+   hardware-validate the opt-in ScePerf adapter and integrate the existing named
+   instrumentation and VitaGL/SceGxm hook points into real applications. Build
+   a dedicated desktop GUI on the working bounded receiver/analyzer/Perfetto
+   export pipeline.
 8. Complete authentication/pairing, peer allowlists, packaging, CI/firmware
    coverage, licensing, and release hardening.
 9. Hardware-stress the VitaDevDeploy GPU lifecycle fix and finish interrupted-
    install and bootstrap-recovery fault injection.
-10. Add optional attachment to applications not compiled with the library.
+10. Turn the strict read-only external-attach protocol and allocation-free broker
+    foundation into a reviewed authenticated listener with a trusted Vita
+    process-identity provider; only then design process control, injection, and
+    live GDB attachment for applications not compiled with the library.
 11. Validate LLDB remote-protocol behavior and add a Debug Adapter Protocol
     bridge without regressing GDB.
 

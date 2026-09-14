@@ -40,6 +40,10 @@ enum vp_result {
     VP_ERROR_MALFORMED = -8,
     VP_ERROR_UNSUPPORTED = -9,
     VP_ERROR_NOT_FOUND = -10,
+    VP_ERROR_STATE = -11,
+    VP_ERROR_BUSY = -12,
+    VP_ERROR_IO = -13,
+    VP_ERROR_RESTORE_REQUIRED = -14,
 };
 
 enum vp_name_flags {
@@ -227,6 +231,25 @@ struct vp_name_wire_cursor {
     uint32_t remaining;
 };
 
+/* Receiver-side cursor for one complete VPRF block. The VPRF format has no
+ * trailer or embedded event count, so input_size defines the block boundary
+ * and must end on a complete event record. */
+struct vp_wire_info {
+    uint64_t stream_start_us;
+    size_t event_count;
+    size_t total_size;
+    uint32_t clock_hz;
+    uint16_t version;
+    uint16_t flags;
+};
+
+struct vp_wire_cursor {
+    const uint8_t* data;
+    size_t total_size;
+    size_t offset;
+    size_t remaining;
+};
+
 struct vp_vita_memory_snapshot {
     uint64_t timestamp_us;
     uint64_t process_time_us;
@@ -327,6 +350,21 @@ int vp_encode_wire_header_le(const struct vp_wire_header* header,
                              uint8_t output[VP_WIRE_HEADER_SIZE]);
 int vp_encode_event_le(const struct vp_event* event,
                        uint8_t output[VP_WIRE_EVENT_SIZE]);
+
+/* Allocation-free event-stream receiver helpers. A complete VPRF block is a
+ * header followed by zero or more fixed-size records. Header decoding accepts
+ * trailing event bytes; cursor initialization additionally requires the whole
+ * supplied block to end on an event boundary. */
+int vp_decode_wire_header_le(const uint8_t* input, size_t input_size,
+                             struct vp_wire_header* header);
+int vp_decode_event_le(const uint8_t* input, size_t input_size,
+                       struct vp_event* event);
+int vp_wire_validate_le(const uint8_t* input, size_t input_size,
+                        struct vp_wire_info* info);
+int vp_wire_cursor_init(struct vp_wire_cursor* cursor, const uint8_t* input,
+                        size_t input_size, struct vp_wire_info* info);
+int vp_wire_cursor_next(struct vp_wire_cursor* cursor,
+                        struct vp_event* event);
 
 /* User-mode Vita adapter. No kernel companion is required. thread_id == 0
  * selects the caller. Other IDs must already be known to the application.

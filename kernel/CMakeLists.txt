@@ -22,6 +22,7 @@ option(VITADEBUG_EXPERIMENTAL_HW_DEBUG
 
 add_executable(vitadebug_kernel
   src/main.c
+  src/thread_mutation.c
 )
 if(VITADEBUG_EXPERIMENTAL_HW_DEBUG)
   target_sources(vitadebug_kernel PRIVATE

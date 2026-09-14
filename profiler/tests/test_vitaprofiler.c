@@ -181,9 +181,14 @@ static void test_zones_and_frames(void)
 static void test_wire_encoding(void)
 {
     struct vp_wire_header header;
+    struct vp_wire_header decoded_header;
     struct vp_event event;
+    struct vp_event decoded_event;
+    struct vp_wire_cursor cursor;
+    struct vp_wire_info info;
     uint8_t encoded_header[VP_WIRE_HEADER_SIZE];
     uint8_t encoded_event[VP_WIRE_EVENT_SIZE];
+    uint8_t stream[VP_WIRE_HEADER_SIZE + VP_WIRE_EVENT_SIZE];
     static const uint8_t expected_header[VP_WIRE_HEADER_SIZE] = {
         0x56, 0x50, 0x52, 0x46, 0x01, 0x00, 0x20, 0x00,
         0x20, 0x00, 0x01, 0x00, 0x40, 0x42, 0x0f, 0x00,
@@ -215,6 +220,43 @@ static void test_wire_encoding(void)
           "encode wire event");
     CHECK(memcmp(encoded_event, expected_event, sizeof(expected_event)) == 0,
           "wire event bytes");
+
+    memcpy(stream, encoded_header, sizeof(encoded_header));
+    memcpy(stream + sizeof(encoded_header), encoded_event,
+           sizeof(encoded_event));
+    CHECK(vp_decode_wire_header_le(stream, sizeof(stream), &decoded_header) ==
+                  VP_RESULT_OK &&
+              decoded_header.stream_start_us == header.stream_start_us,
+          "decode wire header");
+    CHECK(vp_decode_event_le(encoded_event, sizeof(encoded_event),
+                             &decoded_event) == VP_RESULT_OK &&
+              memcmp(&decoded_event, &event, sizeof(event)) == 0,
+          "decode signed wire event");
+    CHECK(vp_wire_cursor_init(&cursor, stream, sizeof(stream), &info) ==
+                  VP_RESULT_OK &&
+              info.event_count == 1u &&
+              info.total_size == sizeof(stream),
+          "validate complete event stream");
+    memset(&decoded_event, 0, sizeof(decoded_event));
+    CHECK(vp_wire_cursor_next(&cursor, &decoded_event) == VP_RESULT_OK &&
+              decoded_event.value == -2 &&
+              decoded_event.name_id == event.name_id,
+          "event cursor decodes record");
+    CHECK(vp_wire_cursor_next(&cursor, &decoded_event) == VP_RESULT_END,
+          "event cursor reaches stable end");
+
+    CHECK(vp_wire_validate_le(stream, sizeof(stream) - 1u, NULL) ==
+              VP_ERROR_MALFORMED,
+          "reject partial final event");
+    stream[24] = 1u;
+    CHECK(vp_wire_validate_le(stream, sizeof(stream), NULL) ==
+              VP_ERROR_MALFORMED,
+          "reject nonzero stream header reservation");
+    stream[24] = 0u;
+    stream[4] = (uint8_t)(VP_WIRE_VERSION + 1u);
+    CHECK(vp_wire_validate_le(stream, sizeof(stream), NULL) ==
+              VP_ERROR_UNSUPPORTED,
+          "reject unsupported stream version");
 }
 
 #define STRESS_PRODUCERS 4u
