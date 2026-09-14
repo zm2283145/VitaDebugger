@@ -227,9 +227,10 @@ exact wire encoding, concurrent multi-producer pressure/drop accounting, and
 ring reuse. The result remains on screen for five minutes before the diagnostic
 exits normally.
 
-The first retail-hardware run passed all 11 checks, including four concurrent
-producers accepting the 64-slot capacity, accounting for all 448 excess events
-as drops, draining unique complete records, and reusing a drained slot. The app
+The first run on the project's retail Vita running system software 3.65 passed
+all 11 checks, including four concurrent producers accepting the 64-slot
+capacity, accounting for all 448 excess events as drops, draining unique
+complete records, and reusing a drained slot. The app
 then exited normally after its five-minute result display. See the [unedited
 result screenshot](../docs/hardware/profiler-user-mode-probe-v1.jpg).
 

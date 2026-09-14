@@ -5,14 +5,18 @@
 #include <stdarg.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
+#include <psp2/net/net.h>
 #include <psp2/net/net_syscalls.h>
+#include <psp2common/net.h>
 #include <psp2/kernel/threadmgr/msgpipe.h>
 #include <psp2/kernel/threadmgr/thread.h>
 #include <psp2/kernel/modulemgr.h>
 #include <kubridge.h>
 #include "uvdb.h"
+#include "uvdb_console_transport.h"
 #include "uvdb_registers.h"
 #include "uvdb_rsp.h"
+#include "stdio_redirect.h"
 #include "uvdb_thread_control.h"
 #ifdef UVDB_KERNEL_THREAD_CONTROL
 #include "vitadebug_kernel.h"
@@ -75,6 +79,8 @@ static struct uvdb_thread_selection uvdb_selection = {
 };
 
 static int uvdb_lock_state;
+static int uvdb_lifecycle_lock_state;
+static int uvdb_socket_lifecycle_lock_state;
 
 static void uvdb_lock(void)
 {
@@ -86,9 +92,53 @@ static void uvdb_lock(void)
     }
 }
 
+static int uvdb_try_lock(void)
+{
+    int old_value = 0;
+    return __atomic_compare_exchange_n(&uvdb_lock_state, &old_value, 1, 0,
+                                       __ATOMIC_SEQ_CST,
+                                       __ATOMIC_SEQ_CST);
+}
+
 static void uvdb_unlock(void)
 {
     __atomic_store_n(&uvdb_lock_state, 0, __ATOMIC_SEQ_CST);
+}
+
+static void uvdb_lifecycle_lock(void)
+{
+    for(;;)
+    {
+        int old_value = 0;
+        if(__atomic_compare_exchange_n(&uvdb_lifecycle_lock_state, &old_value,
+                                       1, 0, __ATOMIC_SEQ_CST,
+                                       __ATOMIC_SEQ_CST))
+            return;
+    }
+}
+
+static void uvdb_lifecycle_unlock(void)
+{
+    __atomic_store_n(&uvdb_lifecycle_lock_state, 0, __ATOMIC_SEQ_CST);
+}
+
+static void uvdb_socket_lifecycle_lock(void)
+{
+    for(;;)
+    {
+        int old_value = 0;
+        if(__atomic_compare_exchange_n(&uvdb_socket_lifecycle_lock_state,
+                                       &old_value, 1, 0,
+                                       __ATOMIC_SEQ_CST,
+                                       __ATOMIC_SEQ_CST))
+            return;
+    }
+}
+
+static void uvdb_socket_lifecycle_unlock(void)
+{
+    __atomic_store_n(&uvdb_socket_lifecycle_lock_state, 0,
+                     __ATOMIC_SEQ_CST);
 }
 
 static struct uvdb_thread_entry* uvdb_find_thread(SceUID id)
@@ -138,6 +188,8 @@ int uvdb_unregister_thread(void)
 
 static int uvdb_socket = -1;
 static int uvdb_listen_socket = -1;
+static uint32_t uvdb_socket_generation;
+static struct uvdb_console_transport uvdb_console_transport;
 static SceUID uvdb_pipe = -1;
 static size_t uvdb_max_buffer = UVDB_DEFAULT_MAX_BUFFER;
 static unsigned short uvdb_port = UVDB_DEFAULT_PORT;
@@ -148,7 +200,9 @@ static volatile int uvdb_target_stopped;
 static volatile int uvdb_async_stop_pending;
 static volatile int uvdb_async_stop_cancelled;
 static volatile int uvdb_server_stop;
+static volatile int uvdb_shutdown_pending;
 static SceUID uvdb_server_thread = -1;
+static int uvdb_server_thread_ended;
 /*
  * The exception context belongs to the thread that entered the handler.  That
  * is not necessarily the protocol-facing stopped thread: initial attach and
@@ -165,6 +219,7 @@ static volatile int uvdb_stop_failed;
 static volatile int uvdb_stop_owner;
 static volatile unsigned int uvdb_stop_token;
 static SceUID uvdb_lease_thread = -1;
+static int uvdb_lease_thread_ended;
 #endif
 static struct uvdb_fault_info uvdb_last_fault = {
     .exception_type = UVDB_EXCEPTION_NONE,
@@ -180,11 +235,23 @@ static int uvdb_kernel_recover_stop(void);
 static void uvdb_kernel_abandon_stop(void);
 #endif
 static int uvdb_server_main(SceSize args, void* argp);
+static enum uvdb_console_write_result uvdb_console_raw_socket_write(
+    void* context,
+    const void* data,
+    size_t size,
+    size_t* bytes_sent,
+    int* native_error);
+static enum uvdb_console_write_result uvdb_console_server_socket_write(
+    void* context,
+    const void* data,
+    size_t size,
+    size_t* bytes_sent,
+    int* native_error);
 #ifdef UVDB_KERNEL_THREAD_CONTROL
 static int uvdb_lease_main(SceSize args, void* argp);
 #endif
 
-static int uvdb_is_internal_thread(SceUID id)
+static int uvdb_is_controller_thread(SceUID id)
 {
     if(id <= 0)
         return 0;
@@ -195,6 +262,20 @@ static int uvdb_is_internal_thread(SceUID id)
         return 1;
 #endif
     return 0;
+}
+
+static int uvdb_is_internal_thread(SceUID id)
+{
+    return uvdb_is_controller_thread(id) ||
+           uvdb_stdio_is_internal_thread(id);
+}
+
+static int uvdb_should_inventory_thread(SceUID id)
+{
+    /* Hide helpers during ordinary stops, but keep a non-controller helper
+     * visible if it is itself the faulting thread so GDB can report the fault. */
+    return !uvdb_is_internal_thread(id) ||
+           (id == uvdb_exception_thread && !uvdb_is_controller_thread(id));
 }
 
 #ifdef UVDB_KERNEL_THREAD_CONTROL
@@ -257,7 +338,7 @@ static int uvdb_refresh_thread_inventory(void)
 
     uvdb_thread_inventory_reset(&uvdb_inventory);
     if(uvdb_selection.stopped > 0 &&
-       !uvdb_is_internal_thread(uvdb_selection.stopped))
+       uvdb_should_inventory_thread(uvdb_selection.stopped))
     {
         int stopped_present = 0;
         for(int i = 0; i < copied; ++i)
@@ -272,7 +353,7 @@ static int uvdb_refresh_thread_inventory(void)
             return -1;
     }
     for(int i = 0; i < copied; ++i)
-        if(!uvdb_is_internal_thread(kernel_threads[i]))
+        if(uvdb_should_inventory_thread(kernel_threads[i]))
         {
             /* Every foreign thread exposed to GDB must be owned by this stop
              * session. An independently debug-suspended thread is visible in
@@ -292,13 +373,13 @@ static int uvdb_refresh_thread_inventory(void)
 #else
     uvdb_thread_inventory_reset(&uvdb_inventory);
     if(uvdb_selection.stopped > 0 &&
-       !uvdb_is_internal_thread(uvdb_selection.stopped) &&
+       uvdb_should_inventory_thread(uvdb_selection.stopped) &&
        uvdb_thread_inventory_add(&uvdb_inventory,
                                  uvdb_selection.stopped) < 0)
         return -1;
     for(size_t i = 0; i < UVDB_MAX_THREADS; ++i)
         if(uvdb_threads[i].active &&
-           !uvdb_is_internal_thread(uvdb_threads[i].id) &&
+           uvdb_should_inventory_thread(uvdb_threads[i].id) &&
            uvdb_thread_inventory_add(&uvdb_inventory,
                                      uvdb_threads[i].id) < 0)
             return -1;
@@ -455,12 +536,95 @@ static void buffer_release(struct buffer* buf)
 
 static void uvdb_close_socket(int* socket)
 {
-    if(*socket >= 0)
+    if(!socket)
+        return;
+
+    uvdb_socket_lifecycle_lock();
+    int descriptor = *socket;
+    if(descriptor >= 0)
     {
-        sceNetSyscallShutdown(*socket, SHUT_RDWR);
-        sceNetSyscallClose(*socket);
         *socket = -1;
+        if(socket == &uvdb_socket)
+            uvdb_console_transport_end_connection(&uvdb_console_transport);
+        sceNetSyscallShutdown(descriptor, SHUT_RDWR);
+        sceNetSyscallClose(descriptor);
     }
+    uvdb_socket_lifecycle_unlock();
+}
+
+static int uvdb_publish_socket(int* socket, int descriptor)
+{
+    if(!socket || descriptor < 0)
+        return -1;
+
+    int result = -1;
+    uvdb_socket_lifecycle_lock();
+    if(*socket < 0)
+    {
+        *socket = descriptor;
+        if(socket == &uvdb_socket)
+        {
+            uvdb_socket_generation++;
+            if(!uvdb_socket_generation)
+                uvdb_socket_generation++;
+        }
+        result = 0;
+    }
+    uvdb_socket_lifecycle_unlock();
+    return result;
+}
+
+static void uvdb_active_socket_snapshot(int* descriptor,
+                                        uint32_t* generation)
+{
+    uvdb_socket_lifecycle_lock();
+    *descriptor = uvdb_socket;
+    *generation = uvdb_socket_generation;
+    uvdb_socket_lifecycle_unlock();
+}
+
+/* Shutdown wakes a descriptor owner without transferring close ownership.
+ * Holding the short socket lock through the syscall prevents a simultaneous
+ * close followed by descriptor-number reuse from targeting an unrelated fd. */
+static int uvdb_shutdown_socket(int* socket)
+{
+    if(!socket)
+        return -1;
+
+    int result = 0;
+    uvdb_socket_lifecycle_lock();
+    if(*socket >= 0)
+        result = sceNetSyscallShutdown(*socket, SHUT_RDWR);
+    uvdb_socket_lifecycle_unlock();
+    return result;
+}
+
+static int uvdb_shutdown_socket_if_current(int* socket, int descriptor)
+{
+    if(!socket || descriptor < 0)
+        return -1;
+
+    int result = 0;
+    uvdb_socket_lifecycle_lock();
+    if(*socket == descriptor)
+        result = sceNetSyscallShutdown(descriptor, SHUT_RDWR);
+    uvdb_socket_lifecycle_unlock();
+    return result;
+}
+
+/* Abort is the Vita network API's cancellation primitive for a thread blocked
+ * in accept. It retains descriptor ownership, unlike a cross-thread close. */
+static int uvdb_abort_socket(int* socket)
+{
+    if(!socket)
+        return -1;
+
+    int result = 0;
+    uvdb_socket_lifecycle_lock();
+    if(*socket >= 0)
+        result = sceNetSyscallSocketAbort(*socket, 0);
+    uvdb_socket_lifecycle_unlock();
+    return result;
 }
 
 static void uvdb_release_handlers(void)
@@ -474,10 +638,42 @@ static void uvdb_release_handlers(void)
     uvdb_handler_mask = 0;
 }
 
+/* Preserve a thread handle until both termination and deletion are proven.
+ * A failed wait may still refer to a live thread; a failed delete refers to an
+ * ended thread whose resource can be deleted by a later shutdown retry. */
+static int uvdb_wait_delete_thread(SceUID* thread, int* ended)
+{
+    if(!thread || !ended)
+        return -1;
+    if(*thread < 0)
+    {
+        *ended = 0;
+        return 0;
+    }
+    if(!*ended)
+    {
+        int status = 0;
+        if(sceKernelWaitThreadEnd(*thread, &status, NULL) < 0)
+            return -1;
+        *ended = 1;
+    }
+    if(sceKernelDeleteThread(*thread) < 0)
+        return -1;
+    *thread = -1;
+    *ended = 0;
+    return 0;
+}
+
 int uvdb_configure(const struct uvdb_config* config)
 {
-    if(uvdb_state != UVDB_STATE_IDLE || uvdb_socket >= 0 || uvdb_listen_socket >= 0)
+    uvdb_lifecycle_lock();
+    if(__atomic_load_n(&uvdb_shutdown_pending, __ATOMIC_SEQ_CST) ||
+       uvdb_state != UVDB_STATE_IDLE || uvdb_socket >= 0 ||
+       uvdb_listen_socket >= 0)
+    {
+        uvdb_lifecycle_unlock();
         return -1;
+    }
 
     unsigned short port = UVDB_DEFAULT_PORT;
     size_t max_buffer = UVDB_DEFAULT_MAX_BUFFER;
@@ -486,10 +682,14 @@ int uvdb_configure(const struct uvdb_config* config)
         port = config->port;
         max_buffer = config->max_packet_buffer;
         if(!port || max_buffer < UVDB_MIN_BUFFER || max_buffer > UVDB_MAX_BUFFER)
+        {
+            uvdb_lifecycle_unlock();
             return -1;
+        }
     }
     uvdb_port = port;
     uvdb_max_buffer = max_buffer;
+    uvdb_lifecycle_unlock();
     return 0;
 }
 
@@ -506,18 +706,12 @@ int uvdb_get_last_fault(struct uvdb_fault_info* info)
     return uvdb_last_fault.exception_type == UVDB_EXCEPTION_NONE ? 0 : 1;
 }
 
-int uvdb_stop_server(void)
+static int uvdb_stop_server_locked(void)
 {
     SceUID thread = uvdb_server_thread;
     #ifdef UVDB_KERNEL_THREAD_CONTROL
     SceUID lease_thread = uvdb_lease_thread;
     #endif
-    if(thread < 0
-       #ifdef UVDB_KERNEL_THREAD_CONTROL
-       && lease_thread < 0
-       #endif
-       )
-        return 0;
     SceUID caller = sceKernelGetThreadId();
     if(thread == caller
        #ifdef UVDB_KERNEL_THREAD_CONTROL
@@ -527,48 +721,85 @@ int uvdb_stop_server(void)
         return -1;
 
     __atomic_store_n(&uvdb_server_stop, 1, __ATOMIC_SEQ_CST);
+    /* Stop accepting producer bytes immediately. The serialized socket owner
+     * completes generation cleanup after its service thread has exited. */
+    uvdb_console_session_close_active_gate();
     /* Shutdown wakes recv without changing the descriptor to -1. A running
      * server can then enter its exception/all-stop cleanup path instead of
      * mistaking shutdown for a request to open a fresh listening socket. */
-    int active_socket = uvdb_socket;
-    if(active_socket >= 0)
-        sceNetSyscallShutdown(active_socket, SHUT_RDWR);
+    uvdb_shutdown_socket(&uvdb_socket);
     // Do not take uvdb_lock here: the blocked service or exception path may be
     // holding it while waiting for network input.
-    uvdb_close_socket(&uvdb_listen_socket);
+    // Abort wakes a blocking accept without closing its descriptor. The owner
+    // observes server_stop and performs the serialized close itself.
+    uvdb_abort_socket(&uvdb_listen_socket);
 
-    int result = 0;
-    if(thread >= 0)
+    if(thread >= 0 &&
+       uvdb_wait_delete_thread(&uvdb_server_thread,
+                               &uvdb_server_thread_ended) < 0)
+        return -1;
+    if(thread < 0)
     {
-        int status = 0;
-        result = sceKernelWaitThreadEnd(thread, &status, NULL);
-        if(result >= 0)
-            result = sceKernelDeleteThread(thread);
+        /* There is no joinable service-thread handle for a direct
+         * uvdb_enter() owner. This barrier closes the race where it acquired
+         * uvdb_lock just before the stop flag became visible but had not yet
+         * published its listener when SocketAbort ran. real_uvdb_enter checks
+         * the flag again before blocking in accept. Keep the lease helper
+         * alive until that owner has finished any stopped-side cleanup. */
+        uvdb_lock();
+        uvdb_close_socket(&uvdb_socket);
+        uvdb_close_socket(&uvdb_listen_socket);
+        if(uvdb_state != UVDB_STATE_ERROR)
+            uvdb_state = UVDB_STATE_IDLE;
+        uvdb_unlock();
     }
-    uvdb_server_thread = -1;
     #ifdef UVDB_KERNEL_THREAD_CONTROL
     /* Keep the lease helper alive until the server has completed any
      * shutdown-triggered all-stop and breakpoint cleanup. */
     __atomic_store_n(&uvdb_lease_stop, 1, __ATOMIC_SEQ_CST);
-    if(lease_thread >= 0)
-    {
-        int status = 0;
-        int lease_result = sceKernelWaitThreadEnd(lease_thread, &status, NULL);
-        if(lease_result >= 0)
-            lease_result = sceKernelDeleteThread(lease_thread);
-        if(result >= 0 && lease_result < 0)
-            result = lease_result;
-    }
-    uvdb_lease_thread = -1;
+    if(lease_thread >= 0 &&
+       uvdb_wait_delete_thread(&uvdb_lease_thread,
+                               &uvdb_lease_thread_ended) < 0)
+        return -1;
     #endif
-    uvdb_close_socket(&uvdb_socket);
-    return result < 0 ? -1 : 0;
+    if(thread >= 0)
+    {
+        uvdb_close_socket(&uvdb_socket);
+        uvdb_close_socket(&uvdb_listen_socket);
+    }
+    return 0;
+}
+
+int uvdb_stop_server(void)
+{
+    uvdb_lifecycle_lock();
+    int result = uvdb_stop_server_locked();
+    uvdb_lifecycle_unlock();
+    return result;
 }
 
 void uvdb_shutdown(void)
 {
+    uvdb_lifecycle_lock();
+    __atomic_store_n(&uvdb_shutdown_pending, 1, __ATOMIC_SEQ_CST);
     uvdb_debugnet_stop();
-    uvdb_stop_server();
+    if(uvdb_stop_server_locked() < 0)
+    {
+        /* A helper may still be executing. Preserve every object it can
+         * access so a later uvdb_shutdown call can retry safely. */
+        uvdb_state = UVDB_STATE_ERROR;
+        uvdb_lifecycle_unlock();
+        return;
+    }
+    /* The server can no longer initiate an all-stop that suspends the capture
+     * helper while restore waits to join it. */
+    if(uvdb_restore_stdio() < 0)
+    {
+        /* Preserve the console queue and descriptor backups for retry. */
+        uvdb_state = UVDB_STATE_ERROR;
+        uvdb_lifecycle_unlock();
+        return;
+    }
     uvdb_lock();
 #ifdef UVDB_KERNEL_THREAD_CONTROL
     int breakpoints_active = breakpoint_any_active();
@@ -593,6 +824,7 @@ void uvdb_shutdown(void)
         if(owns_stop)
             uvdb_release_stop_controller();
         uvdb_unlock();
+        uvdb_lifecycle_unlock();
         return;
     }
 
@@ -611,6 +843,7 @@ void uvdb_shutdown(void)
             if(owns_stop)
                 uvdb_release_stop_controller();
             uvdb_unlock();
+            uvdb_lifecycle_unlock();
             return;
         }
     }
@@ -644,8 +877,12 @@ void uvdb_shutdown(void)
     uvdb_stop_owner = UVDB_STOP_OWNER_NONE;
     uvdb_stop_token = 0;
     #endif
+    uvdb_console_reset();
+    uvdb_console_transport_init(&uvdb_console_transport);
+    __atomic_store_n(&uvdb_shutdown_pending, 0, __ATOMIC_SEQ_CST);
     uvdb_state = UVDB_STATE_IDLE;
     uvdb_unlock();
+    uvdb_lifecycle_unlock();
 }
 
 #define POLL() while(cur == end) { size_t sz = buffer_poll(&in_buf, &cur); if(!sz && uvdb_io_failed) return 0; end = cur + sz; }
@@ -677,10 +914,11 @@ retry:;
     char c2 = *cur++;
     if(c1 != int2hex(cksum>>4) || c2 != int2hex(cksum&15))
         goto retry;
-    buffer_write(&out_buf, "+", 1);
-    //we better not do this here, so that this + and the reply can be merged into a single packet
-    //UPD: it seems that this way the communication is a bit more reliable, so let's keep it
-    buffer_flush(&out_buf); 
+    if(!uvdb_console_transport_no_ack(&uvdb_console_transport))
+    {
+        buffer_write(&out_buf, "+", 1);
+        buffer_flush(&out_buf);
+    }
     *data = in_buf.buf + start_packet;
     in_buf.buf[end_packet] = 0;
     return end_packet - start_packet;
@@ -697,6 +935,8 @@ static int send_packet(void)
     buffer_flush(&out_buf);
     if(uvdb_io_failed)
         return -1;
+    if(uvdb_console_transport_no_ack(&uvdb_console_transport))
+        return 0;
     char* cur = in_buf.buf;
     char* end = cur + in_buf.size;
     char c = 0;
@@ -1528,6 +1768,24 @@ static int send_stop_reply(int signal)
     return send_packet();
 }
 
+static int uvdb_pump_console_before_stop(void)
+{
+    if(uvdb_socket < 0 ||
+       !uvdb_console_transport_no_ack(&uvdb_console_transport))
+        return 0;
+    int active_socket = uvdb_socket;
+    int result = uvdb_console_transport_pump(
+        &uvdb_console_transport,
+        uvdb_console_raw_socket_write,
+        &active_socket);
+    if(result != UVDB_CONSOLE_PUMP_FATAL)
+        return 0;
+
+    uvdb_console_transport_end_connection(&uvdb_console_transport);
+    uvdb_shutdown_socket_if_current(&uvdb_socket, active_socket);
+    return -1;
+}
+
 #ifdef UVDB_KERNEL_THREAD_CONTROL
 static void uvdb_claim_stop_controller(void)
 {
@@ -1800,8 +2058,18 @@ static void uvdb_main_loop(KuKernelExceptionContext* ctx, int stop_signal)
             return;
         }
         buffer_start_packet(&out_buf);
-        if(STARTSWITH("qSupported:"))
-            buffer_write(&out_buf, STRING("qXfer:features:read+;qXfer:libraries:read+;vContSupported+"));
+        int enable_no_ack = 0;
+        if(IS("qSupported") || STARTSWITH("qSupported:"))
+        {
+            buffer_write(&out_buf, STRING("qXfer:features:read+;qXfer:libraries:read+;vContSupported+;QStartNoAckMode+;PacketSize="));
+            write_hex_uint32((uint32_t)(uvdb_max_buffer - 4u));
+        }
+        else if(IS("QStartNoAckMode"))
+        {
+            buffer_write(&out_buf, STRING("OK"));
+            enable_no_ack =
+                !uvdb_console_transport_no_ack(&uvdb_console_transport);
+        }
         else if(STARTSWITH("qXfer:features:read:target.xml:"))
         {
             struct stream st = parse_stream(pkt + sizeof("qXfer:features:read:target.xml:") - 1);
@@ -1825,6 +2093,12 @@ static void uvdb_main_loop(KuKernelExceptionContext* ctx, int stop_signal)
             if(uvdb_refresh_stopped_inventory() < 0)
                 return;
             out_buf.size--;
+            if(uvdb_pump_console_before_stop() < 0)
+            {
+                discard_packet(pkt, sz);
+                uvdb_fail_stopped_client();
+                return;
+            }
             if(send_stop_reply(stop_signal) < 0)
             {
                 discard_packet(pkt, sz);
@@ -2147,6 +2421,27 @@ static void uvdb_main_loop(KuKernelExceptionContext* ctx, int stop_signal)
             uvdb_fail_stopped_client();
             return;
         }
+        if(enable_no_ack)
+        {
+            if(__atomic_load_n(&uvdb_server_stop, __ATOMIC_SEQ_CST))
+            {
+                uvdb_fail_stopped_client();
+                return;
+            }
+            int enable_result = uvdb_console_transport_enable_no_ack(
+                &uvdb_console_transport);
+            if(enable_result != UVDB_CONSOLE_READY &&
+               enable_result != UVDB_CONSOLE_BUSY)
+            {
+                uvdb_fail_stopped_client();
+                return;
+            }
+            if(__atomic_load_n(&uvdb_server_stop, __ATOMIC_SEQ_CST))
+            {
+                uvdb_fail_stopped_client();
+                return;
+            }
+        }
     }
 }
 
@@ -2162,7 +2457,7 @@ static __attribute__((naked)) void uvdb_trap_pc(void)
 static void exception_handler(KuKernelExceptionContext* ctx)
 {
     SceUID exception_thread = sceKernelGetThreadId();
-    int internal_controller = uvdb_is_internal_thread(exception_thread);
+    int internal_controller = uvdb_is_controller_thread(exception_thread);
     __atomic_store_n(&uvdb_target_stopped, 1, __ATOMIC_SEQ_CST);
     int signal = SIGSEGV;
     if(ctx->exceptionType == KU_KERNEL_EXCEPTION_TYPE_UNDEFINED_INSTRUCTION)
@@ -2261,15 +2556,10 @@ static void exception_handler(KuKernelExceptionContext* ctx)
     breakpoint_remove_temporary();
     uvdb_end_stopped_operation();
     int reported_signal = async_stop ? SIGINT : signal;
-    if(async_stop)
-    {
-        if(send_stop_reply(reported_signal) < 0)
-        {
-            uvdb_fail_stopped_client();
-            uvdb_unlock();
-            return;
-        }
-    }
+    /* Every successful resume leaves one synthetic '?' packet in the receive
+     * buffer. Let the common query path emit the sole stop reply, including
+     * for an asynchronous Ctrl-C. Sending here as well would produce two T02
+     * packets and leave a stale stop notification in a no-ack GDB session. */
     uvdb_main_loop(ctx, reported_signal);
     uvdb_unlock();
 }
@@ -2376,15 +2666,24 @@ static __attribute__((used)) uint64_t real_uvdb_enter(uintptr_t lr)
             return no_trap;
         }
     }
-    uvdb_listen_socket = sceNetSyscallSocket("gdb socket", AF_INET, SOCK_STREAM, 0);
-    if(uvdb_listen_socket < 0)
+    int listen_socket = sceNetSyscallSocket("gdb socket", AF_INET,
+                                            SOCK_STREAM, 0);
+    if(listen_socket < 0)
     {
         uvdb_state = UVDB_STATE_ERROR;
         uvdb_unlock();
         return no_trap;
     }
+    if(uvdb_publish_socket(&uvdb_listen_socket, listen_socket) < 0)
+    {
+        uvdb_close_socket(&listen_socket);
+        uvdb_state = UVDB_STATE_ERROR;
+        uvdb_unlock();
+        return no_trap;
+    }
     int value = 1;
-    uint32_t args[5] = {uvdb_listen_socket, SOL_SOCKET, SO_REUSEADDR, (uint32_t)&value, sizeof(value)};
+    uint32_t args[5] = {listen_socket, SOL_SOCKET, SO_REUSEADDR,
+                        (uint32_t)&value, sizeof(value)};
     if(sceNetSyscallSetsockopt((void*)&args))
     {
         uvdb_close_socket(&uvdb_listen_socket);
@@ -2406,7 +2705,7 @@ static __attribute__((used)) uint64_t real_uvdb_enter(uintptr_t lr)
         .sin_addr = {},
         .sin_port = htons(uvdb_port),
     };
-    if(sceNetSyscallBind(uvdb_listen_socket, &sin, sizeof(sin)))
+    if(sceNetSyscallBind(listen_socket, &sin, sizeof(sin)))
     {
         uvdb_close_socket(&uvdb_listen_socket);
         uvdb_state = UVDB_STATE_ERROR;
@@ -2421,15 +2720,44 @@ static __attribute__((used)) uint64_t real_uvdb_enter(uintptr_t lr)
         uvdb_unlock();
         return no_trap;
     }
-    if(sceNetSyscallListen(uvdb_listen_socket, 1) ||
-       (uvdb_socket = sceNetSyscallAccept(uvdb_listen_socket, NULL, NULL)) < 0)
+    if(sceNetSyscallListen(listen_socket, 1))
     {
         uvdb_close_socket(&uvdb_listen_socket);
         uvdb_state = UVDB_STATE_ERROR;
         uvdb_unlock();
         return no_trap;
     }
+
+    int accepted_socket = sceNetSyscallAccept(listen_socket, NULL, NULL);
+
+    if(accepted_socket < 0)
+    {
+        uvdb_close_socket(&uvdb_listen_socket);
+        uvdb_state = __atomic_load_n(&uvdb_server_stop, __ATOMIC_SEQ_CST)
+                         ? UVDB_STATE_IDLE
+                         : UVDB_STATE_ERROR;
+        uvdb_unlock();
+        return no_trap;
+    }
+    if(uvdb_publish_socket(&uvdb_socket, accepted_socket) < 0)
+    {
+        uvdb_close_socket(&accepted_socket);
+        uvdb_close_socket(&uvdb_listen_socket);
+        uvdb_state = UVDB_STATE_ERROR;
+        uvdb_unlock();
+        return no_trap;
+    }
     uvdb_close_socket(&uvdb_listen_socket);
+    /* stop_server may have observed no connected socket immediately before
+     * accept published this one. Never enter the protocol loop in that race. */
+    if(__atomic_load_n(&uvdb_server_stop, __ATOMIC_SEQ_CST))
+    {
+        uvdb_close_socket(&uvdb_socket);
+        uvdb_state = UVDB_STATE_IDLE;
+        uvdb_unlock();
+        return no_trap;
+    }
+    uvdb_console_transport_begin_connection(&uvdb_console_transport);
     uvdb_state = UVDB_STATE_CONNECTED;
     uvdb_unlock();
     return trap;
@@ -2444,46 +2772,256 @@ __attribute__((naked)) void uvdb_enter(void)
     );
 }
 
+/* This callback can run from the stopped exception path, so keep it on raw
+ * network syscalls and avoid public-wrapper TLS/errno state. */
+static enum uvdb_console_write_result uvdb_console_raw_socket_write(
+    void* context,
+    const void* data,
+    size_t size,
+    size_t* bytes_sent,
+    int* native_error)
+{
+    int socket = *(const int*)context;
+    uint32_t send_args[6] = {
+        (uint32_t)socket,
+        (uint32_t)data,
+        (uint32_t)size,
+        MSG_DONTWAIT,
+        0,
+        0,
+    };
+    int result = sceNetSyscallSendto((void*)send_args);
+    *bytes_sent = 0;
+    *native_error = result < 0 ? result : 0;
+    if((uint32_t)result == (uint32_t)SCE_NET_ERROR_EAGAIN)
+        return UVDB_CONSOLE_WRITE_WOULD_BLOCK;
+    if(result < 0)
+        return UVDB_CONSOLE_WRITE_ERROR;
+    *bytes_sent = (size_t)result;
+    return UVDB_CONSOLE_WRITE_COMPLETE;
+}
+
+/* The running service thread may use the public wrapper, which gives a
+ * documented errno location when its nonblocking send returns plain -1. */
+static enum uvdb_console_write_result uvdb_console_server_socket_write(
+    void* context,
+    const void* data,
+    size_t size,
+    size_t* bytes_sent,
+    int* native_error)
+{
+    int socket = *(const int*)context;
+    int result = sceNetSend(socket, data, (unsigned int)size,
+                            SCE_NET_MSG_DONTWAIT);
+    int error = 0;
+    if(result == -1)
+    {
+        int* error_location = sceNetErrnoLoc();
+        error = error_location ? *error_location : result;
+    }
+    else if(result < 0)
+        error = result;
+    *bytes_sent = 0;
+    *native_error = result < 0 && !error ? result : error;
+    if((uint32_t)result == (uint32_t)SCE_NET_ERROR_EAGAIN ||
+       (result == -1 && (error == SCE_NET_EAGAIN ||
+                         error == SCE_NET_EWOULDBLOCK)))
+        return UVDB_CONSOLE_WRITE_WOULD_BLOCK;
+    if(result < 0)
+        return UVDB_CONSOLE_WRITE_ERROR;
+    *bytes_sent = (size_t)result;
+    return UVDB_CONSOLE_WRITE_COMPLETE;
+}
+
+/* The exception handler deliberately uses raw networking syscalls, but this
+ * service thread runs in ordinary user context. Public epoll gives it an
+ * unambiguous zero-timeout readiness result; the raw DONTWAIT receive syscall
+ * does not have a documented error-normalization contract on retail Vita.
+ * The epoll object is owned entirely by this thread and never survives a
+ * connection generation. */
+static void uvdb_server_epoll_reset(int* epoll_id, int* watched_socket,
+                                    uint32_t* watched_generation)
+{
+    if(*epoll_id >= 0)
+        sceNetEpollDestroy(*epoll_id);
+    *epoll_id = -1;
+    *watched_socket = -1;
+    *watched_generation = 0;
+}
+
+static int uvdb_server_epoll_prepare(int* epoll_id, int* watched_socket,
+                                     uint32_t* watched_generation,
+                                     int socket, uint32_t generation)
+{
+    if(*epoll_id >= 0 && *watched_socket == socket &&
+       *watched_generation == generation)
+        return 0;
+
+    uvdb_server_epoll_reset(epoll_id, watched_socket, watched_generation);
+    int created = sceNetEpollCreate("uvdb socket events", 0);
+    if(created < 0)
+        return -1;
+
+    SceNetEpollEvent event;
+    memset(&event, 0, sizeof(event));
+    event.events = SCE_NET_EPOLLIN | SCE_NET_EPOLLERR |
+                   SCE_NET_EPOLLHUP;
+    event.data.fd = socket;
+    if(sceNetEpollControl(created, SCE_NET_EPOLL_CTL_ADD, socket,
+                          &event) < 0)
+    {
+        sceNetEpollDestroy(created);
+        return -1;
+    }
+
+    *epoll_id = created;
+    *watched_socket = socket;
+    *watched_generation = generation;
+    return 0;
+}
+
 static int uvdb_server_main(SceSize args, void* argp)
 {
     (void)args;
     (void)argp;
     uvdb_register_thread("uvdb server");
+    int epoll_id = -1;
+    int watched_socket = -1;
+    uint32_t watched_generation = 0;
 
     while(!__atomic_load_n(&uvdb_server_stop, __ATOMIC_SEQ_CST))
     {
         if(uvdb_socket < 0)
         {
+            uvdb_server_epoll_reset(&epoll_id, &watched_socket,
+                                    &watched_generation);
             if(__atomic_load_n(&uvdb_server_stop, __ATOMIC_SEQ_CST))
                 break;
             uvdb_enter();
             continue;
         }
 
-        if(__atomic_load_n(&uvdb_target_stopped, __ATOMIC_SEQ_CST))
+        if(!uvdb_try_lock())
         {
             sceKernelDelayThread(1000);
             continue;
         }
 
-        unsigned char command = 0;
-        uint32_t peek_args[6] = {
-            (uint32_t)uvdb_socket,
-            (uint32_t)&command,
-            1,
-            MSG_PEEK,
-            0,
-            0,
-        };
-        ssize_t received = sceNetSyscallRecvfrom((void*)peek_args);
-        if(received <= 0)
+        if(uvdb_socket < 0 ||
+           __atomic_load_n(&uvdb_target_stopped, __ATOMIC_SEQ_CST))
         {
+            uvdb_unlock();
+            sceKernelDelayThread(1000);
+            continue;
+        }
+
+        int active_socket = -1;
+        uint32_t active_generation = 0;
+        uvdb_active_socket_snapshot(&active_socket, &active_generation);
+        int request_stop = 0;
+        int connection_failed = 0;
+        unsigned char command = 0;
+        SceNetEpollEvent ready_event;
+        memset(&ready_event, 0, sizeof(ready_event));
+        int ready = -1;
+        if(active_socket >= 0 &&
+           uvdb_server_epoll_prepare(&epoll_id, &watched_socket,
+                                     &watched_generation, active_socket,
+                                     active_generation) == 0)
+            ready = sceNetEpollWait(epoll_id, &ready_event, 1, 0);
+
+        if(ready == 0)
+        {
+            int pump_result = uvdb_console_transport_pump(
+                &uvdb_console_transport,
+                uvdb_console_server_socket_write,
+                &active_socket);
+            if(pump_result == UVDB_CONSOLE_PUMP_FATAL)
+            {
+                /* A partial RSP frame cannot be retried. Wake the stopped-side
+                 * receiver so common all-stop cleanup can retire this client. */
+                uvdb_console_transport_end_connection(
+                    &uvdb_console_transport);
+                uvdb_shutdown_socket_if_current(&uvdb_socket, active_socket);
+                connection_failed = 1;
+            }
+        }
+        else if(ready < 0)
+            connection_failed = 1;
+        else if(ready_event.events & SCE_NET_EPOLLIN)
+        {
+            uint32_t peek_args[6] = {
+                (uint32_t)active_socket,
+                (uint32_t)&command,
+                1,
+                MSG_PEEK,
+                0,
+                0,
+            };
+            int received = sceNetSyscallRecvfrom((void*)peek_args);
+            if(received <= 0)
+                connection_failed = 1;
+            else if(command == 3)
+            {
+                uint32_t recv_args[6] = {
+                    (uint32_t)active_socket,
+                    (uint32_t)&command,
+                    1,
+                    0,
+                    0,
+                    0,
+                };
+                int consumed = sceNetSyscallRecvfrom((void*)recv_args);
+                if(consumed == 1)
+                {
+                    __atomic_store_n(&uvdb_async_stop_cancelled, 0,
+                                      __ATOMIC_SEQ_CST);
+                    __atomic_store_n(&uvdb_async_stop_pending, 1,
+                                      __ATOMIC_SEQ_CST);
+                    request_stop = 1;
+                }
+                else
+                    connection_failed = 1;
+            }
+            else if(uvdb_console_transport_no_ack(
+                        &uvdb_console_transport) &&
+                    (command == '+' || command == '-'))
+            {
+                /* Ignore a delayed acknowledgement from the mode transition
+                 * (or a legacy client) so one stray byte cannot starve
+                 * console output. Readiness makes this blocking single-byte
+                 * consume safe. */
+                uint32_t recv_args[6] = {
+                    (uint32_t)active_socket,
+                    (uint32_t)&command,
+                    1,
+                    0,
+                    0,
+                    0,
+                };
+                if(sceNetSyscallRecvfrom((void*)recv_args) != 1)
+                    connection_failed = 1;
+            }
+        }
+        else if(ready_event.events & (SCE_NET_EPOLLERR |
+                                      SCE_NET_EPOLLHUP))
+            connection_failed = 1;
+        /* A normal RSP packet wins over console output and remains queued for
+         * the stopped handler that is taking ownership of the byte stream. */
+        uvdb_unlock();
+
+        if(request_stop)
+            uvdb_enter();
+        else if(connection_failed)
+        {
+            uvdb_server_epoll_reset(&epoll_id, &watched_socket,
+                                    &watched_generation);
             if(uvdb_socket < 0 &&
                __atomic_load_n(&uvdb_server_stop, __ATOMIC_SEQ_CST))
                 break;
             /* Enter the normal exception/all-stop path before restoring code.
-             * The dead peer will make recv_packet fail there, and the common
-             * failure cleanup removes breakpoints before releasing the stop. */
+             * The failed peer makes recv_packet fail there, and the common
+             * cleanup removes breakpoints before releasing the stop. */
             uvdb_enter();
             if(uvdb_socket >= 0)
             {
@@ -2497,38 +3035,12 @@ static int uvdb_server_main(SceSize args, void* argp)
                 uvdb_exception_thread = -1;
                 uvdb_unlock();
             }
-            continue;
         }
-
-        if(__atomic_load_n(&uvdb_target_stopped, __ATOMIC_SEQ_CST))
-            continue;
-
-        if(command == 3)
-        {
-            uint32_t recv_args[6] = {
-                (uint32_t)uvdb_socket,
-                (uint32_t)&command,
-                1,
-                0,
-                0,
-                0,
-            };
-            if(sceNetSyscallRecvfrom((void*)recv_args) == 1)
-            {
-                __atomic_store_n(&uvdb_async_stop_cancelled, 0,
-                                  __ATOMIC_SEQ_CST);
-                __atomic_store_n(&uvdb_async_stop_pending, 1, __ATOMIC_SEQ_CST);
-                uvdb_enter();
-            }
-        }
-        else
-        {
-            // Normal RSP packets belong to an exception handler that has just
-            // stopped another thread. Leave the byte queued for that handler.
-            sceKernelDelayThread(1000);
-        }
+        sceKernelDelayThread(1000);
     }
 
+    uvdb_server_epoll_reset(&epoll_id, &watched_socket,
+                            &watched_generation);
     uvdb_unregister_thread();
     return 0;
 }
@@ -2560,8 +3072,7 @@ static int uvdb_lease_main(SceSize args, void* argp)
                  * between renewal and failure publication. */
                 __atomic_store_n(&uvdb_stop_failed, 1, __ATOMIC_SEQ_CST);
                 int socket = uvdb_socket;
-                if(socket >= 0)
-                    sceNetSyscallShutdown(socket, SHUT_RDWR);
+                uvdb_shutdown_socket_if_current(&uvdb_socket, socket);
             }
             __atomic_store_n(&uvdb_stop_owner, UVDB_STOP_OWNER_NONE,
                              __ATOMIC_SEQ_CST);
@@ -2573,11 +3084,17 @@ static int uvdb_lease_main(SceSize args, void* argp)
 }
 #endif
 
-int uvdb_start_server(void)
+static int uvdb_start_server_locked(void)
 {
+    if(__atomic_load_n(&uvdb_shutdown_pending, __ATOMIC_SEQ_CST))
+        return -1;
     if(uvdb_server_thread >= 0)
-        return 0;
+        return uvdb_server_thread_ended ||
+               __atomic_load_n(&uvdb_server_stop, __ATOMIC_SEQ_CST)
+                   ? -1 : 0;
 #ifdef UVDB_KERNEL_THREAD_CONTROL
+    if(uvdb_lease_thread >= 0)
+        return -1;
     /* Validate the actual loaded companion rather than relying only on import
      * compatibility. No helper thread is created for a mismatched ABI. */
     if(!uvdb_kernel_status_is_compatible())
@@ -2604,10 +3121,13 @@ int uvdb_start_server(void)
     if(lease_thread < 0)
         return -1;
     uvdb_lease_thread = lease_thread;
+    uvdb_lease_thread_ended = 0;
     if(sceKernelStartThread(lease_thread, 0, NULL) < 0)
     {
-        sceKernelDeleteThread(lease_thread);
-        uvdb_lease_thread = -1;
+        if(sceKernelDeleteThread(lease_thread) >= 0)
+            uvdb_lease_thread = -1;
+        else
+            uvdb_lease_thread_ended = 1;
         return -1;
     }
     #endif
@@ -2623,27 +3143,34 @@ int uvdb_start_server(void)
     {
         #ifdef UVDB_KERNEL_THREAD_CONTROL
         __atomic_store_n(&uvdb_lease_stop, 1, __ATOMIC_SEQ_CST);
-        int lease_status = 0;
-        sceKernelWaitThreadEnd(uvdb_lease_thread, &lease_status, NULL);
-        sceKernelDeleteThread(uvdb_lease_thread);
-        uvdb_lease_thread = -1;
+        uvdb_wait_delete_thread(&uvdb_lease_thread,
+                                &uvdb_lease_thread_ended);
         #endif
         return -1;
     }
 
     uvdb_server_thread = thread;
+    uvdb_server_thread_ended = 0;
     if(sceKernelStartThread(thread, 0, NULL) < 0)
     {
-        sceKernelDeleteThread(thread);
-        uvdb_server_thread = -1;
+        if(sceKernelDeleteThread(thread) >= 0)
+            uvdb_server_thread = -1;
+        else
+            uvdb_server_thread_ended = 1;
         #ifdef UVDB_KERNEL_THREAD_CONTROL
         __atomic_store_n(&uvdb_lease_stop, 1, __ATOMIC_SEQ_CST);
-        int lease_status = 0;
-        sceKernelWaitThreadEnd(uvdb_lease_thread, &lease_status, NULL);
-        sceKernelDeleteThread(uvdb_lease_thread);
-        uvdb_lease_thread = -1;
+        uvdb_wait_delete_thread(&uvdb_lease_thread,
+                                &uvdb_lease_thread_ended);
         #endif
         return -1;
     }
     return 0;
+}
+
+int uvdb_start_server(void)
+{
+    uvdb_lifecycle_lock();
+    int result = uvdb_start_server_locked();
+    uvdb_lifecycle_unlock();
+    return result;
 }

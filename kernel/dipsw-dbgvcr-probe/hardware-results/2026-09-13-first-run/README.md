@@ -6,6 +6,12 @@ physically pressed **L+R+X**. The two journal files were pulled after reboot
 and again matched the hashes below after the separate read-only recovery
 check.
 
+> **Hardware baseline:** the owner later confirmed that this test device was a
+> retail PS Vita running system software 3.65. The firmware value was not
+> embedded in this artifact's journal or screenshots, so this is later device
+> metadata rather than contemporaneous probe output. Do not generalize this
+> result to another firmware or device class.
+
 Both 192-byte journal slots validate:
 
 - A: revision 3, sequence 1, `ORIGINAL_CAPTURED`; SHA-256

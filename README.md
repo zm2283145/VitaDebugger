@@ -37,8 +37,13 @@ developer controls. It does not include or require Sony's proprietary SDK.
 
 ## Current status
 
-The current application-side library has been tested extensively on real Vita
-hardware. Its current status includes:
+The current application-side library and optional kernel companion have been
+exercised on one retail PS Vita running system software 3.65. Unless a result
+explicitly names another target, every "hardware-tested" claim below refers
+only to that device, the tested Kubridge release listed under Requirements,
+and the exact artifacts identified by the linked evidence. Vita TV, other
+firmware releases, development hardware, and other plugin combinations remain
+unvalidated. Current status includes:
 
 - GDB connections over TCP.
 - Source and function breakpoints.
@@ -92,6 +97,15 @@ hardware. Its current status includes:
   remaining promotion step.
 - GDB loaded-module discovery through chunk-safe `qXfer:libraries:read`,
   hardware-tested with 14 executable and system modules.
+- A completed bounded `stdout`/`stderr` bridge that emits GDB `O` packets only
+  after no-ack negotiation, never gives application threads ownership of the
+  RSP socket, and isolates output between reconnect generations. Native tests
+  cover queue pressure, framing, failures, commit retry, and reconnect
+  behavior. On the validated retail Vita running system software 3.65, the
+  live raw-RSP gate passed two consecutive sessions: each negotiated no-ack
+  mode, received an initial `T05`, decoded six `O` packets carrying both
+  streams, stopped with `T02` on Ctrl-C, remained quiet while stopped, and
+  detached cleanly before the fresh reconnect.
 - Hardware-tested DebugNet-compatible UDP logging with bounded messages,
   concurrent producers, stop/restart under load, and GDB attach/detach
   coexistence.
@@ -118,8 +132,14 @@ handlers.
 
 ## Hardware validation
 
-The kernel boundary is being introduced in deliberately small stages on retail
-hardware. These unedited Vita screenshots record the completed probe results:
+The current hardware-validation baseline is the single retail PS Vita running
+system software 3.65 described above. Unless an individual report says
+otherwise, hardware results in this repository describe that device and
+configuration; they are not a claim that every Vita model, firmware, newlib
+revision, or plugin combination behaves identically.
+
+The kernel boundary is being introduced in deliberately small stages. These
+unedited Vita screenshots record the completed probe results:
 
 | Milestone | Hardware evidence | What it validates |
 | --- | --- | --- |
@@ -137,6 +157,10 @@ hardware. These unedited Vita screenshots record the completed probe results:
 Every displayed probe check passed. These images document controlled test
 coverage; they do not claim that arbitrary applications or every firmware and
 plugin combination are already supported.
+
+The owner confirmed the 3.65 system-software version after the earlier runs;
+it was not embedded in every screenshot or journal. Future hardware gates must
+record the firmware contemporaneously.
 
 The first disposable disabled-comparator round-trip attempt on 2026-09-12
 [rebooted during its kernel critical section](docs/hardware/hw-disabled-probe-attempt-1.md).
@@ -344,8 +368,11 @@ libraries must use compatible VitaSDK ABIs.
 
 ### Vita
 
-- A homebrew-capable PS Vita or Vita TV.
-- TaiHEN/Ensō or an equivalent kernel-plugin environment.
+- A homebrew-capable PS Vita or Vita TV. Only one retail PS Vita running system
+  software 3.65 is currently validated; Vita TV and other firmware or device
+  classes have not completed the hardware gate.
+- TaiHEN/Ensō or an equivalent kernel-plugin environment. Only the current test
+  device's 3.65 configuration has completed the kernel-companion gates.
 - [Kubridge](https://github.com/bythos14/kubridge) with exception and memory-
   protection support. The tested version is the official `v0.3.1_hotfix`
   `exceptions_mprotect` release.
@@ -415,8 +442,11 @@ make \
 
 This produces `libuvdb.a`. The public header is `uvdb.h`.
 
+Applications must link `SceNet_stub` for the console bridge's running-state
+socket readiness and nonblocking send path, in addition to `SceNetPs_stub`.
 Applications using module discovery must also link
-`SceKernelModulemgr_stub`; the included test Makefile does this automatically.
+`SceKernelModulemgr_stub`; the included test Makefile supplies all three
+dependencies automatically.
 
 Build the included test VPK with:
 
@@ -427,6 +457,16 @@ make package \
 ```
 
 This creates `uvdb-test.vpk`. Retain `test.elf` for GDB.
+
+Enable the deterministic direct-write `stdout` and `stderr` markers used by the
+GDB console smoke test with:
+
+```sh
+make package UVDB_GDB_CONSOLE_TEST=1
+```
+
+The same flag may be combined with `UVDB_KERNEL_THREAD_CONTROL=1` when testing
+the matching all-stop kernel companion.
 
 After building and installing the matching kernel companion, enable integrated
 all-stop in the test build with:
@@ -585,7 +625,7 @@ ifeq ($(VITA_DEBUGGER),1)
 
   LDFLAGS += $(VITADEBUGGER_DIR)/libuvdb.a
   LDFLAGS += -L$(KUBRIDGE_LIB_DIR) -lkubridge_stub
-  LDFLAGS += -lSceNetPs_stub -pthread
+  LDFLAGS += -lSceNet_stub -lSceNetPs_stub -pthread
 endif
 ```
 
@@ -612,6 +652,7 @@ target_link_directories(my_app PRIVATE "${KUBRIDGE_DIR}/build-local")
 target_link_libraries(my_app PRIVATE
     vitadebugger
     kubridge_stub
+    SceNet_stub
     SceNetPs_stub
     pthread
 )
@@ -695,28 +736,68 @@ uvdb_shutdown();
 
 Call `uvdb_shutdown()` only from normal application code, never from an
 exception callback. It removes debugger breakpoints and handlers, closes
-sockets, and releases debugger-owned buffers and the safe-memory message pipe.
+sockets, restores redirected `stdout` and `stderr`, and releases debugger-owned
+buffers and the safe-memory message pipe.
 
 ### Optional stdout/stderr forwarding
 
-After GDB connects:
+Start the persistent debugger service, then install the bridge after Vita
+networking is ready:
 
 ```c
-if (uvdb_redirect_stdio() == 0) {
-    printf("Forwarded through GDB remote file I/O.\n");
+#include <unistd.h>
+
+int console_capture_enabled =
+    uvdb_start_server() == 0 && uvdb_redirect_stdio() == 0;
+
+/* Later, while the target is running. Pre-negotiation output is dropped. */
+if (console_capture_enabled) {
+    static const char message[] = "forwarded through GDB O packets\n";
+    write(STDOUT_FILENO, message, sizeof(message) - 1u);
 }
 ```
 
-This current implementation creates a helper thread and sends light diagnostic
-output through GDB remote file I/O. It is an experimental compatibility path,
-not the final console transport. The fixed-memory queue, reconnect-generation
-gate, loss counters, and GDB `O`-payload encoder now exist and pass native host
-tests plus a VitaSDK cross-build, but they are not yet connected to this helper
-or the live RSP socket. The remaining single-owner transport, no-ack handshake,
-restorable nonblocking stdio capture, failure handling, and Vita validation are
-specified in the [bounded GDB console transport design](docs/gdb-console-transport.md).
-DebugNet remains the independent path for sustained logs and profiler
-streaming, including periods when GDB is disconnected.
+`uvdb_redirect_stdio()` saves the original Vita newlib mappings for descriptors
+1 and 2, redirects both through a nonblocking socket pair, and starts one
+joinable capture helper. The helper only copies into a fixed 64-by-128-byte
+queue. The single RSP owner emits those records as standard hex-encoded GDB `O`
+packets only after the client completes `QStartNoAckMode` negotiation. Bytes are
+bounded by both the nonblocking socket buffer and fixed queue; they may be
+dropped when disconnected, contended, full, or stale instead of blocking the
+application. Output from an old connection is purged rather than replayed after
+reconnect.
+
+The bridge preserves the application's existing newlib buffering policy. Use
+`fflush()`, configure `setvbuf()` before first use, or issue checked direct
+`write()` calls when delivery timing matters. A short write or `EAGAIN` at the
+application-facing socket happens before the queue and therefore is not present
+in the queue's loss counters.
+
+For explicit teardown, call `uvdb_restore_stdio()` only after
+`uvdb_stop_server()` returns success. This prevents an asynchronous all-stop
+from suspending the capture helper while restoration waits to join it.
+`uvdb_shutdown()` performs this stop-before-restore order automatically.
+Redirect and restore are idempotent/retryable, but the application must
+serialize descriptor changes with its own concurrent stdio writers.
+
+Build the test app with `UVDB_GDB_CONSOLE_TEST=1`, launch it, and run:
+
+```powershell
+py -3 tools/gdb_console_smoke.py --host 10.1.1.93 --reconnect
+```
+
+The script checks no-ack negotiation, both stream markers, Ctrl-C, the rule that
+no console packet follows a stop reply, clean detach, and a fresh reconnect.
+On the validated retail Vita running system software 3.65, both consecutive
+sessions passed: each reported an initial `T05`, delivered six `O` packets
+containing both `stdout` and `stderr`, returned `T02` for Ctrl-C, emitted
+nothing during the stopped-boundary check, and detached cleanly. This result
+does not claim support for another firmware, Vita model, newlib revision, or
+plugin combination.
+See the [bounded GDB console transport guide](docs/gdb-console-transport.md) for
+the complete behavior and validation procedure. DebugNet remains the better
+path for sustained logging and profiler output, including periods when GDB is
+stopped or disconnected.
 
 ### Cooperative thread registration
 
@@ -858,6 +939,18 @@ exact matching unstripped ELF on the development computer.
 - Disconnect and error cleanup needs broader fault injection to prove bounded
   socket shutdown, removal of every software breakpoint, all-stop release, and
   recovery from a client or lease-keeper failure.
+- GDB console forwarding is intentionally bounded and lossy. It begins only
+  after `QStartNoAckMode`, emits no unsolicited `O` packets after a stop reply,
+  discards an old connection's bytes on reconnect, and can drop under socket or
+  queue pressure. Newlib buffering is unchanged, and pre-capture short writes
+  or `EAGAIN` cannot be included in the queue counters. Stop the debugger server
+  before calling `uvdb_restore_stdio()`; `uvdb_shutdown()` does this
+  automatically. Use DebugNet for sustained logging.
+- The optional stdio bridge uses Vita newlib's private descriptor map because
+  Vita newlib does not export `dup2`. Its current close/retry behavior was
+  audited against newlib commit
+  `64aa7aa33d4f380451a1f100d19589226cdad334`; other newlib revisions need a
+  fresh lifecycle review even when the debugger core itself builds unchanged.
 - The debugger and Vita Companion transports have no authentication or
   encryption. DebugNet uses best-effort UDP. Use the tools only on a private,
   trusted LAN; pairing, peer allowlists, and a secured control plane remain
@@ -873,8 +966,12 @@ exact matching unstripped ELF on the development computer.
 - Deployment is serialized and one-shot, starts from LiveArea, does not provide
   general target-app rollback, and still needs full bootstrap recovery and
   interrupted-install fault-injection testing before it is production-ready.
-- Build-directory isolation, an exported CMake/VitaSDK package, CI and firmware
-  compatibility matrices, and a project-wide license are not finished.
+- Firmware compatibility is not established beyond one retail PS Vita running
+  system software 3.65 with the tested Kubridge release. Vita TV, all other
+  firmware releases, development hardware, and other plugin combinations have
+  not completed the same gates.
+- Build-directory isolation, exported CMake/VitaSDK packages, CI, and a
+  project-wide license are not finished.
 - Long-running reconnect, shutdown, multithread, and fault stress testing is
   still in progress.
 
@@ -894,10 +991,10 @@ exact matching unstripped ELF on the development computer.
 3. Move blocking accept/RSP work outside the global spin lock; add nested-fault
    handling, previous-handler chaining, strict packet parsing, fake-kernel host
    tests, fuzzing, and long reconnect/shutdown/multithread hardware soaks.
-4. Integrate the host-tested bounded console queue and `O`-payload encoder with
-   a single-owner, no-ack RSP transport; replace the experimental remote-file-
-   I/O stdio bridge with restorable nonblocking capture, then prove stop,
-   reconnect, truncation/drop accounting, and shutdown behavior on Vita.
+4. Extend the completed single-owner, no-ack GDB `O`-packet console bridge with
+   longer on-device pressure, abrupt-disconnect, restore/retry, and shutdown
+   soaks. Decide whether queue/transport loss counters need a stable public API;
+   retain DebugNet as the sustained-log and profiler path.
 5. Complete ARM and Thumb-2 control-flow decoding, then add `p`/`P` register
    access and independently validate any foreign-thread mutation/restoration.
 6. Keep hardware `Z1`-`Z4` fail-closed. The late-runtime DIP 228 path has now
@@ -941,12 +1038,17 @@ exact matching unstripped ELF on the development computer.
 - `uvdb_rsp.c` / `uvdb_rsp.h`: host-testable ARM and VFP register-packet
   serialization.
 - `uvdb_console.c` / `uvdb_console.h`: internal fixed-memory, generation-scoped
-  GDB console queue; live transport integration remains gated.
+  GDB console queue and loss accounting.
+- `uvdb_console_transport.c` / `uvdb_console_transport.h`: single-owner no-ack
+  session state, `O`-packet framing, bounded pumping, and transport statistics.
 - `uvdb.h`: public application API.
 - `protocol/arm_vfp_target_xml.inc`: exact opt-in GDB D32 target description.
-- `stdio_redirect.c`: optional newlib stdout/stderr forwarding.
+- `stdio_redirect.c` / `stdio_redirect.h`: restorable nonblocking Vita newlib
+  `stdout`/`stderr` capture and internal-helper inventory filtering.
 - `uvdb_debugnet.c`: bounded asynchronous UDP logs for DebugNet-style receivers.
 - `test.c`: Vita hardware test program.
+- `tools/gdb_console_smoke.py`: raw-RSP no-ack, stream, stop, detach, and
+  reconnect validation for the Vita console fixture.
 - `tools/debugnet_listener.py`: cross-platform development-computer log receiver.
 - `profiler/`: standalone bounded user-mode profiler library, Vita adapter,
   native tests, and integration documentation.

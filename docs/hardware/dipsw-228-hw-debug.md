@@ -7,6 +7,12 @@ is one DBGVCR read while cached bit 228 is temporarily high. No boot file,
 persistent kernel plugin, device identity, or comparator register has been
 changed.
 
+> **Hardware baseline:** the owner later confirmed that this test device was a
+> retail PS Vita running system software 3.65. The firmware value was not
+> embedded in this artifact's journal or screenshots, so this is later device
+> metadata rather than contemporaneous probe output. Do not generalize this
+> result to another firmware or device class.
+
 ## Hardware results through the API round trip
 
 The clean pre-mutation `VDCP00005` sample completed with result zero and all

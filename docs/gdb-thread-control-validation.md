@@ -116,8 +116,11 @@ ELF SHA-256
 and installed `eboot.bin` SHA-256
 `FA6F6595910A1C944CBA95FE1469D2E1EB6B3EC2F48F18838B51AA302895769D`.
 The Phase 6 installed file was pulled back over FTP and matched exactly. The
-firmware version was not captured and must be recorded on the next full gate
-run.
+owner has since confirmed that the test Vita used for these runs is running
+system software 3.65. Because the version was not captured contemporaneously
+in the Phase 1-6 transcript or screenshots, record it in-band on the next full
+gate. These results do not establish behavior on any other firmware or device
+class.
 
 ### Phase 1: inventory and fail-closed selection
 

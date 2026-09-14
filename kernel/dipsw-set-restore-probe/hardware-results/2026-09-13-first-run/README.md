@@ -11,6 +11,12 @@ The owner-attended one-shot `VDCP00006` transaction completed successfully on
 - direct bit 228 changed from 0 to 1 and returned to 0;
 - bit 203 remained 0 and the complete restored snapshot matched the baseline.
 
+> **Hardware baseline:** the owner later confirmed that this test device was a
+> retail PS Vita running system software 3.65. The firmware value was not
+> embedded in this artifact's journal or screenshots, so this is later device
+> metadata rather than contemporaneous probe output. Do not generalize this
+> result to another firmware or device class.
+
 SHA-256:
 
 - A: `C1CF826B0C86626EB0FDC7958A6857A1AD988A160935723D8A927302EAA155D2`

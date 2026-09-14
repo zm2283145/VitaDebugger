@@ -7,7 +7,11 @@ summary are preserved under `hardware-results/2026-09-13-first-run/`. This is
 hardware evidence for this audited artifact, not approval to treat the probe as
 a general-purpose DIP mutator or to reuse rebuilt binaries without review.
 
-This disposable `VDCP00006` title tests only whether the installed retail
+The owner later confirmed that this hardware baseline was a retail PS Vita
+running system software 3.65. That value was not embedded in the probe journal,
+and this result does not establish behavior on another firmware or device class.
+
+This disposable `VDCP00006` title tests only whether the installed retail 3.65
 kernel's documented DIP-switch API can temporarily expose global bit 228 in
 its observable software state and restore the exact original state. It does
 not access CP14, `DBGSWENABLE`, or any breakpoint/watchpoint register. A pass

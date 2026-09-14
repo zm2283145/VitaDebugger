@@ -7,6 +7,12 @@ disabled-comparator attempt into one strictly ordered operation per deliberate
 X-button press. The first five rungs completed. The Vita rebooted on rung 6,
 the first `DBGVCR` read. Rungs 7-10 were not run.
 
+> **Hardware baseline:** the owner later confirmed that this test device was a
+> retail PS Vita running system software 3.65. The firmware value was not
+> embedded in this artifact's journal or screenshots, so this is later device
+> metadata rather than contemporaneous probe output. Do not generalize this
+> result to another firmware or device class.
+
 ## Exact artifact
 
 - Source commit: `15a4d54`

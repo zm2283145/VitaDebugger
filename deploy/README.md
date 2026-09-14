@@ -11,9 +11,11 @@ Sony tool, and it does not emulate every devkit service.
 
 > **Development status:** the host protocol has automated coverage, the Vita
 > agent builds successfully, and the normal signed install-and-launch path has
-> passed on retail hardware. Bootstrap recovery and interrupted-install fault
-> injection are still in hardware validation. Use a disposable test title and
-> verified backups until an on-device release is explicitly marked stable.
+> passed on the project's retail Vita running system software 3.65. That result
+> does not establish compatibility with Vita TV or another firmware. Bootstrap
+> recovery and interrupted-install fault injection are still in hardware
+> validation. Use a disposable test title and verified backups until an
+> on-device release is explicitly marked stable.
 
 ## What it contains
 

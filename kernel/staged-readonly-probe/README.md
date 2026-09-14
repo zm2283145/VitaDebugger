@@ -1,8 +1,9 @@
 # VitaDebugger staged read-only ladder
 
 This is a disposable diagnostic VPK for locating the exact instruction that
-causes a retail Vita to reboot during the original disabled-comparator probe.
-It is separate from that probe and does not replace or modify it.
+caused the project's retail Vita, later confirmed to run system software 3.65,
+to reboot during the original disabled-comparator probe. It is separate from
+that probe and does not replace or modify it.
 
 ## Safety boundary
 
@@ -23,8 +24,9 @@ It is separate from that probe and does not replace or modify it.
 - Two alternating checksummed files preserve the last valid journal state if a
   write is interrupted.
 
-Read-only CP14 access can still trap on this hardware/firmware and reboot the
-Vita. Run the rungs in order. After a reboot, do not retry the incomplete rung;
+Read-only CP14 access can still trap on this 3.65 hardware baseline and reboot
+the Vita. This does not establish behavior on another firmware or device class.
+Run the rungs in order. After a reboot, do not retry the incomplete rung;
 inspect its journal first.
 
 The ARMv7 debug-access table makes the ordering important: when

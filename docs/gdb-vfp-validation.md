@@ -10,6 +10,11 @@ worker deliberately holds D0-D31 in a call-free loop so every debugger stop
 has deterministic values. The loop consumes processor time while the test is
 running.
 
+The initial live gate targets the same owner-confirmed retail Vita running
+system software 3.65. A pass there does not validate this undocumented VFP ABI
+on another firmware, Vita TV, development hardware, or a different plugin
+stack; repeat the boundary and lifecycle gates for every new target baseline.
+
 ## Prerequisites
 
 1. The fail-closed VFP kernel probe has passed every check on this Vita and

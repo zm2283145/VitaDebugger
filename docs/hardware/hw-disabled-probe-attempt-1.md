@@ -7,6 +7,12 @@ discovery gate into a disabled (`E=0`) comparator write/readback/restore test.
 The disposable application was installed and launched through VitaDevDeploy;
 the user deliberately pressed X once after reading the warning.
 
+> **Hardware baseline:** the owner later confirmed that this test device was a
+> retail PS Vita running system software 3.65. The firmware value was not
+> embedded in this artifact's journal or screenshots, so this is later device
+> metadata rather than contemporaneous probe output. Do not generalize this
+> result to another firmware or device class.
+
 The Vita rebooted during the private kernel module's critical section. The
 module was dynamically loaded, returned no resident service by design, and was
 never added to `ur0:tai/config.txt`, so the reboot did not create a boot loop.

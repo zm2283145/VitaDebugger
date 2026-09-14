@@ -122,9 +122,18 @@ void uvdb_enter(void);
 //  uvdb_remote_syscall("write", 3, 1, "Hello, world!\n", 14); //prints hello world in the debugger prompt
 int uvdb_remote_syscall(const char* name, int nargs, ... /* int arg1, int arg2, ... */);
 
-//redirects stdout/stderr to go through uvdb_remote_syscall. useful to avoid princesslog & friends
-//note: this uses newlib apis, not sce ones
+// Redirect newlib stdout/stderr into a bounded, nonblocking capture path. Once
+// GDB negotiates no-ack mode, captured bytes appear in its console as RSP O
+// packets. Writes made without a compatible GDB client, or while buffers are
+// saturated, can be dropped instead of stalling the application.
 int uvdb_redirect_stdio(void);
+
+// Restore the original newlib stdout/stderr descriptors and join the capture
+// helper. Safe to call repeatedly. Stop the debugger server first so an
+// asynchronous all-stop cannot suspend the helper during its join; uvdb_shutdown
+// performs this ordering automatically. The application must also serialize
+// the mapping change with its own concurrent stdio writers.
+int uvdb_restore_stdio(void);
 
 #ifdef __cplusplus
 }

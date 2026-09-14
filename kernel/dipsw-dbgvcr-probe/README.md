@@ -4,13 +4,17 @@ Status: the first audited hardware run completed on 2026-09-13 and rebooted
 the Vita in the post-`READ_PENDING` critical path. Do not rerun this one-shot
 probe; preserve both journal slots.
 
+The owner later confirmed that this hardware baseline was a retail PS Vita
+running system software 3.65. That value was not embedded in the probe journal,
+and this result does not establish behavior on another firmware or device class.
+
 This disposable `VDCP00007` title tests whether a late runtime
 `ksceKernelSetDipsw(228)` makes one same-core Cortex-A9 DBGVCR read accessible.
 It follows the successful cached-state round trip from `VDCP00006`. It never
 writes DBGVCR, DSCR, a breakpoint/watchpoint comparator, MMIO, boot state, or
 device identity.
 
-DBGVCR previously rebooted the retail test Vita when bit 228 was clear. This
+DBGVCR previously rebooted this retail 3.65 test Vita when bit 228 was clear. This
 probe may therefore reboot or hang the Vita. It is owner-attended, one-shot,
 and requires a fresh **L+R+X** chord. Installing or opening the title does not
 run the transaction. Circle exits.

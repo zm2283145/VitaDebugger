@@ -74,11 +74,19 @@ uint32_t uvdb_console_session_open(void);
  * Close only the session identified by generation.  Returns READY when that
  * generation is closed and its queue purged (including an idempotent repeat),
  * STALE for a token superseded by another session, BUSY when lifecycle/queue
- * cleanup could not finish, or ERROR for a malformed token.  A BUSY result may
- * already have closed the gate; retry the same token until READY or until a
- * later open makes it STALE.
+ * cleanup could not finish, or ERROR for a malformed token.  Once a matching
+ * call begins, its capture gate is closed before BUSY can be returned; retrying
+ * the token is needed only for eager queue cleanup.
  */
 int uvdb_console_session_close(uint32_t generation);
+
+/*
+ * Atomically close whichever capture generation is currently open, without
+ * waiting or purging. This is the cross-thread emergency gate used to begin
+ * debugger-server shutdown; the serialized transport owner later performs the
+ * generation-specific close and cleanup.
+ */
+void uvdb_console_session_close_active_gate(void);
 
 /*
  * Try to capture size bytes without waiting.  A call takes the queue lock at
@@ -109,6 +117,8 @@ int uvdb_console_get_stats(struct uvdb_console_stats* stats);
 /* Deterministically force the producer contention path in native tests. */
 int uvdb_console_test_lock_queue(void);
 void uvdb_console_test_unlock_queue(void);
+int uvdb_console_test_lock_lifecycle(void);
+void uvdb_console_test_unlock_lifecycle(void);
 void uvdb_console_test_set_generation(uint32_t generation);
 void uvdb_console_test_pause_capture_after_lock(int pause);
 int uvdb_console_test_capture_is_paused(void);

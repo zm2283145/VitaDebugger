@@ -14,6 +14,11 @@ artifact defines the pointed-to type, its size, its alignment, the register
 order, or whether FPSCR is included. Consequently, the D0-D31 layout cannot be
 claimed from VitaSDK alone.
 
+Here, "3.60" identifies the VitaSDK NID database entry; it is not a claim that
+this path has been validated on firmware 3.60. The project's hardware result
+currently comes from the owner-confirmed retail Vita running system software
+3.65.
+
 The implementation therefore fails closed. Normal kernel builds omit the VFP
 capability, do not import the undocumented call, and return
 `VD_KERNEL_ERROR_VFP_DISABLED`. The candidate path exists only when CMake is
@@ -60,10 +65,12 @@ It then starts an owned, leased stop session and verifies:
 6. Ending the session resumes the worker, which restores its callee-saved VFP
    state and exits before a bounded timeout.
 
-Every probe line has now passed on the tested Vita and firmware. The feature
-remains explicit opt-in while the next gate verifies a foreign stopped thread
-with GDB (`d0`, `d31`, and `fpscr`) and then exercises continue, detach,
-reconnect, and watchdog recovery. Register writes remain out of scope.
+Every probe line has now passed on the project's one retail Vita running system
+software 3.65. Vita TV, other firmware versions, development hardware, and
+other kernel-plugin combinations have not passed this gate. The feature remains
+explicit opt-in while the next gate verifies a foreign stopped thread with GDB
+(`d0`, `d31`, and `fpscr`) and then exercises continue, detach, reconnect, and
+watchdog recovery. Register writes remain out of scope.
 
 ### First hardware result
 

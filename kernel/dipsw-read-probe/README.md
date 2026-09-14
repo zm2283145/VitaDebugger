@@ -1,8 +1,10 @@
 # Read-only KBL DIP-switch probe
 
-Status: source-complete, host-tested, and successfully exercised on hardware on
+Status: source-complete, host-tested, and successfully exercised on the
+project's retail Vita, later confirmed to run system software 3.65, on
 2026-09-13 before and after the DIP 228 set/restore rung. The raw checksummed
-records and decoded summaries are preserved under `hardware-results/`.
+records and decoded summaries are preserved under `hardware-results/`. This
+does not establish behavior on another firmware or device class.
 
 This disposable title reads the current KBL/DIP-switch policy state needed for
 the hardware-breakpoint investigation. It does not set or clear any DIP switch
@@ -24,7 +26,9 @@ sample.
 
 Firmware and device identity belong in the accompanying test log. They are
 deliberately excluded from this minimal kernel batch so a failed run has the
-smallest possible call surface.
+smallest possible call surface. The archived run metadata now records the
+owner's later confirmation that this test device was running system software
+3.65; that value is not contemporaneous probe output.
 
 The alternating reports are
 `ux0:data/VitaDebugger/dipsw-read-v1-{a,b}.bin`. Decode pulled copies with:

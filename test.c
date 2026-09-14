@@ -4,9 +4,13 @@
 #include <unistd.h>
 #include <pthread.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <psp2/kernel/modulemgr.h>
 #include "debugScreen.h"
 #include "uvdb.h"
+#ifdef UVDB_GDB_CONSOLE_TEST
+#include "uvdb_console.h"
+#endif
 #ifdef UVDB_KERNEL_THREAD_CONTROL
 #include "vitadebug_kernel.h"
 #endif
@@ -319,6 +323,12 @@ int main(void)
     }
     psvDebugScreenPrintf("Persistent debugger server started.\n");
     psvDebugScreenPrintf("Ctrl-C and clean reconnect are enabled.\n");
+#ifdef UVDB_GDB_CONSOLE_TEST
+    int stdio_result = uvdb_redirect_stdio();
+    psvDebugScreenPrintf("GDB stdout/stderr bridge: %s (%d)\n",
+                         stdio_result == 0 ? "READY" : "FAILED",
+                         stdio_result);
+#endif
     for(int i = 0;; i++)
     {
 #if defined(UVDB_DEBUGNET_HOST) && defined(UVDB_DEBUGNET_LIFECYCLE_TEST)
@@ -369,6 +379,53 @@ int main(void)
         if((i % 10) == 0)
         {
             psvDebugScreenPrintf("alive: i=%d value=%d\n", i, test_value);
+#ifdef UVDB_GDB_CONSOLE_TEST
+            if(stdio_result == 0)
+            {
+                char marker[96];
+                int marker_size = snprintf(
+                    marker, sizeof(marker),
+                    "[uvdb stdout] tick=%d value=%d\n", i, test_value);
+                if(marker_size > 0)
+                {
+                    size_t output_size = (size_t)marker_size;
+                    if(output_size >= sizeof(marker))
+                        output_size = sizeof(marker) - 1u;
+                    write(STDOUT_FILENO, marker, output_size);
+                }
+                marker_size = snprintf(
+                    marker, sizeof(marker),
+                    "[uvdb stderr] workers=%d,%d\n",
+                    worker_values[0], worker_values[1]);
+                if(marker_size > 0)
+                {
+                    size_t output_size = (size_t)marker_size;
+                    if(output_size >= sizeof(marker))
+                        output_size = sizeof(marker) - 1u;
+                    write(STDERR_FILENO, marker, output_size);
+                }
+            }
+            if((i % 50) == 0)
+            {
+                struct uvdb_console_stats console_stats;
+                if(uvdb_console_get_stats(&console_stats) == 0)
+                    psvDebugScreenPrintf(
+                        "console: state=%d session=%u gen=%u q=%u/%u "
+                        "sent=%u/%u "
+                        "drop=%u+%u+%u+%u\n",
+                        (int)uvdb_get_state(),
+                        console_stats.session_open,
+                        console_stats.session_generation,
+                        console_stats.queued_records,
+                        console_stats.queued_bytes,
+                        console_stats.sent_records,
+                        console_stats.sent_bytes,
+                        console_stats.dropped_disconnected_bytes,
+                        console_stats.dropped_contention_bytes,
+                        console_stats.dropped_full_bytes,
+                        console_stats.dropped_stale_bytes);
+            }
+#endif
 #ifdef UVDB_DEBUGNET_HOST
             uvdb_debugnet_printf(UVDB_LOG_DEBUG,
                                  "alive i=%d value=%d workers=%d,%d\n",

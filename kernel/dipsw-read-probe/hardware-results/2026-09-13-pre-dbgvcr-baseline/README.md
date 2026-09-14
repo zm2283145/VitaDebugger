@@ -6,6 +6,12 @@ was B, revision 12, sequence 4. It reported result zero, validity flags
 `0x0000000F`, core 1, zero raw/debug/system words, and direct bits 203 and 228
 both clear.
 
+> **Hardware baseline:** the owner later confirmed that this test device was a
+> retail PS Vita running system software 3.65. The firmware value was not
+> embedded in this artifact's journal or screenshots, so this is later device
+> metadata rather than contemporaneous probe output. Do not generalize this
+> result to another firmware or device class.
+
 SHA-256:
 
 - A: `3A85980FC0672F894E3B651981B211755180D4A9EDCBEB7BE795AA8E7F5DE8B4BB`

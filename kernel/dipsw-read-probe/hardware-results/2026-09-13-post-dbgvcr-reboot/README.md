@@ -6,6 +6,12 @@ slots validate. The newest slot was A, revision 15, sequence 5. It reported
 result zero, validity flags `0x0000000F`, core 1, zero raw/debug/system words,
 and direct bits 203 and 228 both clear.
 
+> **Hardware baseline:** the owner later confirmed that this test device was a
+> retail PS Vita running system software 3.65. The firmware value was not
+> embedded in this artifact's journal or screenshots, so this is later device
+> metadata rather than contemporaneous probe output. Do not generalize this
+> result to another firmware or device class.
+
 SHA-256:
 
 - A: `CFB486C53837CADA36F3B8DBA34F00A143F5B86B2605BB5A84073DE28ACF8CE7`

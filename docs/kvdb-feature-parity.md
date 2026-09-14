@@ -8,8 +8,10 @@ port or a requirement to duplicate KVDB's kernel-only architecture. No KVDB
 source is copied into VitaDebugger.
 
 This checklist deliberately separates implemented behavior from hardware-
-validated behavior. A feature is not advertised to GDB until the corresponding
-failure, cleanup, and restoration paths have passed on a retail Vita.
+validated behavior. A feature is not advertised to GDB until its failure,
+cleanup, and restoration paths have passed on the project's retail Vita running
+system software 3.65. Those results are a single-target baseline, not evidence
+for Vita TV, development hardware, another firmware, or another plugin stack.
 
 | KVDB-documented capability | VitaDebugger status | Promotion gate |
 | --- | --- | --- |

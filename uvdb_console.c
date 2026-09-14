@@ -173,26 +173,23 @@ int uvdb_console_session_close(uint32_t generation)
     if(!console_generation_valid(generation))
         return UVDB_CONSOLE_ERROR;
 
-    if(!console_try_lock(&console_lifecycle_lock))
-        return UVDB_CONSOLE_BUSY;
     uint32_t expected = generation | UVDB_CONSOLE_SESSION_OPEN;
-    uint32_t session = __atomic_load_n(&console_session, __ATOMIC_ACQUIRE);
-    if(session == expected)
+    for(;;)
     {
-        if(!__atomic_compare_exchange_n(&console_session, &expected,
-                                        generation, 0, __ATOMIC_ACQ_REL,
-                                        __ATOMIC_ACQUIRE))
-        {
-            console_unlock(&console_lifecycle_lock);
+        uint32_t session =
+            __atomic_load_n(&console_session, __ATOMIC_ACQUIRE);
+        if(session == generation)
+            break;
+        if(session != expected)
             return UVDB_CONSOLE_STALE;
-        }
-    }
-    else if(session != generation)
-    {
-        console_unlock(&console_lifecycle_lock);
-        return UVDB_CONSOLE_STALE;
+        if(__atomic_compare_exchange_n(&console_session, &session,
+                                       generation, 0, __ATOMIC_ACQ_REL,
+                                       __ATOMIC_ACQUIRE))
+            break;
     }
 
+    if(!console_try_lock(&console_lifecycle_lock))
+        return UVDB_CONSOLE_BUSY;
     if(!console_try_lock(&console_queue_lock))
     {
         console_unlock(&console_lifecycle_lock);
@@ -202,6 +199,20 @@ int uvdb_console_session_close(uint32_t generation)
     console_unlock(&console_queue_lock);
     console_unlock(&console_lifecycle_lock);
     return UVDB_CONSOLE_READY;
+}
+
+void uvdb_console_session_close_active_gate(void)
+{
+    uint32_t session =
+        __atomic_load_n(&console_session, __ATOMIC_ACQUIRE);
+    while(session & UVDB_CONSOLE_SESSION_OPEN)
+    {
+        uint32_t closed = session & UVDB_CONSOLE_SESSION_GENERATION;
+        if(__atomic_compare_exchange_n(&console_session, &session, closed, 0,
+                                       __ATOMIC_ACQ_REL,
+                                       __ATOMIC_ACQUIRE))
+            return;
+    }
 }
 
 size_t uvdb_console_capture(const void* data, size_t size)
@@ -394,6 +405,16 @@ int uvdb_console_test_lock_queue(void)
 void uvdb_console_test_unlock_queue(void)
 {
     console_unlock(&console_queue_lock);
+}
+
+int uvdb_console_test_lock_lifecycle(void)
+{
+    return console_try_lock(&console_lifecycle_lock);
+}
+
+void uvdb_console_test_unlock_lifecycle(void)
+{
+    console_unlock(&console_lifecycle_lock);
 }
 
 void uvdb_console_test_set_generation(uint32_t generation)
