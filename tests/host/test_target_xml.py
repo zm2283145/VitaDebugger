@@ -14,7 +14,7 @@ TARGET_XML_INC = ROOT / "protocol" / "arm_vfp_target_xml.inc"
 KERNEL_ABI_HEADER = ROOT / "kernel" / "include" / "vitadebug_kernel.h"
 KERNEL_SOURCE = ROOT / "kernel" / "src" / "main.c"
 VFP_PROBE_SOURCE = ROOT / "kernel" / "test" / "vfp_probe.c"
-UVDB_SOURCE = ROOT / "uvdb.c"
+UVDB_SOURCE = ROOT / "src" / "uvdb.c"
 
 
 def load_embedded_xml():

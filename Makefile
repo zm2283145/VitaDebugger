@@ -1,7 +1,7 @@
 all: libuvdb.a
 
 clean:
-	rm -f *.o tests/*.o *.a *.elf *.velf eboot.bin param.sfo *.vpk *.psp2dmp test-rsp test-rsp.exe test-rsp-console test-rsp-console.exe test-register-bank test-register-bank.exe test-thread-control test-thread-control.exe test-monitor test-monitor.exe test-breakpoint-patch test-breakpoint-patch.exe test-exclusive-step test-exclusive-step.exe test-console-queue test-console-queue.exe test-console-transport test-console-transport.exe test-vfp-policy test-vfp-policy.exe kernel/dipsw-read-probe/test-record kernel/dipsw-read-probe/test-record.exe kernel/dipsw-set-restore-probe/test-record kernel/dipsw-set-restore-probe/test-record.exe kernel/dipsw-dbgvcr-probe/test-record kernel/dipsw-dbgvcr-probe/test-record.exe $(UVDB_ASLR_FIXTURE_OBJECT) $(UVDB_ASLR_FIXTURE_ELF) $(UVDB_ASLR_FIXTURE_VELF) $(UVDB_ASLR_FIXTURE_SELF)
+	rm -f *.o src/*.o tests/*.o tests/vita/*.o *.a *.elf *.velf eboot.bin param.sfo *.vpk *.psp2dmp test-rsp test-rsp.exe test-rsp-console test-rsp-console.exe test-register-bank test-register-bank.exe test-thread-control test-thread-control.exe test-monitor test-monitor.exe test-breakpoint-patch test-breakpoint-patch.exe test-exclusive-step test-exclusive-step.exe test-console-queue test-console-queue.exe test-console-transport test-console-transport.exe test-vfp-policy test-vfp-policy.exe kernel/dipsw-read-probe/test-record kernel/dipsw-read-probe/test-record.exe kernel/dipsw-set-restore-probe/test-record kernel/dipsw-set-restore-probe/test-record.exe kernel/dipsw-dbgvcr-probe/test-record kernel/dipsw-dbgvcr-probe/test-record.exe $(UVDB_ASLR_FIXTURE_OBJECT) $(UVDB_ASLR_FIXTURE_ELF) $(UVDB_ASLR_FIXTURE_VELF) $(UVDB_ASLR_FIXTURE_SELF)
 
 package: uvdb-test.vpk
 
@@ -51,7 +51,7 @@ ifneq ($(UVDB_KERNEL_THREAD_CONTROL),1)
 $(error UVDB_KERNEL_VFP_READS=1 requires UVDB_KERNEL_THREAD_CONTROL=1)
 endif
 override CFLAGS += -DUVDB_KERNEL_VFP_READS
-UVDB_VFP_OBJECTS := uvdb_vfp_policy.o
+UVDB_VFP_OBJECTS := src/uvdb_vfp_policy.o
 endif
 
 ifeq ($(UVDB_GDB_VFP_FIXTURE),1)
@@ -70,9 +70,9 @@ UVDB_PACKAGE_EXTRA_PREREQUISITES += $(UVDB_ASLR_FIXTURE_SELF)
 UVDB_PACKAGE_EXTRA_ARGS += -a $(UVDB_ASLR_FIXTURE_SELF)=module/uvdb_aslr_fixture.suprx
 endif
 
-override CFLAGS += -I $(KUBRIDGE_DIR) -Wall -Wextra -g
+override CFLAGS += -Isrc -I. -I $(KUBRIDGE_DIR) -Wall -Wextra -g
 
-%.o: %.c *.h
+src/%.o: src/%.c src/*.h uvdb.h
 	arm-vita-eabi-gcc $< $(CFLAGS) -c -o $@
 
 # This compact example Makefile shares object names across plain, kernel, and
@@ -81,30 +81,30 @@ override CFLAGS += -I $(KUBRIDGE_DIR) -Wall -Wextra -g
 .PHONY: force-feature-objects
 force-feature-objects:
 
-uvdb.o test.o: force-feature-objects
+src/uvdb.o tests/vita/test.o: force-feature-objects
 
 ifeq ($(UVDB_KERNEL_THREAD_CONTROL),1)
-uvdb.o test.o: $(VITADEBUG_KERNEL_DIR)/include/vitadebug_kernel.h
+src/uvdb.o tests/vita/test.o: $(VITADEBUG_KERNEL_DIR)/include/vitadebug_kernel.h
 endif
 
-uvdb.o: protocol/arm_vfp_target_xml.inc
+src/uvdb.o: protocol/arm_vfp_target_xml.inc
 
-uvdb_vfp_policy.o: uvdb_vfp_policy.c uvdb_vfp_policy.h $(VITADEBUG_KERNEL_DIR)/include/vitadebug_kernel.h
+src/uvdb_vfp_policy.o: src/uvdb_vfp_policy.c src/uvdb_vfp_policy.h $(VITADEBUG_KERNEL_DIR)/include/vitadebug_kernel.h
 
-test.o: test.c *.h
+tests/vita/test.o: tests/vita/test.c uvdb.h src/*.h
 	arm-vita-eabi-gcc $< $(CFLAGS) $(EXTRA_CFLAGS) -c -o $@
 
 psvDebugScreen.o: $(VITASDK)/share/gcc-arm-vita-eabi/samples/common/debugScreen.c
 	arm-vita-eabi-gcc $< $(CFLAGS) $(EXTRA_CFLAGS) -c -o $@
 
-tests/thumb_step_returns.o: tests/thumb_step_returns.S
+tests/vita/thumb_step_returns.o: tests/vita/thumb_step_returns.S
 	arm-vita-eabi-gcc $< $(CFLAGS) -c -o $@
 
-libuvdb.a: uvdb.o uvdb_registers.o uvdb_rsp.o uvdb_thread_control.o uvdb_monitor.o uvdb_breakpoint_patch.o uvdb_exclusive_step.o $(UVDB_VFP_OBJECTS) uvdb_console.o uvdb_console_transport.o uvdb_debugnet.o stdio_redirect.o
+libuvdb.a: src/uvdb.o src/uvdb_registers.o src/uvdb_rsp.o src/uvdb_thread_control.o src/uvdb_monitor.o src/uvdb_breakpoint_patch.o src/uvdb_exclusive_step.o $(UVDB_VFP_OBJECTS) src/uvdb_console.o src/uvdb_console_transport.o src/uvdb_debugnet.o src/stdio_redirect.o
 	arm-vita-eabi-ar rcs $@ $^
 
 HOST_CC ?= cc
-HOST_CFLAGS ?= -std=c11 -O2 -Wall -Wextra -Werror -I.
+HOST_CFLAGS ?= -std=c11 -O2 -Wall -Wextra -Werror -Isrc -I.
 ifeq ($(OS),Windows_NT)
 HOST_THREAD_FLAGS ?= -pthread -static
 HOST_EXEEXT ?= .exe
@@ -175,35 +175,35 @@ host-test-dipsw-set-restore-record: kernel/dipsw-set-restore-probe/test-record$(
 host-test-dipsw-dbgvcr-record: kernel/dipsw-dbgvcr-probe/test-record$(HOST_EXEEXT)
 	./kernel/dipsw-dbgvcr-probe/test-record$(HOST_EXEEXT)
 
-test-rsp$(HOST_EXEEXT): uvdb_rsp.c uvdb_rsp.h tests/host/test_rsp_registers.c
-	$(HOST_CC_RUN) $(HOST_CFLAGS) uvdb_rsp.c tests/host/test_rsp_registers.c -o $@
+test-rsp$(HOST_EXEEXT): src/uvdb_rsp.c src/uvdb_rsp.h tests/host/test_rsp_registers.c
+	$(HOST_CC_RUN) $(HOST_CFLAGS) src/uvdb_rsp.c tests/host/test_rsp_registers.c -o $@
 
-test-rsp-console$(HOST_EXEEXT): uvdb_rsp.c uvdb_rsp.h tests/host/test_rsp_console.c
-	$(HOST_CC_RUN) $(HOST_CFLAGS) uvdb_rsp.c tests/host/test_rsp_console.c -o $@
+test-rsp-console$(HOST_EXEEXT): src/uvdb_rsp.c src/uvdb_rsp.h tests/host/test_rsp_console.c
+	$(HOST_CC_RUN) $(HOST_CFLAGS) src/uvdb_rsp.c tests/host/test_rsp_console.c -o $@
 
-test-register-bank$(HOST_EXEEXT): uvdb_registers.c uvdb_registers.h tests/host/test_register_bank.c
-	$(HOST_CC_RUN) $(HOST_CFLAGS) uvdb_registers.c tests/host/test_register_bank.c -o $@
+test-register-bank$(HOST_EXEEXT): src/uvdb_registers.c src/uvdb_registers.h tests/host/test_register_bank.c
+	$(HOST_CC_RUN) $(HOST_CFLAGS) src/uvdb_registers.c tests/host/test_register_bank.c -o $@
 
-test-thread-control$(HOST_EXEEXT): uvdb_thread_control.c uvdb_thread_control.h tests/host/test_thread_control.c
-	$(HOST_CC_RUN) $(HOST_CFLAGS) uvdb_thread_control.c tests/host/test_thread_control.c -o $@
+test-thread-control$(HOST_EXEEXT): src/uvdb_thread_control.c src/uvdb_thread_control.h tests/host/test_thread_control.c
+	$(HOST_CC_RUN) $(HOST_CFLAGS) src/uvdb_thread_control.c tests/host/test_thread_control.c -o $@
 
-test-monitor$(HOST_EXEEXT): uvdb_monitor.c uvdb_monitor.h tests/host/test_monitor.c
-	$(HOST_CC_RUN) $(HOST_CFLAGS) uvdb_monitor.c tests/host/test_monitor.c -o $@
+test-monitor$(HOST_EXEEXT): src/uvdb_monitor.c src/uvdb_monitor.h tests/host/test_monitor.c
+	$(HOST_CC_RUN) $(HOST_CFLAGS) src/uvdb_monitor.c tests/host/test_monitor.c -o $@
 
-test-breakpoint-patch$(HOST_EXEEXT): uvdb_breakpoint_patch.c uvdb_breakpoint_patch.h tests/host/test_breakpoint_patch.c
-	$(HOST_CC_RUN) $(HOST_CFLAGS) uvdb_breakpoint_patch.c tests/host/test_breakpoint_patch.c -o $@
+test-breakpoint-patch$(HOST_EXEEXT): src/uvdb_breakpoint_patch.c src/uvdb_breakpoint_patch.h tests/host/test_breakpoint_patch.c
+	$(HOST_CC_RUN) $(HOST_CFLAGS) src/uvdb_breakpoint_patch.c tests/host/test_breakpoint_patch.c -o $@
 
-test-exclusive-step$(HOST_EXEEXT): uvdb_exclusive_step.c uvdb_exclusive_step.h tests/host/test_exclusive_step.c
-	$(HOST_CC_RUN) $(HOST_CFLAGS) uvdb_exclusive_step.c tests/host/test_exclusive_step.c -o $@
+test-exclusive-step$(HOST_EXEEXT): src/uvdb_exclusive_step.c src/uvdb_exclusive_step.h tests/host/test_exclusive_step.c
+	$(HOST_CC_RUN) $(HOST_CFLAGS) src/uvdb_exclusive_step.c tests/host/test_exclusive_step.c -o $@
 
-test-vfp-policy$(HOST_EXEEXT): uvdb_vfp_policy.c uvdb_vfp_policy.h kernel/include/vitadebug_kernel.h tests/host/test_vfp_policy.c tests/host/include/psp2/types.h
-	$(HOST_CC_RUN) $(HOST_CFLAGS) -Itests/host/include -Ikernel/include uvdb_vfp_policy.c tests/host/test_vfp_policy.c -o $@
+test-vfp-policy$(HOST_EXEEXT): src/uvdb_vfp_policy.c src/uvdb_vfp_policy.h kernel/include/vitadebug_kernel.h tests/host/test_vfp_policy.c tests/host/include/psp2/types.h
+	$(HOST_CC_RUN) $(HOST_CFLAGS) -Itests/host/include -Ikernel/include src/uvdb_vfp_policy.c tests/host/test_vfp_policy.c -o $@
 
-test-console-queue$(HOST_EXEEXT): uvdb_console.c uvdb_console.h tests/host/test_console_queue.c
-	$(HOST_CC_RUN) $(HOST_CFLAGS) -DUVDB_CONSOLE_TESTING uvdb_console.c tests/host/test_console_queue.c $(HOST_THREAD_FLAGS) -o $@
+test-console-queue$(HOST_EXEEXT): src/uvdb_console.c src/uvdb_console.h tests/host/test_console_queue.c
+	$(HOST_CC_RUN) $(HOST_CFLAGS) -DUVDB_CONSOLE_TESTING src/uvdb_console.c tests/host/test_console_queue.c $(HOST_THREAD_FLAGS) -o $@
 
-test-console-transport$(HOST_EXEEXT): uvdb_console.c uvdb_console.h uvdb_rsp.c uvdb_rsp.h uvdb_console_transport.c uvdb_console_transport.h tests/host/test_console_transport.c
-	$(HOST_CC_RUN) $(HOST_CFLAGS) -DUVDB_CONSOLE_TESTING uvdb_console.c uvdb_rsp.c uvdb_console_transport.c tests/host/test_console_transport.c -o $@
+test-console-transport$(HOST_EXEEXT): src/uvdb_console.c src/uvdb_console.h src/uvdb_rsp.c src/uvdb_rsp.h src/uvdb_console_transport.c src/uvdb_console_transport.h tests/host/test_console_transport.c
+	$(HOST_CC_RUN) $(HOST_CFLAGS) -DUVDB_CONSOLE_TESTING src/uvdb_console.c src/uvdb_rsp.c src/uvdb_console_transport.c tests/host/test_console_transport.c -o $@
 
 kernel/dipsw-read-probe/test-record$(HOST_EXEEXT): kernel/dipsw-read-probe/test_record.c kernel/dipsw-read-probe/include/vd_dipsw_probe_record.h
 	$(HOST_CC_RUN) $(HOST_CFLAGS) kernel/dipsw-read-probe/test_record.c -o $@
@@ -235,7 +235,7 @@ $(UVDB_ASLR_FIXTURE_VELF): $(UVDB_ASLR_FIXTURE_ELF) tests/aslr_fixture/exports.y
 $(UVDB_ASLR_FIXTURE_SELF): $(UVDB_ASLR_FIXTURE_VELF)
 	vita-make-fself -c $< $@
 
-test.elf: psvDebugScreen.o test.o tests/thumb_step_returns.o libuvdb.a
+test.elf: psvDebugScreen.o tests/vita/test.o tests/vita/thumb_step_returns.o libuvdb.a
 	arm-vita-eabi-gcc $^ $(LDFLAGS) $(EXTRA_LDFLAGS) -o $@
 
 param.sfo:

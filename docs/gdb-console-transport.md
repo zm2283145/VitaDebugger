@@ -21,7 +21,7 @@ or disconnected.
 4. The capture thread reads available bytes and calls only the bounded console
    queue. It never writes to the GDB socket itself.
 
-The queue in `uvdb_console.c` contains 64 fixed records of 128 bytes, for an
+The queue in `src/uvdb_console.c` contains 64 fixed records of 128 bytes, for an
 8192-byte maximum payload capacity. Capture performs no allocation, network
 operation, sleep, or lock wait. It tries the queue lock once, splits accepted
 input into records, and drops any remainder when the console session is closed,

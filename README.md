@@ -663,8 +663,8 @@ checks both the legacy core-register gap and the explicit D0-D31/FPSCR
 656-character packet contract:
 
 ```sh
-cc -std=c11 -Wall -Wextra -Werror -I. \
-  uvdb_rsp.c tests/host/test_rsp_registers.c -o test-rsp
+cc -std=c11 -Wall -Wextra -Werror -Isrc -I. \
+  src/uvdb_rsp.c tests/host/test_rsp_registers.c -o test-rsp
 ./test-rsp
 python -m unittest discover -s tests/host -p "test_*.py" -v
 ```
@@ -1205,21 +1205,21 @@ exact matching unstripped ELF on the development computer.
 
 ## Repository layout
 
-- `uvdb.c`: protocol server, safe memory access, breakpoints, stepping, and
+- `src/uvdb.c`: protocol server, safe memory access, breakpoints, stepping, and
   exception handling.
-- `uvdb_registers.c` / `uvdb_registers.h`: host-testable selection of the valid
+- `src/uvdb_registers.c` / `src/uvdb_registers.h`: host-testable selection of the valid
   user context from the Vita kernel's two raw ARM register banks.
-- `uvdb_thread_control.c` / `uvdb_thread_control.h`: bounded thread inventory,
+- `src/uvdb_thread_control.c` / `src/uvdb_thread_control.h`: bounded thread inventory,
   selector parsing, and fail-closed resume/step planning.
-- `uvdb_rsp.c` / `uvdb_rsp.h`: host-testable ARM and VFP register-packet
+- `src/uvdb_rsp.c` / `src/uvdb_rsp.h`: host-testable ARM and VFP register-packet
   serialization.
-- `uvdb_vfp_policy.c` / `uvdb_vfp_policy.h`: fail-closed classification of
+- `src/uvdb_vfp_policy.c` / `src/uvdb_vfp_policy.h`: fail-closed classification of
   normalized kernel VFP snapshot results.
-- `uvdb_console.c` / `uvdb_console.h`: internal fixed-memory, generation-scoped
+- `src/uvdb_console.c` / `src/uvdb_console.h`: internal fixed-memory, generation-scoped
   GDB console queue and loss accounting.
-- `uvdb_console_transport.c` / `uvdb_console_transport.h`: single-owner no-ack
+- `src/uvdb_console_transport.c` / `src/uvdb_console_transport.h`: single-owner no-ack
   session state, `O`-packet framing, bounded pumping, and transport statistics.
-- `uvdb_monitor.c` / `uvdb_monitor.h`: host-testable exact `qRcmd` registry and
+- `src/uvdb_monitor.c` / `src/uvdb_monitor.h`: host-testable exact `qRcmd` registry and
   bounded read-only status, thread, and module report renderer.
 - `uvdb.h`: public application API.
 - `protocol/arm_vfp_target_xml.inc`: exact opt-in GDB D32 target description.
@@ -1227,10 +1227,12 @@ exact matching unstripped ELF on the development computer.
   policy, transactional validation gate, and retail 3.65 evidence.
 - `docs/gdb-monitor-commands.md`: monitor command reference, security boundary,
   response limits, native tests, and live-GDB validation evidence.
-- `stdio_redirect.c` / `stdio_redirect.h`: restorable nonblocking Vita newlib
+- `src/stdio_redirect.c` / `src/stdio_redirect.h`: restorable nonblocking Vita newlib
   `stdout`/`stderr` capture and internal-helper inventory filtering.
-- `uvdb_debugnet.c`: bounded asynchronous UDP logs for DebugNet-style receivers.
-- `test.c`: Vita hardware test program.
+- `src/uvdb_debugnet.c`: bounded asynchronous UDP logs for DebugNet-style receivers.
+- `tests/vita/test.c`: Vita hardware test program.
+- `tests/vita/thumb_step_returns.S` / `tests/vita/thumb2_control_flow.S`:
+  Vita instruction-stepping fixtures.
 - `tools/gdb_console_smoke.py`: raw-RSP no-ack, stream, stop, detach, and
   reconnect validation for the Vita console fixture.
 - `tools/gdb_monitor_smoke.py`: automated two-session live-RSP validation for
@@ -1246,7 +1248,7 @@ exact matching unstripped ELF on the development computer.
   native tests, and integration documentation.
 - `deploy/`: self-contained signed host/Vita remote deployment subproject,
   including its agent, host CLI, tests, security documentation, and license.
-- `tests/`: focused instruction fixtures and offline protocol tests.
+- `tests/`: Vita fixtures and offline host protocol tests.
 - `kernel/`: narrow kernel companion, generated user stubs, the stable boundary
   probe, the fail-closed VFP layout probe, and the disposable staged hardware-
   register read ladder.
