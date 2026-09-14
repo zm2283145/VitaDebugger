@@ -4,6 +4,7 @@
 #include <psp2kern/kernel/threadmgr/debugger.h>
 #include <psp2kern/kernel/threadmgr/misc.h>
 #include <psp2kern/kernel/threadmgr/thread.h>
+#include <psp2/kernel/error.h>
 
 #include "vitadebug_kernel.h"
 #ifdef VD_KERNEL_ENABLE_EXPERIMENTAL_HW_DEBUG
@@ -781,24 +782,31 @@ int vdKernelGetThreadVfpRegisters(
             for(int i = 0; i < VD_VFP_SUFFIX_GUARD_WORDS; ++i)
                 vfp_scratch.suffix_guard[i] = VD_VFP_GUARD_VALUE;
 
-            result = ksceKernelGetVfpRegisterForDebugger(target_guid,
-                                                          vfp_scratch.d);
-            if(result >= 0)
-            {
-                for(int i = 0; i < VD_VFP_PREFIX_GUARD_WORDS; ++i)
-                    if(vfp_scratch.prefix_guard[i] != VD_VFP_GUARD_VALUE)
-                    {
-                        result = -7;
-                        break;
-                    }
-            }
-            if(result >= 0)
-                for(int i = 0; i < VD_VFP_SUFFIX_GUARD_WORDS; ++i)
-                    if(vfp_scratch.suffix_guard[i] != VD_VFP_GUARD_VALUE)
-                    {
-                        result = -7;
-                        break;
-                    }
+            int raw_vfp_result =
+                ksceKernelGetVfpRegisterForDebugger(target_guid,
+                                                     vfp_scratch.d);
+            int guard_changed = 0;
+            for(int i = 0; i < VD_VFP_PREFIX_GUARD_WORDS; ++i)
+                if(vfp_scratch.prefix_guard[i] != VD_VFP_GUARD_VALUE)
+                    guard_changed = 1;
+            for(int i = 0; i < VD_VFP_SUFFIX_GUARD_WORDS; ++i)
+                if(vfp_scratch.suffix_guard[i] != VD_VFP_GUARD_VALUE)
+                    guard_changed = 1;
+
+            /* Retail 3.65 returns a permission error for valid suspended
+             * application threads that have no readable VFP bank, while a
+             * thread actively using VFP succeeds. Normalize only the two
+             * exact API results below and only after proving the undocumented
+             * call did not cross either guard. */
+            if(guard_changed)
+                result = VD_KERNEL_ERROR_VFP_GUARD;
+            else if(raw_vfp_result ==
+                        (int)SCE_KERNEL_ERROR_CAN_NOT_USE_VFP ||
+                    raw_vfp_result ==
+                        (int)SCE_KERNEL_ERROR_ILLEGAL_PERMISSION)
+                result = VD_KERNEL_ERROR_VFP_CONTEXT_UNAVAILABLE;
+            else
+                result = raw_vfp_result;
 
             SceThreadCpuRegisters cpu_registers;
             if(result >= 0)

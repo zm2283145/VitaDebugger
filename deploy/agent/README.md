@@ -28,21 +28,36 @@ claim rename-namespace or power-loss durability.
 
 Set CMake's `VDEV_ENABLE_DISPLAY_UI=ON`, or pass
 `-EnableExperimentalDisplayUi` to `tools/build_agent.ps1`, only for a supervised
-display test. That opt-in build compiles VitaSDK's installed
-`samples/common/debugScreen.c` and shows a stage-based progress bar, current
-work, PromoterUtil state and elapsed time, completion details, or the stage and
-error code on failure. It is not a separate GUI framework or an exact
-byte-progress meter. Because the helper installs a process-owned CDRAM
-framebuffer, close this build only by pressing Circle during the idle wait or by
-letting a one-shot job finish and exit normally. Do not force-kill it or send
-Vita Companion's `destroy` command; abrupt termination can bypass display
-cleanup and wedge LiveArea.
+display session. Its retail 3.65 lifecycle gate passed six consecutive
+post-refresh launch/exit cycles: three SceShell peel closures and three Circle
+cleanup exits, with no GPU fault or LiveArea hang. One earlier non-repeating GPU
+fault remains recorded. The opt-in build uses a process-owned framebuffer and
+should still exit normally. It uses the
+installed libvita2d and the Vita's default PGF font to present a native 960x544
+interface with operation cards, stage milestones, status detail, and distinct
+waiting, installation, completion, and error states. Verification stages use
+honest determinate progress. PromoterUtil exposes state and elapsed time but no
+byte percentage, so active installation uses an animated indeterminate bar.
+Close this build only by pressing Circle during the idle wait or by letting a
+one-shot job finish and exit normally so it can release its font and vita2d
+graphics resources. Do not force-kill it or send Vita Companion's `destroy`
+command; abrupt termination can still bypass normal graphics cleanup.
 
 Circle is sampled only before the first committed job is found. It requests a
 clean idle exit and is not a verification or installation cancel button. After
 job processing begins, let the agent finish and exit normally. The normal host
 workflow likewise never force-closes the agent: launch it from LiveArea, or use
 `--reuse-running-agent` only when an existing run is known to still be waiting.
+
+LiveArea artwork is enabled by default. Its source-of-truth tree is
+`assets/sce_sys/`: `icon0.png` is 128x128, `pic0.png` is 960x544,
+`livearea/contents/bg.png` is 840x500, and
+`livearea/contents/startup.png` is 280x158. The files must be non-interlaced
+8-bit PNGs; [assets/README.md](assets/README.md) records the complete color and
+layout contract. CMake validates the PNG headers and the minimal `a1`
+`template.xml` before packaging them at their standard `sce_sys` paths. Use
+`VDEV_ENABLE_LIVEAREA_ASSETS=OFF` only for a deliberate temporary build that
+must omit artwork.
 
 Early startup diagnostics are written to `ux0:data/VitaDevDeploy.startup`.
 Challenge publication also produces `ux0:data/VitaDevDeploy.startup_io`, whose
@@ -103,7 +118,7 @@ terminal value from `scePromoterUtilityGetResult`. VitaDevDeploy additionally
 checks all pre-dispatch return values, exposes progress callbacks, and cleans up
 initialized services in reverse order only after the operation outcome is
 known. After dispatch, failed state or result queries are retried without a
-hard Vita-side timeout. An experimental display-enabled build shows that status
+hard Vita-side timeout. The opt-in graphical build shows that status
 or result is temporarily unavailable while continuing to display elapsed time;
 the production headless build reports its eventual durable result to the host.
 
@@ -126,6 +141,5 @@ a crash journal and ignore a final incomplete line.
 The PromoterUtil/PAF adapter is isolated in `src/promoter_vitadb.c` and marked
 GPL-3.0-only because its undocumented PAF arguments and call sequence are
 adapted from VitaDB-Downloader. Host-side `head.bin` package preparation remains
-derived from VitaShell. The optional VitaSDK debug-screen helper and its
-embedded PSPSDK font, plus vendored Monocypher, are documented in the
-repository's `THIRD_PARTY.md`.
+derived from VitaShell. The optional libvita2d interface, system PGF font use,
+and vendored Monocypher are documented in the repository's `THIRD_PARTY.md`.

@@ -60,8 +60,8 @@ signing key off the Vita and do not weaken or bypass the signed-request gate.
 After dispatch, a failed state or result query does not prove that the
 asynchronous installer stopped. The agent therefore keeps the Vita awake and
 retries the query without a hard Vita-side timeout instead of unloading
-PromoterUtil or committing a false failure. An experimental display-enabled
-build shows installer status as temporarily unavailable while retrying; the
+PromoterUtil or committing a false failure. The opt-in graphical build shows
+installer status as temporarily unavailable while retrying; the
 production build is headless. The host waits 2,100 seconds by default, but a
 PC-side timeout only stops the PC wait and does not cancel PromoterUtil. If the
 process or Vita is interrupted, do not automatically retry; inspect the durable
@@ -71,21 +71,26 @@ how to recover the stale operation.
 
 ## Application lifecycle
 
-Production artifacts default to a headless implementation that does not install
-the debug-screen framebuffer. Normal host deployment must begin at LiveArea;
+Production artifacts default to a headless implementation that does not create
+a graphics framebuffer. Normal host deployment must begin at LiveArea;
 the host launches the agent without first sending Vita Companion's
 unauthenticated `destroy` command. `--reuse-running-agent` also avoids the
 command port before upload, but a challenge file cannot prove process liveness,
 so reuse only a session that is independently known to still be waiting.
 
-The `-EnableExperimentalDisplayUi` build uses VitaSDK's direct-framebuffer
-debug-screen helper. It is safe only when allowed to run its normal cleanup:
-press Circle while the agent is still in the idle wait, or let the one-shot job
-finish and exit. Circle is not checked after a committed job begins and cannot
-cancel verification or promotion. Never force-kill a display-enabled build or
-send Companion's `destroy` command; abrupt termination can orphan its
-process-owned CDRAM surface and wedge LiveArea. During an active promotion, do
-not terminate either build merely because the host timed out.
+The `-EnableExperimentalDisplayUi` build uses libvita2d and the system PGF font.
+Six consecutive post-refresh launch/exit cycles passed on retail 3.65: three
+SceShell peel closures and three Circle cleanup exits, with no GPU fault or
+LiveArea hang. One earlier reported GPU fault did not recur. The preferred exit
+still uses normal cleanup: press Circle while the agent is in the idle wait, or
+let the one-shot job finish and exit. That path waits for rendering, releases
+the font, and calls `vita2d_fini`. Circle is not checked after a committed job
+begins and cannot cancel verification or promotion. Do not send Companion's
+unauthenticated `destroy` command to a display-enabled build; unlike the three
+tested SceShell peel closures, that path is not part of this gate and may bypass
+graphics cleanup. During an
+active promotion, do not terminate either build merely because the host timed
+out.
 
 Report security problems privately to the repository owner until a coordinated
 fix is available.

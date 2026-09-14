@@ -29,54 +29,24 @@ known-versus-unknown outcome tracking, and reverse-order cleanup.
 - Copyright: Rinnegatamante and VitaDB-Downloader contributors
 - License: GNU General Public License version 3
 
-## VitaSDK debug screen
+## libvita2d
 
-Production agent artifacts are headless and do not contain the VitaSDK debug
-screen. Only a build explicitly requested with
-`-EnableExperimentalDisplayUi` (CMake `VDEV_ENABLE_DISPLAY_UI=ON`) compiles
-`debugScreen.c` from the installed VitaSDK `samples/common` directory. That
-source includes `debugScreenFont.c` and uses the accompanying headers from the
-same directory. The entry source and header are build-time inputs rather than
-vendored files; CMake accepts only the currently reviewed `debugScreen.c` and
-`debugScreen.h` SHA-256 values and stops if either differs. The included font
-source still comes from the installed VitaSDK directory and retains its own
-notice below.
+Production agent artifacts remain headless and do not link a graphics library.
+Only a build explicitly requested with `-EnableExperimentalDisplayUi` (CMake
+`VDEV_ENABLE_DISPLAY_UI=ON`) links the libvita2d package installed by VitaSDK.
+The UI uses its primitive renderer and the Vita's default PGF font; no libvita2d
+source or font data is vendored in this repository. The currently tested
+VitaSDK package is `libvita2d 0.0.0.r188.ga8f15ab-1`.
 
-- Upstream: <https://github.com/vitasdk/samples/tree/master/common>
-- VitaSDK samples code license: CC0 1.0 Universal
-- Embedded debug-font origin: PSPSDK `font.c`
-- Font copyright: Marcus R. Brown, James Forshaw, and John Kelley
-- Font license: BSD 3-Clause, using the PSPSDK license text reproduced below
+- Upstream: <https://github.com/xerpi/libvita2d>
+- Tested upstream revision: `a8f15ab`
+- Copyright: xerpi and libvita2d contributors
+- License: MIT
 
-The VitaSDK samples repository declares its code and build scripts to be
-CC0-1.0. `debugScreenFont.c` separately carries the PSPSDK BSD notice, so that
-notice is retained here for binary redistribution:
-
-> Copyright (c) 2005 adresd; Copyright (c) 2005 Marcus R. Brown;
-> Copyright (c) 2005 James Forshaw; Copyright (c) 2005 John Kelley;
-> Copyright (c) 2005 Jesper Svennevid. All rights reserved.
->
-> Redistribution and use in source and binary forms, with or without
-> modification, are permitted provided that the following conditions are met:
->
-> 1. Redistributions of source code must retain the above copyright notice,
->    this list of conditions and the following disclaimer.
-> 2. Redistributions in binary form must reproduce the above copyright notice,
->    this list of conditions and the following disclaimer in the documentation
->    and/or other materials provided with the distribution.
-> 3. The names of the authors may not be used to endorse or promote products
->    derived from this software without specific prior written permission.
->
-> THIS SOFTWARE IS PROVIDED BY THE AUTHORS “AS IS” AND ANY EXPRESS OR IMPLIED
-> WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF
-> MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO
-> EVENT SHALL THE AUTHORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
-> SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
-> PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
-> OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
-> WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
-> OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
-> ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+The libvita2d license permits use, modification, and redistribution provided
+that its copyright and permission notice are retained. Binary distributors of
+the optional graphical build must include the complete MIT notice supplied by
+the installed libvita2d package or upstream source revision.
 
 ## Monocypher
 

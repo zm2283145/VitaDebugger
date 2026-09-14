@@ -37,13 +37,15 @@ developer controls. It does not include or require Sony's proprietary SDK.
 
 ## Current status
 
-The current application-side library and optional kernel companion have been
-exercised on one retail PS Vita running system software 3.65. Unless a result
-explicitly names another target, every "hardware-tested" claim below refers
-only to that device, the tested Kubridge release listed under Requirements,
-and the exact artifacts identified by the linked evidence. Vita TV, other
-firmware releases, development hardware, and other plugin combinations remain
-unvalidated. Current status includes:
+The tested compatibility target is homebrew-enabled retail Vita hardware
+running system software 3.65, including handheld PS Vita models and Vita TV.
+The application-side library and optional kernel companion have run on both
+device classes. That compatibility result does not mean every experimental
+feature gate was repeated on both classes. Each "hardware-tested" claim below
+is scoped to the exact feature, device class, configuration, and artifact named
+by its linked evidence. Firmware 3.60 and every other firmware release,
+development hardware, and other plugin combinations remain untested. Current
+status includes:
 
 - GDB connections over TCP.
 - Source and function breakpoints.
@@ -86,22 +88,32 @@ unvalidated. Current status includes:
 - Hardware-tested read-only GDB register integration for main and worker
   threads owned by an active stop session, including state-dependent selection
   of runnable/current and syscall-return ARM banks plus symbolized stack frames.
+- Strict individual-register `p` reads for ARM core, CPSR, legacy unavailable
+  FPA slots, and opt-in D0-D31/FPSCR, plus `P` writes to the selected exception
+  thread's core/CPSR context. Foreign-thread and floating-point writes are
+  rejected until a separately restorable kernel mutation path is validated.
 - Hardware-tested stop-session reconciliation: threads created after the
   initial snapshot are discovered and suspended by the next lease renewal.
 - Hardware-tested read-only ARM debug-resource discovery reporting six
   breakpoint, four watchpoint, and two context-aware breakpoint comparators.
 - A default-off, token-protected VFP snapshot boundary for suspended
   session-owned threads, plus an opt-in D0-D31/FPSCR GDB packet path. The
-  known-pattern hardware gate now passes every D-register, FPSCR, ownership,
-  session-end, resume, and worker-restoration check. Live GDB validation is the
-  remaining promotion step.
-- GDB loaded-module discovery through chunk-safe `qXfer:libraries:read`,
-  hardware-tested with 14 executable and system modules.
+  known-pattern hardware gate passes every D-register, FPSCR, ownership,
+  session-end, resume, and worker-restoration check. The automated live-GDB
+  gate also passes foreign-thread reads through continue, clean detach,
+  transport loss, and two reconnect paths.
+- GDB loaded-module discovery through chunk-safe `qXfer:libraries:read` and
+  main-module `qOffsets` derived from the same live segment metadata,
+  hardware-tested with 14 executable and system modules. A bounded host tool
+  matches compatible unstripped ELFs and generates ASLR-aware GDB setup. Its
+  live main-plus-user-SUPRX gate passes five source-breakpoint sessions across
+  same-process detach/reconnect, two fresh-ASLR relaunches, automatic solib
+  reuse, and explicit-address regeneration.
 - A completed bounded `stdout`/`stderr` bridge that emits GDB `O` packets only
   after no-ack negotiation, never gives application threads ownership of the
   RSP socket, and isolates output between reconnect generations. Native tests
   cover queue pressure, framing, failures, commit retry, and reconnect
-  behavior. On the validated retail Vita running system software 3.65, the
+  behavior. On retail Vita hardware running system software 3.65, the
   live raw-RSP gate passed two consecutive sessions: each negotiated no-ack
   mode, received an initial `T05`, decoded six `O` packets carrying both
   streams, stopped with `T02` on Ctrl-C, remained quiet while stopped, and
@@ -132,11 +144,12 @@ handlers.
 
 ## Hardware validation
 
-The current hardware-validation baseline is the single retail PS Vita running
-system software 3.65 described above. Unless an individual report says
-otherwise, hardware results in this repository describe that device and
-configuration; they are not a claim that every Vita model, firmware, newlib
-revision, or plugin combination behaves identically.
+The overall runtime-compatibility baseline includes retail handheld PS Vita and
+Vita TV hardware running system software 3.65. Individual milestone reports
+remain narrower: they document the device class and configuration actually used
+for that gate, and must not be read as proof that every gate ran on both device
+classes. They also make no claim about other firmware, newlib revisions,
+development hardware, or plugin combinations.
 
 The kernel boundary is being introduced in deliberately small stages. These
 unedited Vita screenshots record the completed probe results:
@@ -151,16 +164,19 @@ unedited Vita screenshots record the completed probe results:
 | v6 | [Late-thread reconciliation](docs/hardware/kernel-probe-v6-late-thread-reconcile.jpg) | A thread created after stop begins is discovered on renewal, suspended, tracked, and resumed with the session |
 | v7 | [Hardware-debug discovery](docs/hardware/kernel-probe-v7-hw-debug-discovery.jpg) | Read-only CP14 identification and the Vita's six breakpoint, four watchpoint, and two context-aware comparator counts |
 | VFP v8 | [Corrected D32/FPSCR probe](docs/hardware/kernel-vfp-probe-v8-bank0-pass.jpg) | Guarded D0-D31 capture, raw FPSCR entry-0 mapping, ownership rejection, two-thread stop/resume, and clean worker restoration |
+| VFP live GDB | [Lifecycle evidence](docs/hardware/gdb-vfp-live-3.65.json) | Foreign-thread D0/D31/FPSCR reads across continue/interrupt, detach/reconnect, transport loss without `D`, recovery, and final detach |
+| ASLR + user SUPRX | [Lifecycle evidence](docs/hardware/gdb-aslr-suprx-3.65.json) | Main and loaded-user-module source breakpoints in five GDB sessions, stable same-process layout, automatic symbols after relaunch, explicit-symbol regeneration, and observed main/SUPRX address changes on both relaunches |
 | DebugNet v24 | [Sustained UDP stream](docs/hardware/debugnet-v24-sustained-stream.jpg) | Logging remains live after a loaded stop/restart cycle, with the displayed queue draining and no packet drops or send errors |
 | Profiler v1 | [User-mode profiler probe](docs/hardware/profiler-user-mode-probe-v1.jpg) | Eleven passing checks for live zones, frames, counters, memory/thread snapshots, wire encoding, four-producer pressure/drop accounting, uniqueness, and ring reuse without kernel calls |
+| VitaDevDeploy UI | [Retail 3.65 lifecycle evidence](docs/hardware/vitadevdeploy-ui-3.65.md) | Native vita2d waiting screen, six clean post-refresh launch/exit cycles through both SceShell peel-close and Circle cleanup, packaged LiveArea asset integrity, and successful artwork refresh; one earlier non-repeating GPU fault remains recorded |
 
 Every displayed probe check passed. These images document controlled test
 coverage; they do not claim that arbitrary applications or every firmware and
 plugin combination are already supported.
 
-The owner confirmed the 3.65 system-software version after the earlier runs;
-it was not embedded in every screenshot or journal. Future hardware gates must
-record the firmware contemporaneously.
+The earlier screenshots and journals do not all embed their system-software
+version, but those recorded runs used 3.65. Future hardware gates must record
+the firmware contemporaneously.
 
 The first disposable disabled-comparator round-trip attempt on 2026-09-12
 [rebooted during its kernel critical section](docs/hardware/hw-disabled-probe-attempt-1.md).
@@ -189,7 +205,8 @@ Because the design intentionally performs no I/O while bit 228 is high, the
 journal cannot identify one exact instruction inside that short critical path.
 Paired with the prior API result and audited single-MRC binary, however, this is
 consistent with the same DBGVCR access boundary and shows that late runtime bit
-228 did not produce a safely returning path on this retail Vita. The
+228 did not produce a safely returning path in the tested retail 3.65
+environment. The
 [bit-228 report](docs/hardware/dipsw-228-hw-debug.md) preserves the exact
 evidence and timing limitations. Hardware `Z1`-`Z4` remains disabled; no
 comparator was accessed or modified.
@@ -312,7 +329,7 @@ means the Vita network stack accepted the datagram, not that the PC received it.
 Run the included cross-platform receiver on the development computer:
 
 ```sh
-python tools/debugnet_listener.py --port 18194 --source 10.1.1.93
+python tools/debugnet_listener.py --port 18194 --source VITA_IP
 ```
 
 On Windows, allow inbound UDP port 18194 when prompted and use a Private network
@@ -355,24 +372,28 @@ space.
 - `VITASDK` set to the SDK directory and `$VITASDK/bin` on `PATH`.
 - `arm-vita-eabi-gcc`, `arm-vita-eabi-ar`, and `arm-vita-eabi-gdb`.
 - GNU Make for the included build.
+- Python 3.10 or newer for the host-side symbol/lifecycle tools and Python
+  regression tests.
 - A Vita C or C++ homebrew project capable of linking a static library.
 - Local-network connectivity to the Vita.
 
-Remote deployment additionally requires Python 3.10 or newer, PowerShell,
-CMake, an Ed25519 implementation, Vita Companion 1.06, and one-time installation
-of the VitaDevDeploy agent. See [the deployment requirements](deploy/README.md#requirements)
-for the exact setup and safety boundary.
+Remote deployment additionally requires PowerShell, CMake, an Ed25519
+implementation, Vita Companion 1.06, and one-time installation of the
+VitaDevDeploy agent. See
+[the deployment requirements](deploy/README.md#requirements) for the exact
+setup and safety boundary.
 
 All application objects, the debugger library, Kubridge imports, and other
 libraries must use compatible VitaSDK ABIs.
 
 ### Vita
 
-- A homebrew-capable PS Vita or Vita TV. Only one retail PS Vita running system
-  software 3.65 is currently validated; Vita TV and other firmware or device
-  classes have not completed the hardware gate.
-- TaiHEN/Ensō or an equivalent kernel-plugin environment. Only the current test
-  device's 3.65 configuration has completed the kernel-companion gates.
+- A homebrew-capable retail PS Vita or Vita TV running system software 3.65.
+  Both device classes are tested runtime-compatibility targets; consult each
+  linked milestone for its narrower feature-validation scope. Firmware 3.60
+  and all other firmware releases remain untested.
+- TaiHEN/Ensō or an equivalent kernel-plugin environment. The documented
+  kernel-companion gates currently cover retail 3.65 environments.
 - [Kubridge](https://github.com/bythos14/kubridge) with exception and memory-
   protection support. The tested version is the official `v0.3.1_hotfix`
   `exceptions_mprotect` release.
@@ -511,7 +532,7 @@ This produces `vitadebug.skprx` plus strong and weak user import libraries.
 The current companion provides ABI/capability queries, caller-process thread
 enumeration, lease-protected stop sessions, renewal-time reconciliation of new
 threads, and token-protected reads of both raw, state-dependent ARM register
-banks for a session-owned suspended thread. ABI v1.8 also reserves a read-only
+banks for a session-owned suspended thread. ABI v1.11 also reserves a read-only
 candidate VFP snapshot call. A normal build compiles that undocumented path
 out, omits
 its capability bit, and returns `VD_KERNEL_ERROR_VFP_DISABLED` if called. Keep
@@ -553,11 +574,15 @@ make UVDB_KERNEL_THREAD_CONTROL=1 UVDB_KERNEL_VFP_READS=1 \
   VITADEBUG_KERNEL_BUILD_DIR=kernel/build-vfp
 ```
 
-This feature is read-only. Full `G` register writes are rejected in that build
-so GDB cannot silently claim that it changed VFP state. At each stop, the stub
-also verifies the exact kernel ABI and capability bit before negotiating the
-extended packet; a normal fail-closed plugin retains the legacy core-only
-contract.
+This feature is read-only. Full `G` and individual `P` writes to VFP registers
+are rejected in that build so GDB cannot silently claim that it changed VFP
+state. Individual `p` reads preserve the negotiated register numbering and
+return correctly sized unavailable markers when a stopped thread has no saved
+VFP bank. At each stop, the stub also verifies the exact kernel ABI and
+capability bit before negotiating the extended packet; a normal fail-closed
+plugin retains the legacy core-only contract. See
+[GDB individual register access](docs/gdb-register-access.md) for the exact
+read/write matrix and remaining live-hardware gate.
 
 The repository test application can additionally compile a diagnostic-only
 registered worker with deterministic D0, D31, and FPSCR values. Add
@@ -565,6 +590,22 @@ registered worker with deterministic D0, D31, and FPSCR values. Add
 [live GDB VFP validation gate](docs/gdb-vfp-validation.md). The flag is rejected
 unless the thread-control and VFP-read gates are also enabled. The fixture uses
 a call-free busy loop and must not be enabled in a production application.
+
+To build the separate user-module symbol fixture and pack it into the test VPK,
+enable the ASLR gate alongside kernel thread control:
+
+```sh
+make package UVDB_KERNEL_THREAD_CONTROL=1 UVDB_GDB_ASLR_FIXTURE=1 \
+  VITADEBUG_KERNEL_DIR=kernel \
+  VITADEBUG_KERNEL_BUILD_DIR=kernel/build
+```
+
+This retains `build-aslr-fixture/uvdb_aslr_fixture.elf` for GDB, converts its
+same-stem `.velf` metadata sidecar, and packages only the `.suprx`. The test app
+loads it before opening the debugger port. See
+[ASLR-aware GDB symbols](docs/gdb-symbol-loading.md#automated-main-plus-user-suprx-gate)
+for the live lifecycle command and evidence contract. The fixture is diagnostic
+only and the build flag is rejected without kernel-assisted thread control.
 
 ### Offline protocol checks
 
@@ -711,8 +752,9 @@ session, while the kernel watchdog recovers an abandoned client. Experimental
 builds can also return the dynamically selected current/resumable user-mode
 register bank for a suspended thread. A VFP D32 target description and packet
 serializer are available only with `UVDB_KERNEL_VFP_READS=1`; leave that flag
-off in normal builds and continue to treat the mapping as experimental until
-the live GDB lifecycle gate passes. Foreign register writes remain disabled.
+off in normal builds because the kernel snapshot ABI is undocumented and must
+be revalidated for each firmware baseline. Its retail 3.65 live-GDB lifecycle
+gate passes. Foreign register writes, including VFP writes, remain disabled.
 Later calls while connected act as intentional software breakpoints. Calling it
 before graphics initialization normally leaves a black screen while waiting;
 this is expected.
@@ -783,17 +825,17 @@ serialize descriptor changes with its own concurrent stdio writers.
 Build the test app with `UVDB_GDB_CONSOLE_TEST=1`, launch it, and run:
 
 ```powershell
-py -3 tools/gdb_console_smoke.py --host 10.1.1.93 --reconnect
+py -3 tools/gdb_console_smoke.py --host VITA_IP --reconnect
 ```
 
 The script checks no-ack negotiation, both stream markers, Ctrl-C, the rule that
 no console packet follows a stop reply, clean detach, and a fresh reconnect.
-On the validated retail Vita running system software 3.65, both consecutive
+On retail Vita hardware running system software 3.65, both consecutive
 sessions passed: each reported an initial `T05`, delivered six `O` packets
 containing both `stdout` and `stderr`, returned `T02` for Ctrl-C, emitted
 nothing during the stopped-boundary check, and detached cleanly. This result
-does not claim support for another firmware, Vita model, newlib revision, or
-plugin combination.
+does not claim support for another firmware, newlib revision, development
+hardware, or plugin combination.
 See the [bounded GDB console transport guide](docs/gdb-console-transport.md) for
 the complete behavior and validation procedure. DebugNet remains the better
 path for sustained logging and profiler output, including periods when GDB is
@@ -819,8 +861,11 @@ and can report a selected suspended thread's dynamically selected current or
 syscall-return general registers, PC, SP, LR, and CPSR. The new kernel boundary
 can capture a selected thread's candidate D0-D31 state and both raw FPSCR bank
 values without changing them. GDB
-exposure remains compile-time opt-in pending the live GDB lifecycle gate;
-foreign register writes are rejected.
+  exposure remains compile-time opt-in pending the live GDB lifecycle gate;
+  foreign register writes are rejected. Strict `p` reads can select any
+  readable stopped thread. Strict `P` writes are limited to ARM core/CPSR state
+  in the selected exception thread and run inside a renewed stop-operation
+  boundary; VFP/FPA and foreign-thread writes return an error.
 
 ## Connecting with GDB
 
@@ -835,7 +880,7 @@ arm-vita-eabi-gdb path/to/my_app.unstripped.elf
 Then connect at the GDB prompt:
 
 ```gdb
-target remote 10.1.1.93:1234
+target remote VITA_IP:1234
 break my_function
 continue
 ```
@@ -913,14 +958,19 @@ exact matching unstripped ELF on the development computer.
   across blocking work. Shutdown, registration, nested faults, and handler
   chaining need a bounded state-machine refactor before this is suitable for
   hostile or failure-prone applications.
-- RSP parsing is intended only for a trusted debugger today. Memory and full-
-  register write packets still need strict length, syntax, overflow, page-
-  boundary, and breakpoint-overlap validation plus parser fuzzing.
+- RSP parsing is intended only for a trusted debugger today. Individual `p`/`P`
+  register packets now have exact syntax, number, width, and hexadecimal-value
+  validation. Memory and full-register `G` writes still need strict length,
+  syntax, overflow, page-boundary, and breakpoint-overlap validation plus
+  parser fuzzing.
 - Foreign-thread register writes are not implemented. Foreign-thread general
   register reads are hardware tested in both runnable/current and
-  sleeping/syscall-return states; the guarded VFP snapshot passed its separate
-  known-pattern hardware gate, but the opt-in GDB mapping still needs a live
-  foreign-thread D0/D31/FPSCR read and lifecycle test before promotion.
+  sleeping/syscall-return states; guarded foreign-thread VFP reads passed both
+  the known-pattern kernel gate and the live GDB lifecycle gate. Individual
+  core/CPSR writes are implemented only for the selected exception thread and
+  still need their live GDB mutation/read-back/restore gate. VFP writes remain
+  deliberately unsupported, and the read path remains opt-in because its
+  kernel snapshot ABI is undocumented.
 - Hardware breakpoint/watchpoint encoding and a guarded kernel session engine
   are implemented experimentally, but the staged retail probe rebooted at the
   first DSE-dependent `DBGVCR` read. A separate API test proved cached DIP 228
@@ -928,12 +978,19 @@ exact matching unstripped ELF on the development computer.
   rebooted without returning to its final journal write. No comparator access
   or enabled comparator has passed a hardware gate, so GDB does not advertise
   `Z1`-`Z4`.
-- Software stepping does not decode every instruction capable of writing PC.
-  Important remaining cases are concentrated in shifted PC-writing data-
-  processing forms, register-offset PC loads, and uncommon ARM/Thumb control
-  flow.
-- GDB receives module segment bases, but automatic symbol loading still
-  requires matching unstripped module files and a configured solib search path.
+- Software stepping now chooses one condition-correct target for common
+  ARM/Thumb branches, interworking returns, PC loads, and in-flight IT blocks,
+  rejects self-targets, and conservatively refuses recognized PC-writing forms
+  that it cannot yet decode. Remaining semantic decoders are concentrated in
+  shifted PC-writing data-processing forms, register-offset/negative/pre/post-
+  indexed PC loads, and uncommon ARM/Thumb control flow. The expanded paths
+  have host coverage and still need the dedicated live-GDB hardware gate.
+- The ASLR-aware host tool safely automates symbol loading only when matching
+  unstripped ELFs are available. Main-module and loaded-user-SUPRX source
+  breakpoints pass across detach/reconnect and two relaunches on retail 3.65.
+  The runtime module list has names and segment addresses but no build digest,
+  so the developer must retain symbols from the exact deployed build. Sony
+  system modules remain unmatched unless suitable symbols are supplied.
 - Remote syscall catching is not implemented.
 - Kernel plugins cannot be debugged with the current application-side stub.
 - Disconnect and error cleanup needs broader fault injection to prove bounded
@@ -966,10 +1023,11 @@ exact matching unstripped ELF on the development computer.
 - Deployment is serialized and one-shot, starts from LiveArea, does not provide
   general target-app rollback, and still needs full bootstrap recovery and
   interrupted-install fault-injection testing before it is production-ready.
-- Firmware compatibility is not established beyond one retail PS Vita running
-  system software 3.65 with the tested Kubridge release. Vita TV, all other
-  firmware releases, development hardware, and other plugin combinations have
-  not completed the same gates.
+- The tested compatibility target is retail handheld Vita and Vita TV hardware
+  running system software 3.65 with the tested Kubridge release. Individual
+  experimental feature gates may cover only the device class named in their
+  evidence. Firmware 3.60 and all other firmware releases, development
+  hardware, and other plugin combinations have not completed the same gates.
 - Build-directory isolation, exported CMake/VitaSDK packages, CI, and a
   project-wide license are not finished.
 - Long-running reconnect, shutdown, multithread, and fault stress testing is
@@ -977,9 +1035,9 @@ exact matching unstripped ELF on the development computer.
 
 ## Roadmap
 
-1. Hardware-test opt-in GDB D0/D31/FPSCR reads on a foreign stopped thread,
-   including continue, detach, reconnect, and watchdog recovery, then promote
-   the read-only mapping from experimental status.
+1. Keep the completed opt-in foreign-thread GDB D0/D31/FPSCR lifecycle gate and
+   its 3.65 evidence reproducible. Revalidate both VFP gates before supporting
+   another firmware baseline; keep writes as a separate restoration project.
 2. Complete the remaining
    [thread-control validation gate](docs/gdb-thread-control-validation.md).
    Unified inventory, `Hg`/`Hc`, `vCont;c;s`, fail-closed selection,
@@ -995,8 +1053,12 @@ exact matching unstripped ELF on the development computer.
    longer on-device pressure, abrupt-disconnect, restore/retry, and shutdown
    soaks. Decide whether queue/transport loss counters need a stable public API;
    retain DebugNet as the sustained-log and profiler path.
-5. Complete ARM and Thumb-2 control-flow decoding, then add `p`/`P` register
-   access and independently validate any foreign-thread mutation/restoration.
+5. Keep the new strict `p` reads and exception-thread core/CPSR `P` writes
+   reproducible, then run their live GDB mutation/read-back/restore gate. Finish
+   the remaining fail-closed ARM/Thumb-2 PC-writer semantic decoders and their
+   hardware fixtures. Design a new kernel ABI with snapshot, write, read-back,
+   rollback, lease-expiry, and detach restoration before enabling any foreign-
+   thread or VFP write.
 6. Keep hardware `Z1`-`Z4` fail-closed. The late-runtime DIP 228 path has now
    been tested and did not yield a safely returning DBGVCR read. Research
    boot-time policy, DSE/authentication, OS Lock, and debug-power state offline;
@@ -1008,17 +1070,21 @@ exact matching unstripped ELF on the development computer.
    correct stop replies, and lease/detach cleanup. In parallel, evaluate a
    page-protection/data-abort software-watchpoint fallback with strict page
    ownership, access decoding, single-step/rearm, and false-positive tests.
-7. Complete ASLR-aware symbol relocation: reconcile `qOffsets` and
-   `qXfer:libraries:read` with every loaded module segment, automate matching
-   unstripped ELF loading, and verify relocated breakpoints across relaunches.
+7. Extend the completed main-plus-user-SUPRX ASLR lifecycle gate with deployed-
+   artifact build identity, dynamic module load/unload refresh, and IDE-managed
+   symbol regeneration. Continue leaving unmatched system modules explicit.
 8. Extend the profiler foundation with a name dictionary, binary drain/receiver,
    desktop trace viewer, and host-application instrumentation; evaluate narrow
    kernel PC/PMU sampling and explicit VitaGL/SceGxm hooks separately.
 9. Add protocol authentication/pairing and peer allowlists, isolated feature
    build directories, exported VitaSDK/CMake packages, CI, a firmware matrix,
    and a project-wide license.
-10. Finish VitaDevDeploy bootstrap, interrupted-install, and recovery validation;
-   then integrate it with VS Code build/deploy/stop, IntelliSense, GDB, logs,
+10. Keep the completed VitaDevDeploy signed-install and optional graphical-UI
+   lifecycle gates reproducible. Finish interrupted-install and recovery fault
+   injection. Research a versioned, fail-closed SceShell content/cache refresh
+   for artwork updates; never make destructive `app.db` deletion an automatic
+   deployment step. Then integrate it with VS Code build/deploy/stop,
+   IntelliSense, GDB, logs,
    and profiles. Later replace the external Vita Companion dependency with a
    versioned authenticated device service if its implementation audit supports
    that design.
@@ -1037,18 +1103,28 @@ exact matching unstripped ELF on the development computer.
   selector parsing, and fail-closed resume/step planning.
 - `uvdb_rsp.c` / `uvdb_rsp.h`: host-testable ARM and VFP register-packet
   serialization.
+- `uvdb_vfp_policy.c` / `uvdb_vfp_policy.h`: fail-closed classification of
+  normalized kernel VFP snapshot results.
 - `uvdb_console.c` / `uvdb_console.h`: internal fixed-memory, generation-scoped
   GDB console queue and loss accounting.
 - `uvdb_console_transport.c` / `uvdb_console_transport.h`: single-owner no-ack
   session state, `O`-packet framing, bounded pumping, and transport statistics.
 - `uvdb.h`: public application API.
 - `protocol/arm_vfp_target_xml.inc`: exact opt-in GDB D32 target description.
+- `docs/gdb-register-access.md`: `p`/`P` numbering, thread-scope, mutation
+  policy, and validation gate.
 - `stdio_redirect.c` / `stdio_redirect.h`: restorable nonblocking Vita newlib
   `stdout`/`stderr` capture and internal-helper inventory filtering.
 - `uvdb_debugnet.c`: bounded asynchronous UDP logs for DebugNet-style receivers.
 - `test.c`: Vita hardware test program.
 - `tools/gdb_console_smoke.py`: raw-RSP no-ack, stream, stop, detach, and
   reconnect validation for the Vita console fixture.
+- `tools/gdb_symbols.py`: bounded live module reconciliation and ASLR-aware GDB
+  symbol-script generation.
+- `tools/gdb_aslr_lifecycle.py`: automated five-session main/user-SUPRX source-
+  breakpoint, reconnect, relaunch, and symbol-regeneration gate.
+- `tests/aslr_fixture/`: diagnostic resident user module and shared gate control
+  ABI used only by the ASLR hardware test.
 - `tools/debugnet_listener.py`: cross-platform development-computer log receiver.
 - `profiler/`: standalone bounded user-mode profiler library, Vita adapter,
   native tests, and integration documentation.

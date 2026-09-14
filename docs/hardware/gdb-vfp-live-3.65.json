@@ -1,0 +1,91 @@
+{
+  "elf": {
+    "sha256": "cb74d74d76b4394f6e1d8a9a776e493e96e1d6eb0abc78ae6ed40489f8af0f24",
+    "size_bytes": 381800
+  },
+  "expected": {
+    "d0": "1",
+    "d31": "2",
+    "fpscr": "0x00400000"
+  },
+  "finished_utc": "2026-09-14T03:38:48.800831+00:00",
+  "gdb": {
+    "version": "GNU gdb (GDB) 15.2"
+  },
+  "hardware": {
+    "device_class": "retail-handheld",
+    "firmware": "3.65",
+    "kernel_abi": "0x0001000b",
+    "kernel_plugin": {
+      "sha256": "b4bf79a53d88ef34c0f1ac00d29557f8b709e60acb35e14222e292d1f47792bf",
+      "size_bytes": 7908
+    },
+    "vpk": {
+      "sha256": "4b5a3385e4a97cf3085ac8ad2ad2503b7104306816dd4fc9db5162cd50691851",
+      "size_bytes": 193454
+    }
+  },
+  "result": "PASS",
+  "schema": "vitadebugger-vfp-live-gdb-v2",
+  "sessions": [
+    {
+      "kind": "clean_detach",
+      "mi_record_count": 116,
+      "mi_sha256": "96829274008c10748c2a262fa3479f9c64ab214e1faafb66390e9fa8193fe893"
+    },
+    {
+      "kind": "stopped_transport_disconnect_no_detach",
+      "mi_record_count": 82,
+      "mi_sha256": "842379b63362c80de4fa21c302f8267fc3031f56258e10e686c0163fde706177"
+    },
+    {
+      "kind": "final_clean_detach",
+      "mi_record_count": 83,
+      "mi_sha256": "a22aacdec6c7c2421923424b5dbde2d024353edf9fd8325bd6076ac25d9577e5"
+    }
+  ],
+  "snapshots": [
+    {
+      "d0": "1",
+      "d31": "2",
+      "fixture_gdb_thread": 5,
+      "fixture_is_foreign": true,
+      "fpscr": "0x00400000",
+      "initial_stopped_gdb_thread": 1,
+      "phase": "initial_attach",
+      "progress": 2809
+    },
+    {
+      "d0": "1",
+      "d31": "2",
+      "fixture_gdb_thread": 5,
+      "fixture_is_foreign": true,
+      "fpscr": "0x00400000",
+      "initial_stopped_gdb_thread": 1,
+      "phase": "after_continue_interrupt",
+      "progress": 2817
+    },
+    {
+      "d0": "1",
+      "d31": "2",
+      "fixture_gdb_thread": 5,
+      "fixture_is_foreign": true,
+      "fpscr": "0x00400000",
+      "initial_stopped_gdb_thread": 1,
+      "phase": "after_clean_detach_reconnect",
+      "progress": 2849
+    },
+    {
+      "d0": "1",
+      "d31": "2",
+      "fixture_gdb_thread": 5,
+      "fixture_is_foreign": true,
+      "fpscr": "0x00400000",
+      "initial_stopped_gdb_thread": 1,
+      "phase": "after_abrupt_peer_reconnect",
+      "progress": 2877
+    }
+  ],
+  "started_utc": "2026-09-14T03:38:35.679542+00:00",
+  "watchdog_scope": "Peer-loss recovery is tested here. Abandoned kernel-lease expiry remains the separate guarded kernel-probe gate."
+}

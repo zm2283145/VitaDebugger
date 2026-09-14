@@ -17,8 +17,13 @@ foreign-worker Thumb stepping with exact stop attribution. Phase 5 safely
 exposed and recovered from the register-bank bug before any foreign thread was
 stepped; Phase 6 verified its user-library fix without changing the kernel
 companion. ARM-state stepping and controlled failure fixtures remain pending.
-Do not describe the thread-control work as fully promoted until every check
-below passes.
+Since those runs, the host-tested decoder has added A32 BLX-immediate
+interworking, condition-correct direct paths, Thumb-2 branch planning,
+in-flight ITSTATE scanning, consistent target alignment/self-target rejection,
+and conservative fail-closed classification of recognized undecoded PC writers.
+These newer paths do not inherit the earlier hardware result and remain part of
+the next live gate. Do not describe the thread-control work as fully promoted
+until every check below passes.
 
 ## Selection contract
 

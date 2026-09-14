@@ -202,7 +202,7 @@ def run_once(host: str, port: int, timeout: float, collect_seconds: float) -> No
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--host", default="10.1.1.93")
+    parser.add_argument("--host", required=True)
     parser.add_argument("--port", type=int, default=1234)
     parser.add_argument("--timeout", type=float, default=10.0)
     parser.add_argument("--collect-seconds", type=float, default=3.0)

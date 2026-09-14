@@ -678,6 +678,7 @@ int main(void)
         if (result == VDEV_OK) break;
         if (result < 0) goto done;
         sceKernelDelayThread(250u * 1000u);
+        vdev_ui_waiting_tick();
     }
     job_processed = 1;
     result = process_job(job_id, job_directory, nonce);

@@ -16,6 +16,7 @@
 #include "uvdb_console_transport.h"
 #include "uvdb_registers.h"
 #include "uvdb_rsp.h"
+#include "uvdb_vfp_policy.h"
 #include "stdio_redirect.h"
 #include "uvdb_thread_control.h"
 #ifdef UVDB_KERNEL_THREAD_CONTROL
@@ -58,7 +59,6 @@ void _sceKernelExitProcessForUser(int);
 int _sceKernelSendMsgPipeVector(SceUID, const SceKernelAddrPair*, unsigned int, uint32_t* rest);
 int _sceKernelReceiveMsgPipeVector(SceUID, const SceKernelAddrPair*, unsigned int, uint32_t* rest);
 extern char __executable_start[];
-extern char __init_array_start[];
 
 #define UVDB_MAX_THREADS 32
 #define UVDB_THREAD_NAME_MAX 32
@@ -1043,11 +1043,28 @@ static void stream_write_module_name(struct stream* st, const char* name,
 {
     for(size_t i = 0; i < capacity && name[i]; ++i)
     {
-        char c = name[i];
-        if(c == '&' || c == '<' || c == '>' || c == '\'' || c == '"')
+        unsigned char value = (unsigned char)name[i];
+        char c = (char)value;
+        /* Keep both XML and the unescaped RSP payload well formed. Vita
+         * module names are normally printable ASCII, but a malformed name
+         * must not be able to terminate or escape the packet. */
+        if(value < 0x20 || value > 0x7e ||
+           c == '&' || c == '<' || c == '>' || c == '\'' || c == '"' ||
+           c == '$' || c == '#' || c == '}' || c == '*')
             c = '_';
         stream_write(st, &c, 1);
     }
+}
+
+static size_t module_segment_addresses(const SceKernelModuleInfo* info,
+                                       uint32_t addresses[4])
+{
+    size_t count = 0;
+    for(size_t segment = 0; segment < 4; ++segment)
+        if(info->segments[segment].vaddr && info->segments[segment].memsz)
+            addresses[count++] =
+                (uint32_t)(uintptr_t)info->segments[segment].vaddr;
+    return count;
 }
 
 static void stream_write_libraries(struct stream* st)
@@ -1061,19 +1078,23 @@ static void stream_write_libraries(struct stream* st)
             SceKernelModuleInfo info = {.size = sizeof(info)};
             if(sceKernelGetModuleInfo(modules[i], &info) < 0)
                 continue;
+            if(!info.module_name[0])
+                continue;
+            uint32_t addresses[4];
+            size_t segment_count = module_segment_addresses(&info, addresses);
+            /* The GDB library-list DTD requires at least one segment. */
+            if(!segment_count)
+                continue;
             stream_write(st, STRING("<library name=\""));
             stream_write_module_name(st, info.module_name,
                                      sizeof(info.module_name));
             stream_write(st, STRING("\">"));
-            for(size_t segment = 0; segment < 4; ++segment)
-                if(info.segments[segment].vaddr &&
-                   info.segments[segment].memsz)
-                {
-                    stream_write(st, STRING("<segment address=\""));
-                    stream_write_hex32(st, (uint32_t)(uintptr_t)
-                                       info.segments[segment].vaddr);
-                    stream_write(st, STRING("\"/>"));
-                }
+            for(size_t segment = 0; segment < segment_count; ++segment)
+            {
+                stream_write(st, STRING("<segment address=\""));
+                stream_write_hex32(st, addresses[segment]);
+                stream_write(st, STRING("\"/>"));
+            }
             stream_write(st, STRING("</library>"));
         }
     stream_write(st, STRING("</library-list>"));
@@ -1138,12 +1159,43 @@ static int write_rsp_register_packet(
     return 0;
 }
 
+static int write_rsp_single_register(
+    uint32_t register_number,
+    const struct uvdb_rsp_core_registers* core,
+    const struct uvdb_rsp_vfp_registers* vfp)
+{
+    /* The widest individual register in the legacy layout is a 96-bit FPA
+     * slot. The explicit VFP layout tops out at a 64-bit D register. */
+    char packet[24];
+    size_t packet_size = 0;
+#ifdef UVDB_KERNEL_VFP_READS
+    const int include_vfp = uvdb_rsp_vfp_enabled;
+#else
+    const int include_vfp = 0;
+    (void)vfp;
+#endif
+    if(uvdb_rsp_encode_single_register(
+           packet, sizeof(packet), core, vfp, include_vfp,
+           register_number, &packet_size) < 0)
+        return -1;
+    buffer_write(&out_buf, packet, packet_size);
+    return 0;
+}
+
 static void copy_exception_thread_registers(
     const KuKernelExceptionContext* ctx,
     struct uvdb_rsp_core_registers* core)
 {
     memcpy(core->r, &ctx->r0, sizeof(core->r));
     core->cpsr = ctx->SPSR;
+}
+
+static void apply_exception_thread_registers(
+    KuKernelExceptionContext* ctx,
+    const struct uvdb_rsp_core_registers* core)
+{
+    memcpy(&ctx->r0, core->r, sizeof(core->r));
+    ctx->SPSR = core->cpsr;
 }
 
 static int write_exception_thread_registers(KuKernelExceptionContext* ctx)
@@ -1154,6 +1206,17 @@ static int write_exception_thread_registers(KuKernelExceptionContext* ctx)
     // thread's saved VFP bank. Preserve the negotiated shape but mark it
     // unavailable in experimental VFP builds.
     return write_rsp_register_packet(&core, NULL);
+}
+
+static int write_exception_thread_register(
+    KuKernelExceptionContext* ctx,
+    uint32_t register_number)
+{
+    struct uvdb_rsp_core_registers core;
+    copy_exception_thread_registers(ctx, &core);
+    /* Kubridge does not expose this exception context's saved VFP bank. A
+     * negotiated VFP p request therefore receives an unavailable marker. */
+    return write_rsp_single_register(register_number, &core, NULL);
 }
 
 #ifdef UVDB_KERNEL_THREAD_CONTROL
@@ -1183,6 +1246,46 @@ static int read_kernel_thread_registers(
     return 0;
 }
 
+#ifdef UVDB_KERNEL_VFP_READS
+static int read_kernel_thread_vfp_registers(
+    SceUID thread_id,
+    struct uvdb_rsp_vfp_registers* vfp,
+    int* available)
+{
+    unsigned int token = __atomic_load_n(&uvdb_stop_token,
+                                          __ATOMIC_SEQ_CST);
+    struct vd_thread_vfp_registers snapshot;
+    if(!vfp || !available || !token)
+        return -1;
+
+    int snapshot_result =
+        vdKernelGetThreadVfpRegisters(token, thread_id, &snapshot);
+    if(snapshot_result < 0)
+    {
+        /* A stopped thread may not yet own a saved VFP context. Treat only
+         * that normalized result as an unavailable register bank; a lost
+         * session or any integrity error remains fatal. */
+        if(uvdb_vfp_classify_snapshot_result(snapshot_result) !=
+               UVDB_VFP_SNAPSHOT_UNAVAILABLE ||
+           __atomic_load_n(&uvdb_stop_failed, __ATOMIC_SEQ_CST) ||
+           __atomic_load_n(&uvdb_stop_token, __ATOMIC_SEQ_CST) != token)
+            return -1;
+        *available = 0;
+        return 0;
+    }
+    if(snapshot.layout_version != VD_KERNEL_VFP_LAYOUT_D32_V1 ||
+       snapshot.d_register_count != VD_KERNEL_VFP_D_REGISTER_COUNT)
+        return -1;
+
+    memcpy(vfp->d, snapshot.d, sizeof(vfp->d));
+    /* The dedicated VFP probe established that D32 v1 stores FPSCR in raw
+     * entry 0, independently of ARM's state-dependent core-bank selection. */
+    vfp->fpscr = snapshot.fpscr_entry[VD_KERNEL_VFP_FPSCR_ENTRY_D32_V1];
+    *available = 1;
+    return 0;
+}
+#endif
+
 static int write_kernel_thread_registers(SceUID thread_id)
 {
     struct uvdb_rsp_core_registers core;
@@ -1192,25 +1295,39 @@ static int write_kernel_thread_registers(SceUID thread_id)
 #ifdef UVDB_KERNEL_VFP_READS
     if(uvdb_rsp_vfp_enabled)
     {
-        unsigned int token = __atomic_load_n(&uvdb_stop_token,
-                                              __ATOMIC_SEQ_CST);
-        struct vd_thread_vfp_registers snapshot;
-        if(!token ||
-           vdKernelGetThreadVfpRegisters(token, thread_id, &snapshot) < 0 ||
-           snapshot.layout_version != VD_KERNEL_VFP_LAYOUT_D32_V1 ||
-           snapshot.d_register_count != VD_KERNEL_VFP_D_REGISTER_COUNT)
-            return -1;
         struct uvdb_rsp_vfp_registers vfp;
-        memcpy(vfp.d, snapshot.d, sizeof(vfp.d));
-        /* The dedicated VFP probe found its FPSCR in raw entry 0. Preserve
-         * that experimental mapping independently of the state-dependent ARM
-         * core-bank selection above. */
-        vfp.fpscr =
-            snapshot.fpscr_entry[VD_KERNEL_VFP_FPSCR_ENTRY_D32_V1];
-        return write_rsp_register_packet(&core, &vfp);
+        int available = 0;
+        if(read_kernel_thread_vfp_registers(
+               thread_id, &vfp, &available) < 0)
+            return -1;
+        return write_rsp_register_packet(&core, available ? &vfp : NULL);
     }
 #endif
     return write_rsp_register_packet(&core, NULL);
+}
+
+static int write_kernel_thread_register(
+    SceUID thread_id,
+    uint32_t register_number)
+{
+    struct uvdb_rsp_core_registers core;
+    if(read_kernel_thread_registers(thread_id, &core) < 0)
+        return -1;
+
+#ifdef UVDB_KERNEL_VFP_READS
+    if(uvdb_rsp_vfp_enabled &&
+       register_number >= UVDB_RSP_REGISTER_VFP_D_FIRST)
+    {
+        struct uvdb_rsp_vfp_registers vfp;
+        int available = 0;
+        if(read_kernel_thread_vfp_registers(
+               thread_id, &vfp, &available) < 0)
+            return -1;
+        return write_rsp_single_register(register_number, &core,
+                                         available ? &vfp : NULL);
+    }
+#endif
+    return write_rsp_single_register(register_number, &core, NULL);
 }
 #endif
 
@@ -1262,6 +1379,10 @@ static int breakpoint_insert_internal(uintptr_t address, size_t size, int tempor
     address &= ~(uintptr_t)1;
     if(size != 2 && size != 4)
         return -1;
+    /* A tagged Thumb address is accepted for compatibility, but an A32 trap
+     * must never straddle two instructions at a halfword-only address. */
+    if(size == 4 && (address & 3u))
+        return -1;
     if(breakpoint_find(address))
         return 0;
 
@@ -1290,6 +1411,30 @@ static int breakpoint_insert_internal(uintptr_t address, size_t size, int tempor
 static int breakpoint_insert(uintptr_t address, size_t size)
 {
     return breakpoint_insert_internal(address, size, 0);
+}
+
+/* BXWritePC/LoadWritePC clear the state-selection bit and, for A32, the low
+ * alignment bit as well. Canonicalize computed destinations before applying
+ * breakpoint_insert_internal's stricter public-address validation. */
+static int breakpoint_insert_step_target_sized(
+    uintptr_t address,
+    size_t size,
+    uintptr_t current_pc)
+{
+    if(size != 2u && size != 4u)
+        return -1;
+    address &= size == 2u ? ~(uintptr_t)1 : ~(uintptr_t)3;
+    if(address == (current_pc & ~(uintptr_t)1))
+        return -1;
+    return breakpoint_insert_internal(address, size, 1);
+}
+
+static int breakpoint_insert_step_target(
+    uintptr_t address,
+    uintptr_t current_pc)
+{
+    size_t size = (address & 1u) ? 2u : 4u;
+    return breakpoint_insert_step_target_sized(address, size, current_pc);
 }
 
 static int breakpoint_remove(uintptr_t address)
@@ -1327,25 +1472,29 @@ static void breakpoint_remove_temporary(void)
             breakpoint_remove(uvdb_breakpoints[i].address);
 }
 
-static int arm_condition_passed(unsigned int condition, uint32_t cpsr)
+static int breakpoint_insert_after_thumb_it(
+    const struct uvdb_rsp_core_registers* core,
+    uintptr_t pc,
+    size_t instruction_size,
+    unsigned int current_itstate)
 {
-    int n = (cpsr >> 31) & 1;
-    int z = (cpsr >> 30) & 1;
-    int c = (cpsr >> 29) & 1;
-    int v = (cpsr >> 28) & 1;
-    int passed;
-    switch(condition >> 1)
+    uintptr_t next = pc + instruction_size;
+    unsigned int itstate = uvdb_thumb_itstate_advance(current_itstate);
+    while(itstate)
     {
-        case 0: passed = z; break;
-        case 1: passed = c; break;
-        case 2: passed = n; break;
-        case 3: passed = v; break;
-        case 4: passed = c && !z; break;
-        case 5: passed = n == v; break;
-        case 6: passed = !z && n == v; break;
-        default: passed = condition == 14; break;
+        if(uvdb_arm_condition_passed(itstate >> 4, core->cpsr))
+            return breakpoint_insert_internal(next, 2, 1);
+
+        uint16_t skipped;
+        if(safe_memcpy((char*)&skipped, (const char*)next,
+                       sizeof(skipped)) != sizeof(skipped))
+            return -1;
+        unsigned int prefix = skipped >> 11;
+        next += (prefix == 0x1d || prefix == 0x1e || prefix == 0x1f)
+            ? 4 : 2;
+        itstate = uvdb_thumb_itstate_advance(itstate);
     }
-    return (condition & 1) && condition != 15 ? !passed : passed;
+    return breakpoint_insert_internal(next, 2, 1);
 }
 
 static int breakpoint_insert_step(const struct uvdb_rsp_core_registers* core)
@@ -1360,6 +1509,27 @@ static int breakpoint_insert_step(const struct uvdb_rsp_core_registers* core)
             return -1;
         unsigned int prefix = instruction >> 11;
         size_t instruction_size = (prefix == 0x1d || prefix == 0x1e || prefix == 0x1f) ? 4 : 2;
+        unsigned int current_itstate =
+            uvdb_thumb_itstate_from_cpsr(core->cpsr);
+
+        /* A condition-failed instruction inside an existing IT block has no
+         * control-flow or register effects. Advance past subsequent skipped
+         * slots so the temporary UDF itself cannot be conditionally skipped. */
+        if(current_itstate &&
+           !uvdb_arm_condition_passed(current_itstate >> 4, core->cpsr))
+            return breakpoint_insert_after_thumb_it(
+                core, pc, instruction_size, current_itstate);
+
+        struct uvdb_step_target direct_target;
+        int direct_result = uvdb_thumb16_plan_direct_step(
+            instruction, (uint32_t)pc, core->cpsr, core->r,
+            &direct_target);
+        if(direct_result < 0)
+            return -1;
+        if(direct_result > 0)
+            return breakpoint_insert_internal(direct_target.address,
+                                               direct_target.breakpoint_size,
+                                               1);
 
         // IT blocks conditionally execute up to four following instructions.
         // Decode the saved flags and stop at the first instruction that will
@@ -1372,7 +1542,7 @@ static int breakpoint_insert_step(const struct uvdb_rsp_core_registers* core)
             uintptr_t next = pc + 2;
             for(int slot = 0; slot < 4; ++slot)
             {
-                if(arm_condition_passed(itstate >> 4, core->cpsr))
+                if(uvdb_arm_condition_passed(itstate >> 4, core->cpsr))
                     return breakpoint_insert_internal(next, 2, 1);
 
                 uint16_t skipped;
@@ -1383,48 +1553,11 @@ static int breakpoint_insert_step(const struct uvdb_rsp_core_registers* core)
                 next += (skipped_prefix == 0x1d ||
                          skipped_prefix == 0x1e ||
                          skipped_prefix == 0x1f) ? 4 : 2;
-                if((itstate & 7) == 0)
+                itstate = uvdb_thumb_itstate_advance(itstate);
+                if(!itstate)
                     break;
-                itstate = (itstate & 0xe0) | ((itstate << 1) & 0x1f);
             }
             return breakpoint_insert_internal(next, 2, 1);
-        }
-
-        // 16-bit conditional branch. Plant traps on both possible paths so the
-        // CPU's condition flags, rather than the debugger, choose the result.
-        if((instruction & 0xf000) == 0xd000 && (instruction & 0x0f00) < 0x0e00)
-        {
-            intptr_t offset = (intptr_t)(int8_t)(instruction & 0xff) * 2;
-            uintptr_t target = pc + 4 + offset;
-            if(breakpoint_insert_internal(pc + 2, 2, 1) < 0 ||
-               breakpoint_insert_internal(target, 2, 1) < 0)
-            {
-                breakpoint_remove_temporary();
-                return -1;
-            }
-            return 0;
-        }
-
-        // 16-bit unconditional branch.
-        if((instruction & 0xf800) == 0xe000)
-        {
-            int32_t offset = (int32_t)(instruction & 0x07ff) << 21;
-            offset >>= 20;
-            return breakpoint_insert_internal(pc + 4 + offset, 2, 1);
-        }
-
-        // CBZ/CBNZ. As above, let the processor select between both traps.
-        if((instruction & 0xf500) == 0xb100)
-        {
-            uintptr_t target = pc + 4 + ((instruction & 0x0200) >> 3) +
-                               ((instruction & 0x00f8) >> 2);
-            if(breakpoint_insert_internal(pc + 2, 2, 1) < 0 ||
-               breakpoint_insert_internal(target, 2, 1) < 0)
-            {
-                breakpoint_remove_temporary();
-                return -1;
-            }
-            return 0;
         }
 
         // BX/BLX register.
@@ -1432,8 +1565,8 @@ static int breakpoint_insert_step(const struct uvdb_rsp_core_registers* core)
         {
             unsigned int rm = (instruction >> 3) & 0xf;
             const uint32_t* registers = core->r;
-            uintptr_t target = registers[rm];
-            return breakpoint_insert_internal(target, (target & 1) ? 2 : 4, 1);
+            uintptr_t target = rm == 15 ? pc + 4 : registers[rm];
+            return breakpoint_insert_step_target(target, pc);
         }
 
         // MOV PC, Rm (high-register form). This remains in Thumb state.
@@ -1445,7 +1578,8 @@ static int breakpoint_insert_step(const struct uvdb_rsp_core_registers* core)
             {
                 unsigned int rm = (instruction >> 3) & 0xf;
                 const uint32_t* registers = core->r;
-                return breakpoint_insert_internal(registers[rm], 2, 1);
+                uintptr_t target = rm == 15 ? pc + 4 : registers[rm];
+                return breakpoint_insert_step_target_sized(target, 2, pc);
             }
         }
 
@@ -1461,8 +1595,7 @@ static int breakpoint_insert_step(const struct uvdb_rsp_core_registers* core)
             if(safe_memcpy((char*)&target, saved_pc, sizeof(target)) !=
                sizeof(target))
                 return -1;
-            return breakpoint_insert_internal(target,
-                                               (target & 1) ? 2 : 4, 1);
+            return breakpoint_insert_step_target(target, pc);
         }
 
         if(instruction_size == 4)
@@ -1470,6 +1603,15 @@ static int breakpoint_insert_step(const struct uvdb_rsp_core_registers* core)
             uint16_t second;
             if(safe_memcpy((char*)&second, (const char*)(pc + 2), sizeof(second)) != sizeof(second))
                 return -1;
+
+            direct_result = uvdb_thumb32_plan_branch_step(
+                instruction, second, (uint32_t)pc, core->cpsr,
+                &direct_target);
+            if(direct_result < 0)
+                return -1;
+            if(direct_result > 0)
+                return breakpoint_insert_internal(
+                    direct_target.address, direct_target.breakpoint_size, 1);
 
             // Thumb-2 table branch byte/halfword. Read the selected table
             // entry through safe_memcpy and branch relative to Align(PC, 4).
@@ -1495,7 +1637,7 @@ static int breakpoint_insert_step(const struct uvdb_rsp_core_registers* core)
                     return -1;
                 uintptr_t target = ((pc + 4) & ~(uintptr_t)3) +
                                    (uintptr_t)table_offset * 2;
-                return breakpoint_insert_internal(target, 2, 1);
+                return breakpoint_insert_step_target_sized(target, 2, pc);
             }
 
             // Thumb-2 LDMIA/POP.W restoring PC. PC is stored after every
@@ -1515,8 +1657,7 @@ static int breakpoint_insert_step(const struct uvdb_rsp_core_registers* core)
                                (const char*)saved_pc_address,
                                sizeof(target)) != sizeof(target))
                     return -1;
-                return breakpoint_insert_internal(target,
-                                                   (target & 1) ? 2 : 4, 1);
+                return breakpoint_insert_step_target(target, pc);
             }
 
             // Thumb-2 LDMDB restoring PC. Since PC is the highest register,
@@ -1533,8 +1674,7 @@ static int breakpoint_insert_step(const struct uvdb_rsp_core_registers* core)
                                (const char*)saved_pc_address,
                                sizeof(target)) != sizeof(target))
                     return -1;
-                return breakpoint_insert_internal(target,
-                                                   (target & 1) ? 2 : 4, 1);
+                return breakpoint_insert_step_target(target, pc);
             }
 
             // Thumb-2 LDR.W PC, [Rn, #imm12]. Loads to PC can interwork, so
@@ -1552,58 +1692,24 @@ static int breakpoint_insert_step(const struct uvdb_rsp_core_registers* core)
                 if(safe_memcpy((char*)&target, (const char*)load_address,
                                sizeof(target)) != sizeof(target))
                     return -1;
-                return breakpoint_insert_internal(target,
-                                                   (target & 1) ? 2 : 4, 1);
-            }
-
-            if((instruction & 0xf800) == 0xf000 && (second & 0x8000) == 0x8000)
-            {
-                // Thumb-2 B.W, BL and BLX immediate. The encoded J bits are
-                // complements of I1/I2 XOR the sign bit.
-                if((second & 0x1000) != 0 || (second & 0xd001) == 0xc000)
-                {
-                    uint32_t sign = (instruction >> 10) & 1;
-                    uint32_t j1 = (second >> 13) & 1;
-                    uint32_t j2 = (second >> 11) & 1;
-                    uint32_t i1 = !(j1 ^ sign);
-                    uint32_t i2 = !(j2 ^ sign);
-                    uint32_t encoded = (sign << 24) | (i1 << 23) | (i2 << 22) |
-                                       ((instruction & 0x03ff) << 12) |
-                                       ((second & 0x07ff) << 1);
-                    int32_t offset = (int32_t)(encoded << 7) >> 7;
-                    uintptr_t target = pc + 4 + offset;
-                    if((second & 0x1000) == 0)
-                        target &= ~(uintptr_t)3;
-                    return breakpoint_insert_internal(target, (second & 0x1000) ? 2 : 4, 1);
-                }
-
-                // Thumb-2 conditional B.W. Plant both targets and let CPSR
-                // choose which path executes.
-                if((second & 0xd000) == 0x8000 && (instruction & 0x0380) != 0x0380)
-                {
-                    uint32_t encoded = (((instruction >> 10) & 1) << 20) |
-                                       (((second >> 11) & 1) << 19) |
-                                       (((second >> 13) & 1) << 18) |
-                                       ((instruction & 0x003f) << 12) |
-                                       ((second & 0x07ff) << 1);
-                    int32_t offset = (int32_t)(encoded << 11) >> 11;
-                    uintptr_t target = pc + 4 + offset;
-                    if(breakpoint_insert_internal(pc + 4, 2, 1) < 0 ||
-                       breakpoint_insert_internal(target, 2, 1) < 0)
-                    {
-                        breakpoint_remove_temporary();
-                        return -1;
-                    }
-                    return 0;
-                }
+                return breakpoint_insert_step_target(target, pc);
             }
 
             // SUBS PC, LR, #imm8 exception return form.
-            if(instruction == 0xf3de && (second & 0xff00) == 0x3f00)
-                return breakpoint_insert_internal(core->r[14] - (second & 0xff),
-                                                  (core->r[14] & 1) ? 2 : 4, 1);
+            if(instruction == 0xf3de && (second & 0xff00) == 0x8f00)
+                return breakpoint_insert_step_target(
+                    core->r[14] - (second & 0xff), pc);
+
+            if(uvdb_thumb32_instruction_may_write_pc(instruction, second))
+                return -1;
         }
 
+        if(instruction_size == 2 &&
+           uvdb_thumb16_instruction_may_write_pc(instruction))
+            return -1;
+        if(current_itstate)
+            return breakpoint_insert_after_thumb_it(
+                core, pc, instruction_size, current_itstate);
         return breakpoint_insert_internal(pc + instruction_size, 2, 1);
     }
 
@@ -1611,42 +1717,21 @@ static int breakpoint_insert_step(const struct uvdb_rsp_core_registers* core)
     if(safe_memcpy((char*)&instruction, (const char*)pc, sizeof(instruction)) != sizeof(instruction))
         return -1;
 
-    // ARM B/BL immediate. Conditional forms get traps on both possible paths.
-    if((instruction & 0x0e000000) == 0x0a000000)
-    {
-        int32_t offset = (int32_t)(instruction & 0x00ffffff) << 8;
-        offset >>= 6;
-        uintptr_t target = pc + 8 + offset;
-        if((instruction >> 28) == 0x0e)
-            return breakpoint_insert_internal(target, 4, 1);
-        if(breakpoint_insert_internal(pc + 4, 4, 1) < 0 ||
-           breakpoint_insert_internal(target, 4, 1) < 0)
-        {
-            breakpoint_remove_temporary();
-            return -1;
-        }
-        return 0;
-    }
-
-    // ARM MOV PC, Rm without a shifted operand. Conditional forms fall
-    // through when their saved CPSR condition is false.
-    if((instruction & 0x0ffffff0) == 0x01a0f000)
-    {
-        unsigned int condition = instruction >> 28;
-        if(!arm_condition_passed(condition, core->cpsr))
-            return breakpoint_insert_internal(pc + 4, 4, 1);
-        unsigned int rm = instruction & 0xf;
-        const uint32_t* registers = core->r;
-        uintptr_t target = rm == 15 ? pc + 8 : registers[rm];
-        return breakpoint_insert_internal(target, 4, 1);
-    }
+    struct uvdb_step_target direct_target;
+    int direct_result = uvdb_arm_plan_direct_step(
+        instruction, (uint32_t)pc, core->cpsr, core->r, &direct_target);
+    if(direct_result < 0)
+        return -1;
+    if(direct_result > 0)
+        return breakpoint_insert_internal(direct_target.address,
+                                           direct_target.breakpoint_size, 1);
 
     // ARM LDM variants that restore PC. Account for increment/decrement and
     // before/after addressing to locate PC's word in the transfer area.
     if((instruction & 0x0e108000) == 0x08108000)
     {
         unsigned int condition = instruction >> 28;
-        if(!arm_condition_passed(condition, core->cpsr))
+        if(!uvdb_arm_condition_passed(condition, core->cpsr))
             return breakpoint_insert_internal(pc + 4, 4, 1);
         unsigned int rn = (instruction >> 16) & 0xf;
         if(rn == 15)
@@ -1667,14 +1752,14 @@ static int breakpoint_insert_step(const struct uvdb_rsp_core_registers* core)
         if(safe_memcpy((char*)&target, (const char*)saved_pc_address,
                        sizeof(target)) != sizeof(target))
             return -1;
-        return breakpoint_insert_internal(target, (target & 1) ? 2 : 4, 1);
+        return breakpoint_insert_step_target(target, pc);
     }
 
     // ARM LDR PC, [Rn, +/-imm12] including pre- and post-index forms.
     if((instruction & 0x0e50f000) == 0x0410f000)
     {
         unsigned int condition = instruction >> 28;
-        if(!arm_condition_passed(condition, core->cpsr))
+        if(!uvdb_arm_condition_passed(condition, core->cpsr))
             return breakpoint_insert_internal(pc + 4, 4, 1);
         unsigned int rn = (instruction >> 16) & 0xf;
         const uint32_t* registers = core->r;
@@ -1689,17 +1774,20 @@ static int breakpoint_insert_step(const struct uvdb_rsp_core_registers* core)
         if(safe_memcpy((char*)&target, (const char*)load_address,
                        sizeof(target)) != sizeof(target))
             return -1;
-        return breakpoint_insert_internal(target,
-                                           (target & 1) ? 2 : 4, 1);
+        return breakpoint_insert_step_target(target, pc);
     }
 
-    // ARM BX/BLX register.
-    if((instruction & 0x0ffffff0) == 0x012fff10 ||
-       (instruction & 0x0ffffff0) == 0x012fff30)
+    /* Do not let an unsupported PC-writing form escape the sequential trap.
+     * A failed condition is known to fall through; a taken shifted ALU write,
+     * register-offset LDR PC, BXJ, or other undecoded transfer stays stopped
+     * and is reported to GDB as an unsupported software-step request. */
+    if(uvdb_arm_instruction_may_write_pc(instruction))
     {
-        const uint32_t* registers = core->r;
-        uintptr_t target = registers[instruction & 0xf];
-        return breakpoint_insert_internal(target, (target & 1) ? 2 : 4, 1);
+        unsigned int condition = instruction >> 28;
+        if(condition != 0xfu &&
+           !uvdb_arm_condition_passed(condition, core->cpsr))
+            return breakpoint_insert_internal(pc + 4, 4, 1);
+        return -1;
     }
 
     return breakpoint_insert_internal(pc + 4, 4, 1);
@@ -2228,6 +2316,40 @@ static void uvdb_main_loop(KuKernelExceptionContext* ctx, int stop_signal)
                     buffer_write(&out_buf, STRING("E16"));
             }
         }
+        else if(sz && pkt[0] == 'p')
+        {
+#ifdef UVDB_KERNEL_VFP_READS
+            const int include_vfp = uvdb_rsp_vfp_enabled;
+#else
+            const int include_vfp = 0;
+#endif
+            uint32_t register_number = 0;
+            if(uvdb_rsp_parse_register_read_packet(
+                   pkt, sz, include_vfp, &register_number) < 0)
+                buffer_write(&out_buf, STRING("E01"));
+            else
+            {
+                if(uvdb_refresh_stopped_inventory() < 0)
+                    return;
+                SceUID general_thread = uvdb_thread_selection_general(
+                    &uvdb_selection, &uvdb_inventory);
+                if(general_thread <= 0)
+                    buffer_write(&out_buf, STRING("E16"));
+                else if(general_thread != uvdb_exception_thread)
+#ifdef UVDB_KERNEL_THREAD_CONTROL
+                {
+                    if(write_kernel_thread_register(
+                           general_thread, register_number) < 0)
+                        buffer_write(&out_buf, STRING("E16"));
+                }
+#else
+                    buffer_write(&out_buf, STRING("E16"));
+#endif
+                else if(write_exception_thread_register(
+                            ctx, register_number) < 0)
+                    buffer_write(&out_buf, STRING("E16"));
+            }
+        }
         else if(STARTSWITH("m"))
         {
             char* p = pkt + 1;
@@ -2273,6 +2395,49 @@ static void uvdb_main_loop(KuKernelExceptionContext* ctx, int stop_signal)
                     skip_hex(&p, 25*4);
                     read_hex(&p, (void*)&ctx->SPSR, 4);
                     buffer_write(&out_buf, "OK", 2);
+                }
+                uvdb_end_stopped_operation();
+            }
+        }
+        else if(sz && pkt[0] == 'P')
+        {
+#ifdef UVDB_KERNEL_VFP_READS
+            const int include_vfp = uvdb_rsp_vfp_enabled;
+#else
+            const int include_vfp = 0;
+#endif
+            struct uvdb_rsp_core_register_write write;
+            int parse_result = uvdb_rsp_parse_core_register_write_packet(
+                pkt, sz, include_vfp, &write);
+            if(parse_result == UVDB_RSP_REGISTER_UNSUPPORTED)
+                buffer_write(&out_buf, STRING("E16"));
+            else if(parse_result < 0)
+                buffer_write(&out_buf, STRING("E01"));
+            else
+            {
+                /* Keep individual writes inside the same renewed all-stop
+                 * ownership boundary as G and memory mutation. The kernel ABI
+                 * does not yet provide coherent foreign-thread restoration,
+                 * so only the exception context can be changed safely. */
+                if(uvdb_begin_stopped_operation() < 0)
+                    return;
+                SceUID general_thread = uvdb_thread_selection_general(
+                    &uvdb_selection, &uvdb_inventory);
+                if(general_thread <= 0 ||
+                   general_thread != uvdb_exception_thread)
+                    buffer_write(&out_buf, STRING("E16"));
+                else
+                {
+                    struct uvdb_rsp_core_registers core;
+                    copy_exception_thread_registers(ctx, &core);
+                    if(uvdb_rsp_apply_core_register_write(
+                           &core, &write, NULL) < 0)
+                        buffer_write(&out_buf, STRING("E16"));
+                    else
+                    {
+                        apply_exception_thread_registers(ctx, &core);
+                        buffer_write(&out_buf, STRING("OK"));
+                    }
                 }
                 uvdb_end_stopped_operation();
             }
@@ -2406,14 +2571,28 @@ static void uvdb_main_loop(KuKernelExceptionContext* ctx, int stop_signal)
         }
         else if(IS("qOffsets"))
         {
-            char packet[] = "TextSeg=........;DataSeg=........";
-            uint32_t value = (uint32_t)__executable_start;
-            for(int i = 0; i < 8; i++)
-                packet[15-i] = int2hex((value >> (4*i)) & 15);
-            value = (uint32_t)__init_array_start;
-            for(int i = 0; i < 8; i++)
-                packet[32-i] = int2hex((value >> (4*i)) & 15);
-            buffer_write(&out_buf, packet, sizeof(packet) - 1);
+            SceUID module = sceKernelGetModuleIdByAddr(__executable_start);
+            SceKernelModuleInfo info = {.size = sizeof(info)};
+            uint32_t addresses[4];
+            size_t segment_count = 0;
+            if(module >= 0 && sceKernelGetModuleInfo(module, &info) >= 0)
+                segment_count = module_segment_addresses(&info, addresses);
+            if(!segment_count)
+                buffer_write(&out_buf, STRING("E01"));
+            else
+            {
+                /* TextSeg/DataSeg are absolute PT_LOAD start addresses, not
+                 * relocation deltas. Deriving them from module metadata keeps
+                 * qOffsets consistent with qXfer:libraries:read even when the
+                 * linker's first writable section is not .init_array. */
+                buffer_write(&out_buf, STRING("TextSeg="));
+                write_hex_uint32(addresses[0]);
+                if(segment_count > 1)
+                {
+                    buffer_write(&out_buf, STRING(";DataSeg="));
+                    write_hex_uint32(addresses[1]);
+                }
+            }
         }
         discard_packet(pkt, sz);
         if(send_packet() < 0)

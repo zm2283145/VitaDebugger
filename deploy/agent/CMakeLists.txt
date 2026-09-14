@@ -15,14 +15,110 @@ set(VITA_APP_NAME "VitaDevDeploy Agent")
 set(VITA_VERSION "01.00")
 
 option(VDEV_ENABLE_INSTALL "Enable the signed install action (OFF until verification tests pass)" OFF)
+option(VDEV_ENABLE_LIVEAREA_ASSETS
+    "Package the reviewed icon, splash, and LiveArea artwork" ON)
 option(VDEV_ENABLE_DISPLAY_UI
-    "Enable the experimental direct-framebuffer status interface" OFF)
+    "Enable the opt-in native vita2d status interface" OFF)
 set(VDEV_AGENT_TITLE_ID "VDEVDEP01" CACHE STRING
     "Title ID used by this agent build (use SLRS00001 for the bootstrap build)")
 set(VDEV_ONLY_TARGET_TITLE_ID "" CACHE STRING
     "Optional single title ID this build is permitted to deploy")
 set(VDD_PUBLIC_KEY_HEX "" CACHE STRING
     "Trusted Ed25519 public key as exactly 64 lowercase hexadecimal characters")
+
+set(VDEV_LIVEAREA_ASSET_ROOT
+    "${CMAKE_CURRENT_SOURCE_DIR}/assets/sce_sys" CACHE PATH
+    "Root containing VitaDevDeploy's reviewed sce_sys artwork")
+
+function(vdev_validate_png RELATIVE_PATH EXPECTED_WIDTH EXPECTED_HEIGHT)
+    set(ASSET_PATH "${VDEV_LIVEAREA_ASSET_ROOT}/${RELATIVE_PATH}")
+    if(NOT EXISTS "${ASSET_PATH}" OR IS_DIRECTORY "${ASSET_PATH}")
+        message(FATAL_ERROR
+            "LiveArea artwork is enabled, but '${ASSET_PATH}' is missing. "
+            "See assets/README.md for the required source files.")
+    endif()
+
+    # Read only the fixed PNG signature and IHDR fields. This makes malformed,
+    # resized, or interlaced artwork fail at configure time without invoking a
+    # host image library whose output could vary between build machines.
+    file(READ "${ASSET_PATH}" PNG_HEADER HEX OFFSET 0 LIMIT 29)
+    string(TOLOWER "${PNG_HEADER}" PNG_HEADER)
+    string(LENGTH "${PNG_HEADER}" PNG_HEADER_LENGTH)
+    if(PNG_HEADER_LENGTH LESS 58)
+        message(FATAL_ERROR "LiveArea asset '${ASSET_PATH}' has a truncated PNG header")
+    endif()
+
+    string(SUBSTRING "${PNG_HEADER}" 0 16 PNG_SIGNATURE)
+    string(SUBSTRING "${PNG_HEADER}" 24 8 PNG_IHDR_NAME)
+    if(NOT PNG_SIGNATURE STREQUAL "89504e470d0a1a0a" OR
+       NOT PNG_IHDR_NAME STREQUAL "49484452")
+        message(FATAL_ERROR "LiveArea asset '${ASSET_PATH}' is not a canonical PNG")
+    endif()
+
+    string(SUBSTRING "${PNG_HEADER}" 32 8 PNG_WIDTH_HEX)
+    string(SUBSTRING "${PNG_HEADER}" 40 8 PNG_HEIGHT_HEX)
+    string(SUBSTRING "${PNG_HEADER}" 48 2 PNG_BIT_DEPTH)
+    string(SUBSTRING "${PNG_HEADER}" 50 2 PNG_COLOR_TYPE)
+    string(SUBSTRING "${PNG_HEADER}" 52 2 PNG_COMPRESSION)
+    string(SUBSTRING "${PNG_HEADER}" 54 2 PNG_FILTER)
+    string(SUBSTRING "${PNG_HEADER}" 56 2 PNG_INTERLACE)
+    math(EXPR PNG_WIDTH "0x${PNG_WIDTH_HEX}")
+    math(EXPR PNG_HEIGHT "0x${PNG_HEIGHT_HEX}")
+
+    if(NOT PNG_WIDTH EQUAL EXPECTED_WIDTH OR
+       NOT PNG_HEIGHT EQUAL EXPECTED_HEIGHT)
+        message(FATAL_ERROR
+            "LiveArea asset '${ASSET_PATH}' must be ${EXPECTED_WIDTH}x${EXPECTED_HEIGHT}; "
+            "its IHDR is ${PNG_WIDTH}x${PNG_HEIGHT}")
+    endif()
+    if(NOT PNG_BIT_DEPTH STREQUAL "08" OR
+       NOT PNG_COLOR_TYPE STREQUAL "03" OR
+       NOT PNG_COMPRESSION STREQUAL "00" OR
+       NOT PNG_FILTER STREQUAL "00" OR
+       NOT PNG_INTERLACE STREQUAL "00")
+        message(FATAL_ERROR
+            "LiveArea asset '${ASSET_PATH}' must be a non-interlaced 8-bit indexed PNG "
+            "using the standard PNG compression/filter methods")
+    endif()
+endfunction()
+
+set(VDEV_LIVEAREA_VPK_ASSETS)
+if(VDEV_ENABLE_LIVEAREA_ASSETS)
+    vdev_validate_png("icon0.png" 128 128)
+    vdev_validate_png("pic0.png" 960 544)
+    vdev_validate_png("livearea/contents/bg.png" 840 500)
+    vdev_validate_png("livearea/contents/startup.png" 280 158)
+
+    set(VDEV_LIVEAREA_TEMPLATE
+        "${VDEV_LIVEAREA_ASSET_ROOT}/livearea/contents/template.xml")
+    if(NOT EXISTS "${VDEV_LIVEAREA_TEMPLATE}" OR
+       IS_DIRECTORY "${VDEV_LIVEAREA_TEMPLATE}")
+        message(FATAL_ERROR
+            "LiveArea artwork is enabled, but '${VDEV_LIVEAREA_TEMPLATE}' is missing")
+    endif()
+    file(READ "${VDEV_LIVEAREA_TEMPLATE}" VDEV_LIVEAREA_TEMPLATE_XML LIMIT 16385)
+    string(LENGTH "${VDEV_LIVEAREA_TEMPLATE_XML}" VDEV_LIVEAREA_TEMPLATE_LENGTH)
+    if(VDEV_LIVEAREA_TEMPLATE_LENGTH GREATER 16384 OR
+       NOT VDEV_LIVEAREA_TEMPLATE_XML MATCHES
+           "<livearea style=\"a1\" format-ver=\"01\\.00\" content-rev=\"1\">" OR
+       NOT VDEV_LIVEAREA_TEMPLATE_XML MATCHES "<image>bg\\.png</image>" OR
+       NOT VDEV_LIVEAREA_TEMPLATE_XML MATCHES
+           "<startup-image>startup\\.png</startup-image>")
+        message(FATAL_ERROR
+            "LiveArea template.xml is oversized or does not match the reviewed a1 layout")
+    endif()
+
+    set(VDEV_LIVEAREA_VPK_ASSETS
+        "${VDEV_LIVEAREA_ASSET_ROOT}/icon0.png" "sce_sys/icon0.png"
+        "${VDEV_LIVEAREA_ASSET_ROOT}/pic0.png" "sce_sys/pic0.png"
+        "${VDEV_LIVEAREA_ASSET_ROOT}/livearea/contents/bg.png"
+        "sce_sys/livearea/contents/bg.png"
+        "${VDEV_LIVEAREA_ASSET_ROOT}/livearea/contents/startup.png"
+        "sce_sys/livearea/contents/startup.png"
+        "${VDEV_LIVEAREA_TEMPLATE}"
+        "sce_sys/livearea/contents/template.xml"
+    )
+endif()
 
 foreach(TITLE_ID_VARIABLE VDEV_AGENT_TITLE_ID VDEV_ONLY_TARGET_TITLE_ID)
     if(NOT "${${TITLE_ID_VARIABLE}}" STREQUAL "")
@@ -69,29 +165,7 @@ if(VDEV_ENABLE_INSTALL)
 endif()
 
 if(VDEV_ENABLE_DISPLAY_UI)
-    set(VITADEVDEPLOY_DEBUG_SCREEN_DIR
-        "${VITASDK}/share/gcc-arm-vita-eabi/samples/common")
-    if(NOT EXISTS "${VITADEVDEPLOY_DEBUG_SCREEN_DIR}/debugScreen.c" OR
-       NOT EXISTS "${VITADEVDEPLOY_DEBUG_SCREEN_DIR}/debugScreen.h")
-        message(FATAL_ERROR
-            "The VitaSDK debugScreen helper is missing from ${VITADEVDEPLOY_DEBUG_SCREEN_DIR}")
-    endif()
-    file(SHA256 "${VITADEVDEPLOY_DEBUG_SCREEN_DIR}/debugScreen.c"
-         VITADEVDEPLOY_DEBUG_SCREEN_C_SHA256)
-    file(SHA256 "${VITADEVDEPLOY_DEBUG_SCREEN_DIR}/debugScreen.h"
-         VITADEVDEPLOY_DEBUG_SCREEN_H_SHA256)
-    if(NOT VITADEVDEPLOY_DEBUG_SCREEN_C_SHA256 STREQUAL
-           "a69ab5b35f825858630b704402c09befe9855186b7e17e9f1e9b7b8b32c99d46" OR
-       NOT VITADEVDEPLOY_DEBUG_SCREEN_H_SHA256 STREQUAL
-           "b9b790bad51444cb474cc16acf8e331ffe3aca082840b067781aa81c49b96592")
-        message(FATAL_ERROR
-            "The installed VitaSDK debugScreen helper changed; review and pin the new version before building")
-    endif()
-    list(APPEND VITADEVDEPLOY_AGENT_SOURCES
-        "${VITADEVDEPLOY_DEBUG_SCREEN_DIR}/debugScreen.c")
-    set_source_files_properties(
-        "${VITADEVDEPLOY_DEBUG_SCREEN_DIR}/debugScreen.c"
-        PROPERTIES COMPILE_OPTIONS "-Wno-shadow")
+    find_library(VITA2D_LIBRARY vita2d REQUIRED)
 endif()
 
 add_executable(vitadevdeploy_agent ${VITADEVDEPLOY_AGENT_SOURCES})
@@ -100,11 +174,6 @@ target_include_directories(vitadevdeploy_agent PRIVATE
     src
     third_party/monocypher
 )
-if(VDEV_ENABLE_DISPLAY_UI)
-    target_include_directories(vitadevdeploy_agent PRIVATE
-        "${VITADEVDEPLOY_DEBUG_SCREEN_DIR}")
-endif()
-
 target_compile_features(vitadevdeploy_agent PRIVATE c_std_99)
 target_compile_options(vitadevdeploy_agent PRIVATE
     -Wall -Wextra -Wformat=2 -Wshadow -Wstrict-prototypes
@@ -123,7 +192,17 @@ target_link_libraries(vitadevdeploy_agent
 )
 
 if(VDEV_ENABLE_DISPLAY_UI)
-    target_link_libraries(vitadevdeploy_agent SceDisplay_stub)
+    target_link_libraries(vitadevdeploy_agent
+        ${VITA2D_LIBRARY}
+        SceDisplay_stub
+        SceGxm_stub
+        SceAppMgr_stub
+        SceCommonDialog_stub
+        SceSysmodule_stub
+        ScePgf_stub
+        ScePvf_stub
+        m
+    )
 endif()
 
 if(VDEV_ENABLE_INSTALL)
@@ -144,6 +223,36 @@ if(VDEV_ENABLE_INSTALL)
 else()
     vita_create_self(eboot.bin vitadevdeploy_agent)
 endif()
+
+# vita.cmake currently flattens FILE arguments into a shell-style string before
+# splitting them again. Absolute source paths containing spaces are therefore
+# split into multiple arguments. Build an equivalent quoted flag string and
+# register the inputs as explicit dependencies so checkouts under paths such as
+# "Super Mario 64" package and rebuild correctly.
+if(NOT DEFINED VDEV_BASE_VITA_PACK_VPK_FLAGS)
+    set(VDEV_BASE_VITA_PACK_VPK_FLAGS "${VITA_PACK_VPK_FLAGS}" CACHE STRING
+        "Additional reviewed vita-pack-vpk flags before project assets")
+endif()
+set(VITA_PACK_VPK_FLAGS "${VDEV_BASE_VITA_PACK_VPK_FLAGS}")
+list(LENGTH VDEV_LIVEAREA_VPK_ASSETS VDEV_LIVEAREA_VPK_ASSET_ITEM_COUNT)
+while(VDEV_LIVEAREA_VPK_ASSET_ITEM_COUNT GREATER 0)
+    list(GET VDEV_LIVEAREA_VPK_ASSETS 0 VDEV_LIVEAREA_VPK_SOURCE)
+    list(GET VDEV_LIVEAREA_VPK_ASSETS 1 VDEV_LIVEAREA_VPK_DESTINATION)
+    string(APPEND VITA_PACK_VPK_FLAGS
+        " -a \"${VDEV_LIVEAREA_VPK_SOURCE}=${VDEV_LIVEAREA_VPK_DESTINATION}\"")
+    list(APPEND resources "${VDEV_LIVEAREA_VPK_SOURCE}")
+    list(REMOVE_AT VDEV_LIVEAREA_VPK_ASSETS 0 1)
+    list(LENGTH VDEV_LIVEAREA_VPK_ASSETS VDEV_LIVEAREA_VPK_ASSET_ITEM_COUNT)
+endwhile()
+set(VITA_PACK_VPK_FLAGS "${VITA_PACK_VPK_FLAGS}" CACHE STRING
+    "vita-pack-vpk flags including project artwork" FORCE)
+set(VDEV_LIVEAREA_PACKAGING_STAMP
+    "${CMAKE_CURRENT_BINARY_DIR}/vitadevdeploy-livearea-packaging.txt")
+file(GENERATE OUTPUT "${VDEV_LIVEAREA_PACKAGING_STAMP}"
+    CONTENT
+        "livearea_assets=${VDEV_ENABLE_LIVEAREA_ASSETS}\npack_flags=${VITA_PACK_VPK_FLAGS}\n")
+list(APPEND resources "${VDEV_LIVEAREA_PACKAGING_STAMP}")
+
 vita_create_vpk(VitaDevDeployAgent.vpk ${VDEV_AGENT_TITLE_ID} eboot.bin
     VERSION ${VITA_VERSION}
     NAME ${VITA_APP_NAME}

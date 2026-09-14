@@ -6,7 +6,7 @@
 extern "C" {
 #endif
 
-#define VD_KERNEL_ABI_VERSION 0x00010008u
+#define VD_KERNEL_ABI_VERSION 0x0001000Bu
 #define VD_KERNEL_MAX_THREADS 64
 #define VD_KERNEL_HW_CORE_COUNT 3
 #define VD_KERNEL_HW_BREAKPOINT_COUNT 6
@@ -14,6 +14,7 @@ extern "C" {
 #define VD_KERNEL_VFP_D_REGISTER_COUNT 32
 #define VD_KERNEL_VFP_LAYOUT_D32_V1 1u
 #define VD_KERNEL_VFP_FPSCR_ENTRY_D32_V1 0u
+#define VD_KERNEL_ERROR_VFP_GUARD (-7)
 #define VD_KERNEL_ERROR_VFP_DISABLED (-8)
 #define VD_KERNEL_ERROR_HW_DISABLED (-9)
 #define VD_KERNEL_ERROR_HW_BUSY (-10)
@@ -23,6 +24,9 @@ extern "C" {
 #define VD_KERNEL_ERROR_HW_CORE (-14)
 #define VD_KERNEL_ERROR_HW_RESTORE (-15)
 #define VD_KERNEL_ERROR_HW_RANGE (-16)
+// Public normalized VFP-unavailable result. Use VitaSDK's stable ThreadMgr
+// error encoding so the value survives the user/kernel syscall boundary.
+#define VD_KERNEL_ERROR_VFP_CONTEXT_UNAVAILABLE ((int)0x80028031u)
 
 enum vd_kernel_capability {
     VD_KERNEL_CAP_THREAD_LIST = 1u << 0,
@@ -200,6 +204,8 @@ int vdKernelGetThreadRegisters(unsigned int token, SceUID target_user_thread,
 // target state. A normal kernel build returns VD_KERNEL_ERROR_VFP_DISABLED;
 // the candidate implementation and capability bit exist only in an explicit
 // VITADEBUG_EXPERIMENTAL_VFP_SNAPSHOT build until hardware validation passes.
+// VD_KERNEL_ERROR_VFP_CONTEXT_UNAVAILABLE means the target has no readable
+// saved VFP context; every other negative result is a fatal snapshot failure.
 int vdKernelGetThreadVfpRegisters(
     unsigned int token,
     SceUID target_user_thread,
@@ -222,7 +228,7 @@ int vdKernelRenewHardwareDebug(unsigned int token, unsigned int lease_ms);
 
 // Insert or remove the single supported execution breakpoint or data
 // watchpoint. Mutation is allowed only while the caller owns both this hardware
-// token and the supplied active all-stop token. For the experimental v1.8
+// token and the supplied active all-stop token. For the current experimental
 // implementation, that stop must have no extra exempt thread and the original
 // stop controller must issue the mutation. Requests are copied and strictly
 // validated in kernel memory; flags must be zero.

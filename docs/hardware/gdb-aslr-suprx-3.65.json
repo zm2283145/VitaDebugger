@@ -1,0 +1,841 @@
+{
+  "address_change_observed": true,
+  "address_changes": [
+    {
+      "label": "initial_to_first_relaunch",
+      "main_after": [
+        "0x8107d000",
+        "0x81100000"
+      ],
+      "main_before": [
+        "0x81057000",
+        "0x810c0000"
+      ],
+      "observed": true,
+      "suprx_after": [
+        "0x810fb000",
+        "0x8114a000"
+      ],
+      "suprx_before": [
+        "0x81083000",
+        "0x81093000"
+      ]
+    },
+    {
+      "label": "first_to_second_relaunch",
+      "main_after": [
+        "0x8104a000",
+        "0x810c0000"
+      ],
+      "main_before": [
+        "0x8107d000",
+        "0x81100000"
+      ],
+      "observed": true,
+      "suprx_after": [
+        "0x810b5000",
+        "0x810b6000"
+      ],
+      "suprx_before": [
+        "0x810fb000",
+        "0x8114a000"
+      ]
+    }
+  ],
+  "artifacts": {
+    "main_elf": {
+      "sha256": "4520d0cfab31ea27f3b1f5c76b334d51ae20123ca2a702ebf1f493fac1914b84",
+      "size_bytes": 382652
+    },
+    "suprx_elf": {
+      "sha256": "dd10a31a97f638f49854098861cf1d185b8ae3ae22aa9739950fdacd859d58b4",
+      "size_bytes": 15660
+    },
+    "suprx_self": {
+      "sha256": "92a5848c19fe7ebad6e18adbbb4831208ee708b195ca34b4db71cef075228de2",
+      "size_bytes": 5057
+    },
+    "suprx_velf": {
+      "sha256": "3eadece609026f626490609458be46d7f1d308fe82fefc5899a9aa5fa0349e58",
+      "size_bytes": 17084
+    },
+    "vpk": {
+      "sha256": "a5c63ec8bdfd13fa165e76f1489ef3d5cdb032febf0e3d32c6d29cf654bdb70d",
+      "size_bytes": 195145
+    }
+  },
+  "companion": {
+    "relaunches": [
+      {
+        "kill": "Killed.",
+        "launch": "Launched.",
+        "phase": "solib_relaunch"
+      },
+      {
+        "kill": "Killed.",
+        "launch": "Launched.",
+        "phase": "explicit_regeneration"
+      }
+    ],
+    "version": "vitacompanion 1.06"
+  },
+  "finished_utc": "2026-09-14T03:55:46.716963+00:00",
+  "gdb": {
+    "version": "GNU gdb (GDB) 15.2"
+  },
+  "hardware": {
+    "device_class": "retail-handheld",
+    "firmware": "3.65",
+    "kernel_abi": "0x0001000b",
+    "kernel_plugin": {
+      "sha256": "b4bf79a53d88ef34c0f1ac00d29557f8b709e60acb35e14222e292d1f47792bf",
+      "size_bytes": 7908
+    }
+  },
+  "module_match": {
+    "reason": "embedded Vita module name",
+    "runtime_name": "UVDBAslrFixture",
+    "unmatched_module_count": 13
+  },
+  "module_name": "UVDBAslrFixture",
+  "result": "PASS",
+  "schema": "vitadebugger-aslr-suprx-live-gdb-v1",
+  "scripts": [
+    {
+      "mode": "solib",
+      "phase": "initial",
+      "sha256": "b5f954ec11cf83d10a14314f5a2c65b64bf9b00a66e44eb9c49986d319249d38"
+    },
+    {
+      "mode": "explicit",
+      "phase": "before_second_relaunch",
+      "sha256": "f77c6263890c8f4822e4801b9afcd2abf3216a058e455924fbe06e415c93921c"
+    },
+    {
+      "mode": "explicit",
+      "phase": "after_second_relaunch",
+      "sha256": "edfaee0a0b60de3b2ea84e4c6696a390d4b361856055b7aa26a8afd53b649709"
+    }
+  ],
+  "sessions": [
+    {
+      "addresses": {
+        "main": "0x81058b7c",
+        "suprx": "0x81083000"
+      },
+      "gdb_return_code": 0,
+      "hits": [
+        {
+          "function": "uvdb_aslr_main_breakpoint",
+          "kind": "main",
+          "line": 218,
+          "pc": "0x81058b84",
+          "sequence": "0x11000001",
+          "source": "test.c"
+        },
+        {
+          "function": "uvdb_aslr_suprx_breakpoint",
+          "kind": "suprx",
+          "line": 21,
+          "pc": "0x81083008",
+          "sequence": "0x22000001",
+          "source": "fixture.c"
+        }
+      ],
+      "mode": "solib",
+      "phase": "initial_solib",
+      "transcript_bytes": 1264,
+      "transcript_sha256": "ee0fcaa6e735709c073c61b597b7e6930258a8ee61973b39ad16ff5289c8b7b8"
+    },
+    {
+      "addresses": {
+        "main": "0x81058b7c",
+        "suprx": "0x81083000"
+      },
+      "gdb_return_code": 0,
+      "hits": [
+        {
+          "function": "uvdb_aslr_main_breakpoint",
+          "kind": "main",
+          "line": 218,
+          "pc": "0x81058b84",
+          "sequence": "0x11000002",
+          "source": "test.c"
+        },
+        {
+          "function": "uvdb_aslr_suprx_breakpoint",
+          "kind": "suprx",
+          "line": 21,
+          "pc": "0x81083008",
+          "sequence": "0x22000002",
+          "source": "fixture.c"
+        }
+      ],
+      "mode": "solib",
+      "phase": "same_process_solib_reconnect",
+      "transcript_bytes": 1264,
+      "transcript_sha256": "af1347337febd38e2a5799635ceef10b02ada4305d5944d6cdb8cb57488bbf42"
+    },
+    {
+      "addresses": {
+        "main": "0x8107eb7c",
+        "suprx": "0x810fb000"
+      },
+      "gdb_return_code": 0,
+      "hits": [
+        {
+          "function": "uvdb_aslr_main_breakpoint",
+          "kind": "main",
+          "line": 218,
+          "pc": "0x8107eb84",
+          "sequence": "0x11000003",
+          "source": "test.c"
+        },
+        {
+          "function": "uvdb_aslr_suprx_breakpoint",
+          "kind": "suprx",
+          "line": 21,
+          "pc": "0x810fb008",
+          "sequence": "0x22000003",
+          "source": "fixture.c"
+        }
+      ],
+      "mode": "solib",
+      "phase": "relaunched_solib_reuse",
+      "transcript_bytes": 1264,
+      "transcript_sha256": "fcf9187226bec3d5d9a9f877493013376e391505fb18c4dd167fdacfd50fc3c6"
+    },
+    {
+      "addresses": {
+        "main": "0x8107eb7c",
+        "suprx": "0x810fb000"
+      },
+      "gdb_return_code": 0,
+      "hits": [
+        {
+          "function": "uvdb_aslr_main_breakpoint",
+          "kind": "main",
+          "line": 218,
+          "pc": "0x8107eb84",
+          "sequence": "0x11000004",
+          "source": "test.c"
+        },
+        {
+          "function": "uvdb_aslr_suprx_breakpoint",
+          "kind": "suprx",
+          "line": 21,
+          "pc": "0x810fb008",
+          "sequence": "0x22000004",
+          "source": "fixture.c"
+        }
+      ],
+      "mode": "explicit",
+      "phase": "explicit_current_launch",
+      "transcript_bytes": 1588,
+      "transcript_sha256": "fc96160ffbbb42725177307777b17130d4f8906202ff96ee4e2ac0747679c77a"
+    },
+    {
+      "addresses": {
+        "main": "0x8104bb7c",
+        "suprx": "0x810b5000"
+      },
+      "gdb_return_code": 0,
+      "hits": [
+        {
+          "function": "uvdb_aslr_main_breakpoint",
+          "kind": "main",
+          "line": 218,
+          "pc": "0x8104bb84",
+          "sequence": "0x11000005",
+          "source": "test.c"
+        },
+        {
+          "function": "uvdb_aslr_suprx_breakpoint",
+          "kind": "suprx",
+          "line": 21,
+          "pc": "0x810b5008",
+          "sequence": "0x22000005",
+          "source": "fixture.c"
+        }
+      ],
+      "mode": "explicit",
+      "phase": "explicit_regenerated_after_relaunch",
+      "transcript_bytes": 1588,
+      "transcript_sha256": "585bfafc947826d8d4a8ead14de815938f44a5d3b4922bdb76e7b60167e4a5b0"
+    }
+  ],
+  "snapshots": [
+    {
+      "modules": [
+        {
+          "name": "UVDBAslrFixture",
+          "segments": [
+            "0x81083000",
+            "0x81093000"
+          ]
+        },
+        {
+          "name": "SceLibNetCtl",
+          "segments": [
+            "0xe05e30a0",
+            "0xe006a900"
+          ]
+        },
+        {
+          "name": "SceNet",
+          "segments": [
+            "0xe01914b0",
+            "0xe004e870"
+          ]
+        },
+        {
+          "name": "SceAppUtil",
+          "segments": [
+            "0x81088420",
+            "0x81082350"
+          ]
+        },
+        {
+          "name": "SceLibPvf",
+          "segments": [
+            "0xe00b9cf0",
+            "0xe001fd50"
+          ]
+        },
+        {
+          "name": "SceLibft2",
+          "segments": [
+            "0xe010c950",
+            "0xe001e280"
+          ]
+        },
+        {
+          "name": "SceLibDbg",
+          "segments": [
+            "0xe00660c0",
+            "0xe001b890"
+          ]
+        },
+        {
+          "name": "SceCommonDialog",
+          "segments": [
+            "0xe01d17b0",
+            "0xe0039680"
+          ]
+        },
+        {
+          "name": "SceShellSvc",
+          "segments": [
+            "0xe01a8b10",
+            "0xe003aaa0"
+          ]
+        },
+        {
+          "name": "SceGxm",
+          "segments": [
+            "0xe0080010",
+            "0xe001c7d0"
+          ]
+        },
+        {
+          "name": "SceGpuEs4User",
+          "segments": [
+            "0xe005c3d0",
+            "0xe001a760"
+          ]
+        },
+        {
+          "name": "SceAvcodecUser",
+          "segments": [
+            "0xe0052e00"
+          ]
+        },
+        {
+          "name": "SceDriverUser",
+          "segments": [
+            "0xe0025300",
+            "0xe0040730"
+          ]
+        },
+        {
+          "name": "SceLibKernel",
+          "segments": [
+            "0xe0006d50",
+            "0xe0019470"
+          ]
+        },
+        {
+          "name": "test.elf",
+          "segments": [
+            "0x81057000",
+            "0x810c0000"
+          ]
+        }
+      ],
+      "phase": "initial",
+      "qoffsets": {
+        "data": "0x810c0000",
+        "style": "segments",
+        "text": "0x81057000"
+      }
+    },
+    {
+      "modules": [
+        {
+          "name": "UVDBAslrFixture",
+          "segments": [
+            "0x81083000",
+            "0x81093000"
+          ]
+        },
+        {
+          "name": "SceLibNetCtl",
+          "segments": [
+            "0xe05e30a0",
+            "0xe006a900"
+          ]
+        },
+        {
+          "name": "SceNet",
+          "segments": [
+            "0xe01914b0",
+            "0xe004e870"
+          ]
+        },
+        {
+          "name": "SceAppUtil",
+          "segments": [
+            "0x81088420",
+            "0x81082350"
+          ]
+        },
+        {
+          "name": "SceLibPvf",
+          "segments": [
+            "0xe00b9cf0",
+            "0xe001fd50"
+          ]
+        },
+        {
+          "name": "SceLibft2",
+          "segments": [
+            "0xe010c950",
+            "0xe001e280"
+          ]
+        },
+        {
+          "name": "SceLibDbg",
+          "segments": [
+            "0xe00660c0",
+            "0xe001b890"
+          ]
+        },
+        {
+          "name": "SceCommonDialog",
+          "segments": [
+            "0xe01d17b0",
+            "0xe0039680"
+          ]
+        },
+        {
+          "name": "SceShellSvc",
+          "segments": [
+            "0xe01a8b10",
+            "0xe003aaa0"
+          ]
+        },
+        {
+          "name": "SceGxm",
+          "segments": [
+            "0xe0080010",
+            "0xe001c7d0"
+          ]
+        },
+        {
+          "name": "SceGpuEs4User",
+          "segments": [
+            "0xe005c3d0",
+            "0xe001a760"
+          ]
+        },
+        {
+          "name": "SceAvcodecUser",
+          "segments": [
+            "0xe0052e00"
+          ]
+        },
+        {
+          "name": "SceDriverUser",
+          "segments": [
+            "0xe0025300",
+            "0xe0040730"
+          ]
+        },
+        {
+          "name": "SceLibKernel",
+          "segments": [
+            "0xe0006d50",
+            "0xe0019470"
+          ]
+        },
+        {
+          "name": "test.elf",
+          "segments": [
+            "0x81057000",
+            "0x810c0000"
+          ]
+        }
+      ],
+      "phase": "same_process_reconnect",
+      "qoffsets": {
+        "data": "0x810c0000",
+        "style": "segments",
+        "text": "0x81057000"
+      }
+    },
+    {
+      "modules": [
+        {
+          "name": "UVDBAslrFixture",
+          "segments": [
+            "0x810fb000",
+            "0x8114a000"
+          ]
+        },
+        {
+          "name": "SceLibNetCtl",
+          "segments": [
+            "0xe05e30a0",
+            "0xe006a900"
+          ]
+        },
+        {
+          "name": "SceNet",
+          "segments": [
+            "0xe01914b0",
+            "0xe004e870"
+          ]
+        },
+        {
+          "name": "SceAppUtil",
+          "segments": [
+            "0x81150860",
+            "0x810faa70"
+          ]
+        },
+        {
+          "name": "SceLibPvf",
+          "segments": [
+            "0xe00b9cf0",
+            "0xe001fd50"
+          ]
+        },
+        {
+          "name": "SceLibft2",
+          "segments": [
+            "0xe010c950",
+            "0xe001e280"
+          ]
+        },
+        {
+          "name": "SceLibDbg",
+          "segments": [
+            "0xe00660c0",
+            "0xe001b890"
+          ]
+        },
+        {
+          "name": "SceCommonDialog",
+          "segments": [
+            "0xe01d17b0",
+            "0xe0039680"
+          ]
+        },
+        {
+          "name": "SceShellSvc",
+          "segments": [
+            "0xe01a8b10",
+            "0xe003aaa0"
+          ]
+        },
+        {
+          "name": "SceGxm",
+          "segments": [
+            "0xe0080010",
+            "0xe001c7d0"
+          ]
+        },
+        {
+          "name": "SceGpuEs4User",
+          "segments": [
+            "0xe005c3d0",
+            "0xe001a760"
+          ]
+        },
+        {
+          "name": "SceAvcodecUser",
+          "segments": [
+            "0xe0052e00"
+          ]
+        },
+        {
+          "name": "SceDriverUser",
+          "segments": [
+            "0xe0025300",
+            "0xe0040730"
+          ]
+        },
+        {
+          "name": "SceLibKernel",
+          "segments": [
+            "0xe0006d50",
+            "0xe0019470"
+          ]
+        },
+        {
+          "name": "test.elf",
+          "segments": [
+            "0x8107d000",
+            "0x81100000"
+          ]
+        }
+      ],
+      "phase": "first_relaunch",
+      "qoffsets": {
+        "data": "0x81100000",
+        "style": "segments",
+        "text": "0x8107d000"
+      }
+    },
+    {
+      "modules": [
+        {
+          "name": "UVDBAslrFixture",
+          "segments": [
+            "0x810fb000",
+            "0x8114a000"
+          ]
+        },
+        {
+          "name": "SceLibNetCtl",
+          "segments": [
+            "0xe05e30a0",
+            "0xe006a900"
+          ]
+        },
+        {
+          "name": "SceNet",
+          "segments": [
+            "0xe01914b0",
+            "0xe004e870"
+          ]
+        },
+        {
+          "name": "SceAppUtil",
+          "segments": [
+            "0x81150860",
+            "0x810faa70"
+          ]
+        },
+        {
+          "name": "SceLibPvf",
+          "segments": [
+            "0xe00b9cf0",
+            "0xe001fd50"
+          ]
+        },
+        {
+          "name": "SceLibft2",
+          "segments": [
+            "0xe010c950",
+            "0xe001e280"
+          ]
+        },
+        {
+          "name": "SceLibDbg",
+          "segments": [
+            "0xe00660c0",
+            "0xe001b890"
+          ]
+        },
+        {
+          "name": "SceCommonDialog",
+          "segments": [
+            "0xe01d17b0",
+            "0xe0039680"
+          ]
+        },
+        {
+          "name": "SceShellSvc",
+          "segments": [
+            "0xe01a8b10",
+            "0xe003aaa0"
+          ]
+        },
+        {
+          "name": "SceGxm",
+          "segments": [
+            "0xe0080010",
+            "0xe001c7d0"
+          ]
+        },
+        {
+          "name": "SceGpuEs4User",
+          "segments": [
+            "0xe005c3d0",
+            "0xe001a760"
+          ]
+        },
+        {
+          "name": "SceAvcodecUser",
+          "segments": [
+            "0xe0052e00"
+          ]
+        },
+        {
+          "name": "SceDriverUser",
+          "segments": [
+            "0xe0025300",
+            "0xe0040730"
+          ]
+        },
+        {
+          "name": "SceLibKernel",
+          "segments": [
+            "0xe0006d50",
+            "0xe0019470"
+          ]
+        },
+        {
+          "name": "test.elf",
+          "segments": [
+            "0x8107d000",
+            "0x81100000"
+          ]
+        }
+      ],
+      "phase": "explicit_before_second_relaunch",
+      "qoffsets": {
+        "data": "0x81100000",
+        "style": "segments",
+        "text": "0x8107d000"
+      }
+    },
+    {
+      "modules": [
+        {
+          "name": "UVDBAslrFixture",
+          "segments": [
+            "0x810b5000",
+            "0x810b6000"
+          ]
+        },
+        {
+          "name": "SceLibNetCtl",
+          "segments": [
+            "0xe05e30a0",
+            "0xe006a900"
+          ]
+        },
+        {
+          "name": "SceNet",
+          "segments": [
+            "0xe01914b0",
+            "0xe004e870"
+          ]
+        },
+        {
+          "name": "SceAppUtil",
+          "segments": [
+            "0x81110f90",
+            "0x810b43d0"
+          ]
+        },
+        {
+          "name": "SceLibPvf",
+          "segments": [
+            "0xe00b9cf0",
+            "0xe001fd50"
+          ]
+        },
+        {
+          "name": "SceLibft2",
+          "segments": [
+            "0xe010c950",
+            "0xe001e280"
+          ]
+        },
+        {
+          "name": "SceLibDbg",
+          "segments": [
+            "0xe00660c0",
+            "0xe001b890"
+          ]
+        },
+        {
+          "name": "SceCommonDialog",
+          "segments": [
+            "0xe01d17b0",
+            "0xe0039680"
+          ]
+        },
+        {
+          "name": "SceShellSvc",
+          "segments": [
+            "0xe01a8b10",
+            "0xe003aaa0"
+          ]
+        },
+        {
+          "name": "SceGxm",
+          "segments": [
+            "0xe0080010",
+            "0xe001c7d0"
+          ]
+        },
+        {
+          "name": "SceGpuEs4User",
+          "segments": [
+            "0xe005c3d0",
+            "0xe001a760"
+          ]
+        },
+        {
+          "name": "SceAvcodecUser",
+          "segments": [
+            "0xe0052e00"
+          ]
+        },
+        {
+          "name": "SceDriverUser",
+          "segments": [
+            "0xe0025300",
+            "0xe0040730"
+          ]
+        },
+        {
+          "name": "SceLibKernel",
+          "segments": [
+            "0xe0006d50",
+            "0xe0019470"
+          ]
+        },
+        {
+          "name": "test.elf",
+          "segments": [
+            "0x8104a000",
+            "0x810c0000"
+          ]
+        }
+      ],
+      "phase": "second_relaunch",
+      "qoffsets": {
+        "data": "0x810c0000",
+        "style": "segments",
+        "text": "0x8104a000"
+      }
+    }
+  ],
+  "started_utc": "2026-09-14T03:55:09.294032+00:00",
+  "title_id": "SLRS00001"
+}

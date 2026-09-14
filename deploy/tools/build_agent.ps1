@@ -12,6 +12,7 @@ param(
     [string] $Msys2RuntimePath,
 
     [switch] $EnableExperimentalDisplayUi,
+    [switch] $DisableLiveAreaAssets,
 
     [ValidateRange(1, 256)]
     [int] $Jobs = [Math]::Max(1, [Environment]::ProcessorCount)
@@ -147,6 +148,75 @@ function Invoke-Checked {
     if ($LASTEXITCODE -ne 0) {
         throw "$Description failed with exit code $LASTEXITCODE."
     }
+}
+
+function Get-StreamSha256Lower {
+    param([System.IO.Stream] $Stream)
+
+    $sha256 = [Security.Cryptography.SHA256]::Create()
+    try {
+        $digest = $sha256.ComputeHash($Stream)
+        return ([BitConverter]::ToString($digest)).Replace("-", "").ToLowerInvariant()
+    } finally {
+        $sha256.Dispose()
+    }
+}
+
+function Assert-VpkLiveAreaAssets {
+    param(
+        [string] $VpkPath,
+        [string] $AssetRoot
+    )
+
+    $expectedAssets = [ordered]@{
+        "sce_sys/icon0.png" = Join-Path $AssetRoot "icon0.png"
+        "sce_sys/pic0.png" = Join-Path $AssetRoot "pic0.png"
+        "sce_sys/livearea/contents/bg.png" = Join-Path $AssetRoot "livearea\contents\bg.png"
+        "sce_sys/livearea/contents/startup.png" = Join-Path $AssetRoot "livearea\contents\startup.png"
+        "sce_sys/livearea/contents/template.xml" = Join-Path $AssetRoot "livearea\contents\template.xml"
+    }
+    foreach ($sourcePath in $expectedAssets.Values) {
+        if (-not (Test-Path -LiteralPath $sourcePath -PathType Leaf)) {
+            throw "Required LiveArea source asset is missing: '$sourcePath'."
+        }
+    }
+
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $archive = [IO.Compression.ZipFile]::OpenRead($VpkPath)
+    $verifiedHashes = [ordered]@{}
+    try {
+        foreach ($entryName in $expectedAssets.Keys) {
+            $matches = @($archive.Entries | Where-Object { $_.FullName -ceq $entryName })
+            if ($matches.Count -ne 1) {
+                throw (
+                    "VPK must contain exactly one '$entryName' entry; found {0}." -f
+                    $matches.Count
+                )
+            }
+
+            $sourcePath = $expectedAssets[$entryName]
+            $sourceLength = (Get-Item -LiteralPath $sourcePath).Length
+            $sourceHash = (Get-FileHash -LiteralPath $sourcePath -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($matches[0].Length -ne $sourceLength) {
+                throw "VPK LiveArea entry '$entryName' differs in length from its reviewed source."
+            }
+
+            $entryStream = $matches[0].Open()
+            try {
+                $entryHash = Get-StreamSha256Lower -Stream $entryStream
+            } finally {
+                $entryStream.Dispose()
+            }
+            if ($entryHash -cne $sourceHash) {
+                throw "VPK LiveArea entry '$entryName' differs from its reviewed source."
+            }
+            $verifiedHashes[$entryName] = $sourceHash
+        }
+    } finally {
+        $archive.Dispose()
+    }
+
+    return $verifiedHashes
 }
 
 function Assert-DirectChildPath {
@@ -369,10 +439,17 @@ $summaries = @()
 $buildLock = $null
 $displayUiCMakeValue = if ($EnableExperimentalDisplayUi) { "ON" } else { "OFF" }
 $displayUiDescription = if ($EnableExperimentalDisplayUi) {
-    "enabled (experimental direct framebuffer)"
+    "enabled (opt-in native vita2d interface; retail 3.65 lifecycle gate passed)"
 } else {
     "disabled (headless lifecycle-safe build)"
 }
+$liveAreaAssetsCMakeValue = if ($DisableLiveAreaAssets) { "OFF" } else { "ON" }
+$liveAreaAssetsDescription = if ($DisableLiveAreaAssets) {
+    "disabled by explicit build override"
+} else {
+    "enabled and verified byte-for-byte in VPK"
+}
+$liveAreaAssetRoot = Join-Path $sourceDirectory "assets\sce_sys"
 
 try {
     $env:VITASDK = $effectiveVitaSdk
@@ -414,6 +491,7 @@ try {
             "-DVDEV_AGENT_TITLE_ID=$($variantConfig.AgentTitle)",
             "-DVDEV_ONLY_TARGET_TITLE_ID=$($variantConfig.OnlyTarget)",
             "-DVDEV_ENABLE_INSTALL=$($variantConfig.EnableInstall)",
+            "-DVDEV_ENABLE_LIVEAREA_ASSETS=$liveAreaAssetsCMakeValue",
             "-DVDEV_ENABLE_DISPLAY_UI=$displayUiCMakeValue"
         )
         Invoke-Checked -Executable $resolvedCMake -Arguments $configureArguments -Description ("CMake configuration for " + $variantConfig.OutputName)
@@ -430,6 +508,11 @@ try {
             if ((Get-Item -LiteralPath $requiredArtifact).Length -le 0) {
                 throw "Build produced an empty artifact '$requiredArtifact'."
             }
+        }
+        $liveAreaAssetHashes = if ($DisableLiveAreaAssets) {
+            $null
+        } else {
+            Assert-VpkLiveAreaAssets -VpkPath $builtVpk -AssetRoot $liveAreaAssetRoot
         }
 
         $ebootBytes = [IO.File]::ReadAllBytes($builtEboot)
@@ -495,11 +578,18 @@ try {
                 "self_type=$($variantConfig.SelfType)",
                 "self_auth_id=0x$expectedAuthIdHex",
                 "display_ui=$displayUiDescription",
+                "livearea_assets=$liveAreaAssetsDescription",
                 "metadata_sync_policy=$metadataSyncPolicy",
                 "purpose=$($variantConfig.Purpose)",
                 "private_key_embedded=no",
                 "note=The trusted Ed25519 public key is compiled into the agent."
             )
+            if ($null -ne $liveAreaAssetHashes) {
+                foreach ($entryName in $liveAreaAssetHashes.Keys) {
+                    $metadataName = $entryName.Replace("/", "_").Replace(".", "_")
+                    $buildInfo += "livearea_asset_${metadataName}_sha256=$($liveAreaAssetHashes[$entryName])"
+                }
+            }
             [IO.File]::WriteAllLines(
                 (Join-Path $stagingDirectory "BUILD-INFO.txt"),
                 $buildInfo,

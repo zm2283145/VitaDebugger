@@ -110,12 +110,23 @@ not the MSYS2 root or its `usr\bin` directory. CMake and VitaSDK perform the
 remaining compiler and packaging checks during configuration and compilation.
 
 Production artifacts are headless by default and do not compile or link a
-display helper. Passing `-EnableExperimentalDisplayUi` to the build helper adds
-the direct-framebuffer status interface from VitaSDK's
-`samples/common/debugScreen.c`. Only that opt-in configuration requires the
-installed helper and its header, and CMake checks their expected SHA-256 hashes
-before compiling them. Their upstream and license notices are recorded in
-[THIRD_PARTY.md](THIRD_PARTY.md).
+graphics library. Passing `-EnableExperimentalDisplayUi` to the build helper
+adds an opt-in native 960x544 interface built with the installed libvita2d and
+the Vita's default PGF font. It shows graphical operation cards, stage
+milestones, determinate verification progress, indeterminate installation
+activity, and distinct waiting, completion, and error states. Its retail 3.65
+lifecycle gate passed six consecutive post-refresh launch/exit cycles: three
+SceShell peel closures and three Circle cleanup exits, with no GPU fault or
+LiveArea hang. One earlier non-repeating GPU fault remains documented. The
+interface stays opt-in while broader stress and firmware coverage accumulate.
+See [the hardware report](../docs/hardware/vitadevdeploy-ui-3.65.md) and the
+upstream/license notice in [THIRD_PARTY.md](THIRD_PARTY.md).
+
+Agent VPKs include the project's reviewed home-screen bubble, full-screen
+artwork, LiveArea background, and gate image by default. The required source
+files, exact dimensions, PNG constraints, and minimal Vita `template.xml` are
+documented in [agent/assets/README.md](agent/assets/README.md). CMake rejects
+missing, malformed, resized, or interlaced inputs before compilation.
 
 ## Verify the checkout
 
@@ -233,11 +244,16 @@ display test only, opt in explicitly:
 .\tools\build_agent.ps1 -PublicKeyHex $PublicKeyHex -Variant InstallerVerify -EnableExperimentalDisplayUi
 ```
 
-The experimental interface installs a process-owned CDRAM framebuffer
+The opt-in interface installs a process-owned CDRAM framebuffer
 directly. Close that build only by pressing Circle while it is still waiting
 for a job, or let its one-shot operation finish and exit normally. Never use
 Vita Companion's `destroy` command or another force-kill on a display-enabled
 build; abrupt termination can bypass framebuffer cleanup and wedge LiveArea.
+
+Artwork packaging is independent of the in-app status interface and is enabled
+for both headless and display builds. For a temporary diagnostic artifact that
+intentionally has no custom bubble or LiveArea artwork, pass
+`-DisableLiveAreaAssets`. Normal published builds should not use that override.
 
 The outputs are:
 
@@ -253,7 +269,13 @@ Each directory contains `eboot.bin`, `VitaDevDeployAgent.vpk`,
 
 `BUILD-INFO.txt` records whether `display_ui` is the default
 `disabled (headless lifecycle-safe build)` or the explicitly enabled
-experimental framebuffer interface.
+framebuffer interface and its current hardware-validation status. It also
+records whether LiveArea artwork
+was enabled and the source SHA-256 of every packaged artwork entry. Before
+publishing, the helper opens the finished VPK and verifies each entry's size
+and SHA-256 against the reviewed source. The existing VPK line in
+`SHA256SUMS.txt` therefore authenticates the executable, metadata, and complete
+artwork set together.
 
 > **Do not install either bootstrap VPK.** A bootstrap artifact uses the
 > existing test application's title ID. Only its `eboot.bin` is temporarily
@@ -271,7 +293,7 @@ key, which is expected; they never receive the private key.
 Run the remaining hardware commands from one PowerShell session:
 
 ```powershell
-$VitaIp = "10.1.1.93"
+$VitaIp = "192.168.1.42"
 $PrivateKey = (Resolve-Path -LiteralPath ".\local\deploy_private.pem").Path
 
 function Invoke-PythonChecked {
@@ -347,8 +369,8 @@ the restore command ready before activating a bootstrap.
 
 Use only the default headless bootstrap artifacts in this recovery workflow.
 The helper may stop the exact temporary title while restoring its original
-eboot, which is incompatible with the experimental direct-framebuffer build's
-normal-cleanup requirement.
+eboot, which is incompatible with the opt-in graphical build's normal-cleanup
+requirement.
 
 The stock Vita Companion 1.06 service running in the system shell may allow
 reads from `ux0:app` while refusing creation of the temporary files needed for
@@ -467,8 +489,8 @@ the system installer may already have consumed some or all of the package. A
 successful run clears the marker only after its durable success result commits.
 
 Once PromoterUtil accepts a package, state or result-query errors are retried
-without a Vita-side deadline, and the agent keeps the Vita awake. An
-experimental display-enabled build reports that installer status is
+without a Vita-side deadline, and the agent keeps the Vita awake. The opt-in
+graphical build reports that installer status is
 temporarily unavailable and continues showing elapsed time. The agent
 deliberately does not unload the service or claim failure while an asynchronous
 installation may still be running. If the process or Vita is interrupted
@@ -514,8 +536,8 @@ py -3 -m host.vitadevdeploy deploy "C:\path\to\MyHomebrew.vpk" --vita $VitaIp --
 This explicit mode reads the waiting agent's current one-time challenge and
 does not contact Vita Companion's command port before uploading the job. The
 host cannot prove process liveness from a challenge file alone, so use the flag
-only when that running session is independently known to be current. An
-experimental display build makes the idle state visible; for a headless build,
+only when that running session is independently known to be current. The
+opt-in graphical build makes the idle state visible; for a headless build,
 reserve this option for a run you deliberately launched and know has not yet
 accepted a job. A challenge left by a stopped or crashed process is stale and
 will eventually produce a result timeout; do not retry the same session. Each
@@ -524,13 +546,14 @@ contacted only after a durable install success to start the installed title;
 use `install` or `verify` when no post-result launch is wanted.
 
 The production build is headless; follow progress and the final result from the
-host. With `-EnableExperimentalDisplayUi`, the Vita instead shows a lightweight
-text interface with a stage-based progress bar and explanatory detail. During
-PromoterUtil work it displays the installer state and elapsed time. A completed
-job identifies the target title; a failed job displays its stage, decimal and
+host. With `-EnableExperimentalDisplayUi`, the Vita instead shows a native
+960x544 interface with operation cards, stage milestones, a progress bar, and
+explanatory detail. Request validation and verification use determinate stage
+progress. PromoterUtil has no byte-progress API, so installation is shown with
+an animated indeterminate bar plus its state and elapsed time. A completed job
+identifies the target title; a failed job displays its stage, decimal and
 hexadecimal error code, and the same concise reason written to the host result
-and crash journal. The bar represents workflow stages and ongoing activity,
-not an exact byte-level installation percentage.
+and crash journal.
 
 Circle requests a clean exit only while the agent is waiting for its first
 committed job. It is not an install cancel button and is not checked after job
@@ -585,8 +608,24 @@ after the first installation.
 - Normal host deployment starts from LiveArea and never force-closes the
   current application. `--reuse-running-agent` is explicit because a challenge
   file alone cannot prove that its process is still alive.
-- The optional direct-framebuffer status interface is experimental and cannot
-  be safely force-killed; production artifacts therefore default to headless.
+- The optional graphical status interface passed six consecutive post-refresh
+  launch/exit cycles on retail 3.65: three SceShell peel closures and three
+  Circle cleanup exits, with no GPU fault or LiveArea hang. One earlier direct
+  launch reportedly produced a GPU fault that did not recur during any of
+  those repetitions. The interface remains opt-in; production artifacts
+  default to headless while broader stress and firmware coverage accumulate.
+- Updating an already installed app may leave SceShell's cached generic
+  LiveArea background visible even when the packaged and installed asset bytes
+  match. The ordinary system database update triggered by removing and
+  reinserting the memory card made the new background visible on the tested
+  retail 3.65 system. This was a media/content rescan, not deletion and rebuild
+  of `app.db`; the presentation cache does not affect the in-app status
+  interface or signed deployment protocol.
+- No public VitaSDK API directly requests the same SceShell content rescan.
+  A future integrated device service may investigate a narrowly scoped cache
+  notification, but it must not simulate storage removal/remount or delete
+  `ur0:shell/db/app.db` as part of an ordinary deployment. Those are explicit
+  recovery operations with different failure and data-loss risks.
 - Installation uses the single fixed shallow stage `ux0:/data/vdd_pkg`. A
   pre-existing stage or `ux0:data/VitaDevDeploy/promote.state` marker blocks the
   next install instead of being overwritten, and anything left after
@@ -628,6 +667,6 @@ or parent-directory I/O substep without changing the enforced sync policy.
 
 VitaDevDeploy is distributed under GPL-3.0-only. The project adapts parts of
 VitaShell's package preparation, VitaDB-Downloader's package-promotion flow,
-and it vendors Monocypher for Ed25519 verification. Experimental display builds
-also compile VitaSDK's debug-screen sample. Exact provenance and licenses are
-recorded in [THIRD_PARTY.md](THIRD_PARTY.md).
+and it vendors Monocypher for Ed25519 verification. Opt-in display builds link
+the VitaSDK-packaged libvita2d library and use the system PGF font. Exact
+provenance and licenses are recorded in [THIRD_PARTY.md](THIRD_PARTY.md).

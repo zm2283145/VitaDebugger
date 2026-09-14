@@ -15,9 +15,8 @@ order, or whether FPSCR is included. Consequently, the D0-D31 layout cannot be
 claimed from VitaSDK alone.
 
 Here, "3.60" identifies the VitaSDK NID database entry; it is not a claim that
-this path has been validated on firmware 3.60. The project's hardware result
-currently comes from the owner-confirmed retail Vita running system software
-3.65.
+this path has been validated on firmware 3.60. The documented hardware gate
+ran on a retail handheld Vita running system software 3.65.
 
 The implementation therefore fails closed. Normal kernel builds omit the VFP
 capability, do not import the undocumented call, and return
@@ -35,8 +34,19 @@ The experimental syscall retains the existing stop-session security boundary:
 - The candidate D32 array lives in a 64-byte-aligned global scratch object,
   avoiding a large allocation on the syscall stack. It is preceded by 256
   bytes of canaries and followed by 4096 bytes of canaries.
-- Any changed canary rejects the call. Only the initialized public snapshot
-  structure can be copied to the caller.
+- Both canary regions are checked after the undocumented call whether it
+  succeeds or fails. Any changed canary overrides every other result and
+  rejects the call. Only the initialized public snapshot structure can be
+  copied to the caller.
+- VitaSDK's exact raw `SCE_KERNEL_ERROR_CAN_NOT_USE_VFP` result and the exact
+  `SCE_KERNEL_ERROR_ILLEGAL_PERMISSION` result observed for valid suspended
+  non-VFP threads on retail 3.65 are normalized immediately at this API
+  boundary to `VD_KERNEL_ERROR_VFP_CONTEXT_UNAVAILABLE`. The public result uses
+  VitaSDK's stable `SCE_KERNEL_ERROR_CAN_NOT_USE_VFP` encoding so it survives
+  the syscall boundary unchanged. It is the only failure for which the GDB
+  stub may retain the ARM core bank and emit unavailable VFP slots. Session,
+  ownership, target lookup, CPU-register, user-copy, canary, layout, and every
+  other raw failure reject the complete register read.
 - Both raw FPSCR banks from `ksceKernelGetThreadCpuRegisters` are returned. The
   D32 v1 GDB mapping selects entry 0, as established by the known-pattern
   hardware probe, while retaining both entries as evidence and for future
@@ -47,8 +57,8 @@ The experimental syscall retains the existing stop-session security boundary:
 
 Canaries detect a mismatched nearby layout; they do not turn an undocumented
 ABI into a memory-safe contract. The call therefore remains absent from normal
-builds even after the known-pattern layout gate; it stays explicit opt-in until
-the live GDB lifecycle gate is also completed.
+builds. Its known-pattern and live-GDB gates pass on the documented retail 3.65
+baseline, but every new firmware baseline must repeat both before enabling it.
 
 ## Required hardware gate
 
@@ -65,12 +75,11 @@ It then starts an owned, leased stop session and verifies:
 6. Ending the session resumes the worker, which restores its callee-saved VFP
    state and exits before a bounded timeout.
 
-Every probe line has now passed on the project's one retail Vita running system
-software 3.65. Vita TV, other firmware versions, development hardware, and
-other kernel-plugin combinations have not passed this gate. The feature remains
-explicit opt-in while the next gate verifies a foreign stopped thread with GDB
-(`d0`, `d31`, and `fpscr`) and then exercises continue, detach, reconnect, and
-watchdog recovery. Register writes remain out of scope.
+Every probe line passed on a retail handheld Vita running system software 3.65.
+This particular gate has not been repeated on Vita TV, other firmware versions,
+development hardware, or other kernel-plugin combinations. The later live GDB
+gate also passes; the feature remains explicit opt-in because the underlying
+kernel ABI is undocumented. Register writes remain out of scope.
 
 ### First hardware result
 
@@ -99,8 +108,21 @@ captured the expected exact D0 and D31 endpoints, reported
 and observed the worker exit with status zero after restoring its saved state.
 The unedited result is preserved as
 [the corrected all-pass VFP probe](hardware/kernel-vfp-probe-v8-bank0-pass.jpg).
-This completes the known-pattern layout gate; the live GDB lifecycle test is
-the remaining promotion gate.
+This completes the known-pattern layout gate. The subsequent foreign-thread
+live GDB gate also passed D0, D31, and FPSCR through continue/interrupt, clean
+detach/reconnect, transport loss without `D`, and final reconnect/detach on the
+same retail 3.65 baseline. Its machine-readable record is
+[the retail 3.65 live-GDB evidence](hardware/gdb-vfp-live-3.65.json). The
+capability remains opt-in because the snapshot ABI is undocumented and must be
+revalidated for every firmware and hardware baseline.
+
+The final ABI v1.11 evidence replaced an earlier v1.8 run whose client treated
+nearly every negative snapshot result as if the target merely lacked a saved
+VFP context. Two diagnostic builds then identified the exact retail 3.65
+non-VFP result and the syscall-boundary encoding rule. ABI v1.11 keeps the
+strict policy, validates the canaries on error paths, and passes the complete
+live-GDB lifecycle gate. Mixed artifacts deliberately fail ABI negotiation
+rather than weakening this rule.
 
 ## External reference policy
 

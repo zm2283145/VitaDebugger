@@ -14,9 +14,16 @@
 #ifdef UVDB_KERNEL_THREAD_CONTROL
 #include "vitadebug_kernel.h"
 #endif
+#ifdef UVDB_GDB_ASLR_FIXTURE
+#include "tests/aslr_fixture/control.h"
+#endif
 
 #if defined(UVDB_GDB_VFP_FIXTURE) && !defined(UVDB_KERNEL_VFP_READS)
 #error "UVDB_GDB_VFP_FIXTURE requires UVDB_KERNEL_VFP_READS"
+#endif
+
+#if defined(UVDB_GDB_ASLR_FIXTURE) && !defined(UVDB_KERNEL_THREAD_CONTROL)
+#error "UVDB_GDB_ASLR_FIXTURE requires UVDB_KERNEL_THREAD_CONTROL"
 #endif
 
 #ifndef UVDB_DEBUGNET_PORT
@@ -42,6 +49,13 @@ volatile unsigned int uvdb_worker_step_result[2];
 static volatile unsigned int gdb_vfp_fixture_ready;
 static volatile unsigned int gdb_vfp_fixture_release;
 static uint64_t gdb_vfp_fixture_pattern[32] __attribute__((aligned(8)));
+#endif
+#ifdef UVDB_GDB_ASLR_FIXTURE
+volatile uint32_t uvdb_aslr_main_request;
+volatile uint32_t uvdb_aslr_main_acknowledged;
+volatile uint32_t uvdb_aslr_main_result;
+struct uvdb_aslr_fixture_control uvdb_aslr_fixture_control
+    __attribute__((aligned(4)));
 #endif
 #ifdef UVDB_DEBUGNET_LIFECYCLE_TEST
 static volatile int debugnet_stress;
@@ -196,6 +210,17 @@ __attribute__((noinline)) static int step_target(int value)
     return value;
 }
 
+#ifdef UVDB_GDB_ASLR_FIXTURE
+/* Main-executable half of the live ASLR/source-breakpoint gate. */
+__attribute__((noinline, noclone, used, visibility("default")))
+uint32_t uvdb_aslr_main_breakpoint(uint32_t sequence)
+{
+    uint32_t value = sequence ^ UVDB_ASLR_MAIN_RESULT_XOR;
+    __asm__ volatile("" : "+r"(value) :: "memory");
+    return value;
+}
+#endif
+
 int main(void)
 {
     int sock = socket(AF_INET, SOCK_DGRAM, 0);
@@ -232,6 +257,43 @@ int main(void)
             VD_KERNEL_MAX_THREADS);
         hold_failed_gate();
     }
+#endif
+#ifdef UVDB_GDB_ASLR_FIXTURE
+    memset(&uvdb_aslr_fixture_control, 0,
+           sizeof(uvdb_aslr_fixture_control));
+    uvdb_aslr_fixture_control.abi_version =
+        UVDB_ASLR_FIXTURE_ABI_VERSION;
+    uvdb_aslr_fixture_control.size = sizeof(uvdb_aslr_fixture_control);
+    uvdb_aslr_main_request = 0;
+    uvdb_aslr_main_acknowledged = 0;
+    uvdb_aslr_main_result = 0;
+    struct uvdb_aslr_fixture_args aslr_fixture_args = {
+        .abi_version = UVDB_ASLR_FIXTURE_ABI_VERSION,
+        .size = sizeof(aslr_fixture_args),
+        .control = &uvdb_aslr_fixture_control,
+    };
+    int aslr_start_status = SCE_KERNEL_START_FAILED;
+    SceUID aslr_module = sceKernelLoadStartModule(
+        "app0:/module/uvdb_aslr_fixture.suprx",
+        sizeof(aslr_fixture_args), &aslr_fixture_args, 0, NULL,
+        &aslr_start_status);
+    for(int wait = 0; aslr_module >= 0 &&
+                         aslr_start_status == SCE_KERNEL_START_SUCCESS &&
+                         __atomic_load_n(&uvdb_aslr_fixture_control.ready,
+                                         __ATOMIC_ACQUIRE) == 0 &&
+                         wait < 2000; ++wait)
+        usleep(1000);
+    uint32_t aslr_ready = __atomic_load_n(
+        &uvdb_aslr_fixture_control.ready, __ATOMIC_ACQUIRE);
+    int aslr_gate_pass = aslr_module >= 0 &&
+                         aslr_start_status == SCE_KERNEL_START_SUCCESS &&
+                         aslr_ready == UVDB_ASLR_FIXTURE_READY_MAGIC;
+    psvDebugScreenPrintf(
+        "ASLR SUPRX fixture: %s module=%08X start=%08X ready=%08X\n",
+        aslr_gate_pass ? "PASS" : "FAIL", aslr_module,
+        aslr_start_status, aslr_ready);
+    if(!aslr_gate_pass)
+        hold_failed_gate();
 #endif
     SceUID modules[128];
     SceSize module_count = sizeof(modules) / sizeof(modules[0]);
@@ -331,6 +393,21 @@ int main(void)
 #endif
     for(int i = 0;; i++)
     {
+#ifdef UVDB_GDB_ASLR_FIXTURE
+        uint32_t aslr_main_sequence = __atomic_load_n(
+            &uvdb_aslr_main_request, __ATOMIC_ACQUIRE);
+        uint32_t aslr_main_done = __atomic_load_n(
+            &uvdb_aslr_main_acknowledged, __ATOMIC_ACQUIRE);
+        if(aslr_main_sequence != 0 && aslr_main_sequence != aslr_main_done)
+        {
+            uint32_t aslr_result =
+                uvdb_aslr_main_breakpoint(aslr_main_sequence);
+            __atomic_store_n(&uvdb_aslr_main_result, aslr_result,
+                             __ATOMIC_RELEASE);
+            __atomic_store_n(&uvdb_aslr_main_acknowledged,
+                             aslr_main_sequence, __ATOMIC_RELEASE);
+        }
+#endif
 #if defined(UVDB_DEBUGNET_HOST) && defined(UVDB_DEBUGNET_LIFECYCLE_TEST)
         if(i == 20)
         {

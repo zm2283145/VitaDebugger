@@ -122,7 +122,7 @@ class Harness:
             }[action]
 
         self.manager = bootstrap_eboot.BootstrapEbootManager(
-            "10.1.1.93",
+            "192.0.2.10",
             "SLRS00001",
             sha(original),
             backup_dir=self.backup_dir,
@@ -159,14 +159,14 @@ class BootstrapEbootTests(unittest.TestCase):
             [
                 "status",
                 "--vita-ip",
-                "10.1.1.93",
+                "192.0.2.10",
                 "--title",
                 "SLRS00001",
                 "--expected-sha256",
                 "a" * 64,
             ]
         )
-        self.assertEqual(parsed.vita_ip, "10.1.1.93")
+        self.assertEqual(parsed.vita_ip, "192.0.2.10")
 
     def test_companion_commands_use_port_1338_newline_and_title_scope(self) -> None:
         class FakeSocket:
@@ -199,10 +199,10 @@ class BootstrapEbootTests(unittest.TestCase):
             return_value=sock,
         ) as connect:
             reply = bootstrap_eboot.send_companion_command(
-                "10.1.1.93", "SLRS00001", "kill"
+                "192.0.2.10", "SLRS00001", "kill"
             )
         connect.assert_called_once_with(
-            ("10.1.1.93", bootstrap_eboot.COMPANION_PORT),
+            ("192.0.2.10", bootstrap_eboot.COMPANION_PORT),
             timeout=bootstrap_eboot.NETWORK_TIMEOUT_SECONDS,
         )
         self.assertEqual(bootstrap_eboot.COMPANION_PORT, 1338)

@@ -169,7 +169,7 @@ Install the resulting `uvdb-test.vpk`, launch the test application, and leave it
 running. From the repository root on the development computer, run:
 
 ```powershell
-py -3 tools/gdb_console_smoke.py --host 10.1.1.93 --reconnect
+py -3 tools/gdb_console_smoke.py --host VITA_IP --reconnect
 ```
 
 Change the host address if the Vita uses a different address. The script runs

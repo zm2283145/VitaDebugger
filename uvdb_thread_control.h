@@ -28,6 +28,11 @@ struct uvdb_resume_plan {
     int32_t step_thread;
 };
 
+struct uvdb_step_target {
+    uint32_t address;
+    uint8_t breakpoint_size;
+};
+
 void uvdb_thread_inventory_reset(struct uvdb_thread_inventory* inventory);
 int uvdb_thread_inventory_add(struct uvdb_thread_inventory* inventory,
                               int32_t id);
@@ -95,6 +100,53 @@ int uvdb_rsp_parse_vcont(
     size_t size,
     const struct uvdb_thread_inventory* inventory,
     struct uvdb_resume_plan* plan);
+
+/* Evaluate an A32 condition code against one saved CPSR. Reserved condition
+ * 0xf is deliberately false here; the unconditional BLX-immediate encoding is
+ * handled explicitly by uvdb_arm_plan_direct_step(). */
+int uvdb_arm_condition_passed(unsigned int condition, uint32_t cpsr);
+
+/* Plan direct A32 control flow without reading target memory. Returns 1 when
+ * the instruction was handled, 0 when the caller should use another decoder
+ * or normal PC+4 fallthrough, and -1 for invalid arguments. The returned
+ * address is canonicalized for its selected ARM/Thumb instruction set. */
+int uvdb_arm_plan_direct_step(
+    uint32_t instruction,
+    uint32_t pc,
+    uint32_t cpsr,
+    const uint32_t registers[16],
+    struct uvdb_step_target* target);
+
+/* Conservatively identify A32 instructions whose sequential PC+4 trap could
+ * be bypassed. Callers can reject any such form they have not decoded. */
+int uvdb_arm_instruction_may_write_pc(uint32_t instruction);
+
+/* Plan the host-decodable 16-bit Thumb branches. The same return convention
+ * as uvdb_arm_plan_direct_step applies. */
+int uvdb_thumb16_plan_direct_step(
+    uint16_t instruction,
+    uint32_t pc,
+    uint32_t cpsr,
+    const uint32_t registers[16],
+    struct uvdb_step_target* target);
+
+/* Plan Thumb-2 B.W, BL, BLX-immediate, and conditional B.W pairs. */
+int uvdb_thumb32_plan_branch_step(
+    uint16_t first,
+    uint16_t second,
+    uint32_t pc,
+    uint32_t cpsr,
+    struct uvdb_step_target* target);
+
+/* Identify Thumb control transfers that must not use a sequential fallback. */
+int uvdb_thumb16_instruction_may_write_pc(uint16_t instruction);
+int uvdb_thumb32_instruction_may_write_pc(
+    uint16_t first,
+    uint16_t second);
+
+/* Extract and advance the split Thumb ITSTATE field stored in CPSR. */
+unsigned int uvdb_thumb_itstate_from_cpsr(uint32_t cpsr);
+unsigned int uvdb_thumb_itstate_advance(unsigned int itstate);
 
 /* An uncertain stop may be released only when no executable UDF patch needs
  * all-stop protection. This small policy gate is shared with host regression

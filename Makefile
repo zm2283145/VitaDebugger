@@ -1,7 +1,7 @@
 all: libuvdb.a
 
 clean:
-	rm -f *.o tests/*.o *.a *.elf *.velf eboot.bin param.sfo *.vpk *.psp2dmp test-rsp test-rsp.exe test-rsp-console test-rsp-console.exe test-register-bank test-register-bank.exe test-thread-control test-thread-control.exe test-console-queue test-console-queue.exe test-console-transport test-console-transport.exe kernel/dipsw-read-probe/test-record kernel/dipsw-read-probe/test-record.exe kernel/dipsw-set-restore-probe/test-record kernel/dipsw-set-restore-probe/test-record.exe kernel/dipsw-dbgvcr-probe/test-record kernel/dipsw-dbgvcr-probe/test-record.exe
+	rm -f *.o tests/*.o *.a *.elf *.velf eboot.bin param.sfo *.vpk *.psp2dmp test-rsp test-rsp.exe test-rsp-console test-rsp-console.exe test-register-bank test-register-bank.exe test-thread-control test-thread-control.exe test-console-queue test-console-queue.exe test-console-transport test-console-transport.exe test-vfp-policy test-vfp-policy.exe kernel/dipsw-read-probe/test-record kernel/dipsw-read-probe/test-record.exe kernel/dipsw-set-restore-probe/test-record kernel/dipsw-set-restore-probe/test-record.exe kernel/dipsw-dbgvcr-probe/test-record kernel/dipsw-dbgvcr-probe/test-record.exe $(UVDB_ASLR_FIXTURE_OBJECT) $(UVDB_ASLR_FIXTURE_ELF) $(UVDB_ASLR_FIXTURE_VELF) $(UVDB_ASLR_FIXTURE_SELF)
 
 package: uvdb-test.vpk
 
@@ -15,6 +15,11 @@ KUBRIDGE_DIR ?= ../kubridge-review
 KUBRIDGE_LIB_DIR ?= $(KUBRIDGE_DIR)/build-local
 VITADEBUG_KERNEL_DIR ?= kernel
 VITADEBUG_KERNEL_BUILD_DIR ?= $(VITADEBUG_KERNEL_DIR)/build
+UVDB_ASLR_FIXTURE_BUILD_DIR ?= build-aslr-fixture
+UVDB_ASLR_FIXTURE_OBJECT := $(UVDB_ASLR_FIXTURE_BUILD_DIR)/uvdb_aslr_fixture.o
+UVDB_ASLR_FIXTURE_ELF := $(UVDB_ASLR_FIXTURE_BUILD_DIR)/uvdb_aslr_fixture.elf
+UVDB_ASLR_FIXTURE_VELF := $(UVDB_ASLR_FIXTURE_BUILD_DIR)/uvdb_aslr_fixture.velf
+UVDB_ASLR_FIXTURE_SELF := $(UVDB_ASLR_FIXTURE_BUILD_DIR)/uvdb_aslr_fixture.suprx
 
 EXTRA_CFLAGS := -O0 -g -Wall -Wextra -I $(VITASDK)/share/gcc-arm-vita-eabi/samples/common -I $(KUBRIDGE_DIR)
 EXTRA_LDFLAGS := $(CFLAGS) -Wl,-q -L $(KUBRIDGE_LIB_DIR) -lSceDisplay_stub -lSceNet_stub -lSceNetPs_stub -lSceKernelModulemgr_stub -lkubridge_stub -pthread
@@ -42,6 +47,7 @@ ifneq ($(UVDB_KERNEL_THREAD_CONTROL),1)
 $(error UVDB_KERNEL_VFP_READS=1 requires UVDB_KERNEL_THREAD_CONTROL=1)
 endif
 override CFLAGS += -DUVDB_KERNEL_VFP_READS
+UVDB_VFP_OBJECTS := uvdb_vfp_policy.o
 endif
 
 ifeq ($(UVDB_GDB_VFP_FIXTURE),1)
@@ -49,6 +55,15 @@ ifneq ($(UVDB_KERNEL_VFP_READS),1)
 $(error UVDB_GDB_VFP_FIXTURE=1 requires UVDB_KERNEL_VFP_READS=1)
 endif
 override EXTRA_CFLAGS += -DUVDB_GDB_VFP_FIXTURE
+endif
+
+ifeq ($(UVDB_GDB_ASLR_FIXTURE),1)
+ifneq ($(UVDB_KERNEL_THREAD_CONTROL),1)
+$(error UVDB_GDB_ASLR_FIXTURE=1 requires UVDB_KERNEL_THREAD_CONTROL=1)
+endif
+override EXTRA_CFLAGS += -DUVDB_GDB_ASLR_FIXTURE
+UVDB_PACKAGE_EXTRA_PREREQUISITES += $(UVDB_ASLR_FIXTURE_SELF)
+UVDB_PACKAGE_EXTRA_ARGS += -a $(UVDB_ASLR_FIXTURE_SELF)=module/uvdb_aslr_fixture.suprx
 endif
 
 override CFLAGS += -I $(KUBRIDGE_DIR) -Wall -Wextra -g
@@ -70,6 +85,8 @@ endif
 
 uvdb.o: protocol/arm_vfp_target_xml.inc
 
+uvdb_vfp_policy.o: uvdb_vfp_policy.c uvdb_vfp_policy.h $(VITADEBUG_KERNEL_DIR)/include/vitadebug_kernel.h
+
 test.o: test.c *.h
 	arm-vita-eabi-gcc $< $(CFLAGS) $(EXTRA_CFLAGS) -c -o $@
 
@@ -79,7 +96,7 @@ psvDebugScreen.o: $(VITASDK)/share/gcc-arm-vita-eabi/samples/common/debugScreen.
 tests/thumb_step_returns.o: tests/thumb_step_returns.S
 	arm-vita-eabi-gcc $< $(CFLAGS) -c -o $@
 
-libuvdb.a: uvdb.o uvdb_registers.o uvdb_rsp.o uvdb_thread_control.o uvdb_console.o uvdb_console_transport.o uvdb_debugnet.o stdio_redirect.o
+libuvdb.a: uvdb.o uvdb_registers.o uvdb_rsp.o uvdb_thread_control.o $(UVDB_VFP_OBJECTS) uvdb_console.o uvdb_console_transport.o uvdb_debugnet.o stdio_redirect.o
 	arm-vita-eabi-ar rcs $@ $^
 
 HOST_CC ?= cc
@@ -88,15 +105,17 @@ ifeq ($(OS),Windows_NT)
 HOST_THREAD_FLAGS ?= -pthread -static
 HOST_EXEEXT ?= .exe
 HOST_CC_RUN ?= powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File tools/invoke-vita-env.ps1 $(HOST_CC)
+HOST_PYTHON ?= py -3
 else
 HOST_THREAD_FLAGS ?= -pthread
 HOST_EXEEXT ?=
 HOST_CC_RUN ?= $(HOST_CC)
+HOST_PYTHON ?= python3
 endif
 
-.PHONY: host-tests host-test-rsp host-test-rsp-console host-test-register-bank host-test-thread-control host-test-console-queue host-test-console-transport host-test-dipsw-probe-record host-test-dipsw-set-restore-record host-test-dipsw-dbgvcr-record
+.PHONY: host-tests host-test-rsp host-test-rsp-console host-test-register-bank host-test-thread-control host-test-vfp-policy host-test-console-queue host-test-console-transport host-test-symbols host-test-vfp-lifecycle host-test-aslr-lifecycle host-test-target-xml host-test-dipsw-probe-record host-test-dipsw-set-restore-record host-test-dipsw-dbgvcr-record aslr-fixture
 
-host-tests: host-test-rsp host-test-rsp-console host-test-register-bank host-test-thread-control host-test-console-queue host-test-console-transport host-test-dipsw-probe-record host-test-dipsw-set-restore-record host-test-dipsw-dbgvcr-record
+host-tests: host-test-rsp host-test-rsp-console host-test-register-bank host-test-thread-control host-test-vfp-policy host-test-console-queue host-test-console-transport host-test-symbols host-test-vfp-lifecycle host-test-aslr-lifecycle host-test-target-xml host-test-dipsw-probe-record host-test-dipsw-set-restore-record host-test-dipsw-dbgvcr-record
 
 host-test-rsp: test-rsp$(HOST_EXEEXT)
 	./test-rsp$(HOST_EXEEXT)
@@ -110,11 +129,26 @@ host-test-register-bank: test-register-bank$(HOST_EXEEXT)
 host-test-thread-control: test-thread-control$(HOST_EXEEXT)
 	./test-thread-control$(HOST_EXEEXT)
 
+host-test-vfp-policy: test-vfp-policy$(HOST_EXEEXT)
+	./test-vfp-policy$(HOST_EXEEXT)
+
 host-test-console-queue: test-console-queue$(HOST_EXEEXT)
 	./test-console-queue$(HOST_EXEEXT)
 
 host-test-console-transport: test-console-transport$(HOST_EXEEXT)
 	./test-console-transport$(HOST_EXEEXT)
+
+host-test-symbols:
+	$(HOST_PYTHON) -m unittest tests.host.test_gdb_symbols
+
+host-test-vfp-lifecycle:
+	$(HOST_PYTHON) -m unittest tests.host.test_gdb_vfp_lifecycle
+
+host-test-aslr-lifecycle:
+	$(HOST_PYTHON) -m unittest tests.host.test_gdb_aslr_lifecycle
+
+host-test-target-xml:
+	$(HOST_PYTHON) -m unittest tests.host.test_target_xml
 
 host-test-dipsw-probe-record: kernel/dipsw-read-probe/test-record$(HOST_EXEEXT)
 	./kernel/dipsw-read-probe/test-record$(HOST_EXEEXT)
@@ -137,6 +171,9 @@ test-register-bank$(HOST_EXEEXT): uvdb_registers.c uvdb_registers.h tests/host/t
 test-thread-control$(HOST_EXEEXT): uvdb_thread_control.c uvdb_thread_control.h tests/host/test_thread_control.c
 	$(HOST_CC_RUN) $(HOST_CFLAGS) uvdb_thread_control.c tests/host/test_thread_control.c -o $@
 
+test-vfp-policy$(HOST_EXEEXT): uvdb_vfp_policy.c uvdb_vfp_policy.h kernel/include/vitadebug_kernel.h tests/host/test_vfp_policy.c tests/host/include/psp2/types.h
+	$(HOST_CC_RUN) $(HOST_CFLAGS) -Itests/host/include -Ikernel/include uvdb_vfp_policy.c tests/host/test_vfp_policy.c -o $@
+
 test-console-queue$(HOST_EXEEXT): uvdb_console.c uvdb_console.h tests/host/test_console_queue.c
 	$(HOST_CC_RUN) $(HOST_CFLAGS) -DUVDB_CONSOLE_TESTING uvdb_console.c tests/host/test_console_queue.c $(HOST_THREAD_FLAGS) -o $@
 
@@ -152,6 +189,27 @@ kernel/dipsw-set-restore-probe/test-record$(HOST_EXEEXT): kernel/dipsw-set-resto
 kernel/dipsw-dbgvcr-probe/test-record$(HOST_EXEEXT): kernel/dipsw-dbgvcr-probe/test_record.c kernel/dipsw-dbgvcr-probe/include/vd_dipsw_dbgvcr_record.h
 	$(HOST_CC_RUN) $(HOST_CFLAGS) kernel/dipsw-dbgvcr-probe/test_record.c -o $@
 
+aslr-fixture: $(UVDB_ASLR_FIXTURE_SELF)
+
+$(UVDB_ASLR_FIXTURE_BUILD_DIR):
+ifeq ($(OS),Windows_NT)
+	powershell.exe -NoLogo -NoProfile -NonInteractive -Command "[void][IO.Directory]::CreateDirectory('$@')"
+else
+	mkdir -p $@
+endif
+
+$(UVDB_ASLR_FIXTURE_OBJECT): tests/aslr_fixture/fixture.c tests/aslr_fixture/control.h | $(UVDB_ASLR_FIXTURE_BUILD_DIR)
+	arm-vita-eabi-gcc -std=gnu11 -O0 -g -Wall -Wextra -Werror -fno-inline -fno-omit-frame-pointer -fvisibility=hidden -D__PSP2_USER__ -I tests/aslr_fixture -c $< -o $@
+
+$(UVDB_ASLR_FIXTURE_ELF): $(UVDB_ASLR_FIXTURE_OBJECT)
+	arm-vita-eabi-gcc -nostdlib -Wl,-q $< -lSceLibKernel_stub_weak -lSceKernelThreadMgr_stub_weak -o $@
+
+$(UVDB_ASLR_FIXTURE_VELF): $(UVDB_ASLR_FIXTURE_ELF) tests/aslr_fixture/exports.yml
+	vita-elf-create -e tests/aslr_fixture/exports.yml $< $@
+
+$(UVDB_ASLR_FIXTURE_SELF): $(UVDB_ASLR_FIXTURE_VELF)
+	vita-make-fself -c $< $@
+
 test.elf: psvDebugScreen.o test.o tests/thumb_step_returns.o libuvdb.a
 	arm-vita-eabi-gcc $^ $(LDFLAGS) $(EXTRA_LDFLAGS) -o $@
 
@@ -164,5 +222,5 @@ test.velf: test.elf
 eboot.bin: test.velf
 	vita-make-fself $< $@
 
-uvdb-test.vpk: eboot.bin param.sfo
-	vita-pack-vpk -s param.sfo -b eboot.bin $@
+uvdb-test.vpk: eboot.bin param.sfo $(UVDB_PACKAGE_EXTRA_PREREQUISITES)
+	vita-pack-vpk -s param.sfo -b eboot.bin $(UVDB_PACKAGE_EXTRA_ARGS) $@
