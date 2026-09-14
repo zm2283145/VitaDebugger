@@ -82,6 +82,15 @@ detaches. It then:
    commands so GDB applies the current `qOffsets` and library segment addresses
    on every connection.
 
+When this command runs immediately after a remote application launch, add
+`--connect-wait 15` (or another value from 0 through 60 seconds). The option
+retries only failed TCP connection establishment while the new process opens
+port 1234. The first successful socket is the actual symbol-snapshot session;
+the tool does not consume the VitaDebugger listener with a separate readiness
+probe. An RSP negotiation, snapshot, or detach failure after TCP accepts is not
+retried on a second connection. The default value is `0`, which retains one
+immediate connection attempt.
+
 Start GDB with the generated file:
 
 ```powershell
@@ -252,6 +261,13 @@ arguments are deliberately allowlisted; extra command files and `-ex`/shell
 overrides are rejected so they cannot bypass the generated identity-checked
 script. The state JSON is stable machine-readable input for a pre-launch task
 or later Debug Adapter Protocol integration.
+
+For a complete Windows VS Code example that keeps the device IP and local tool
+paths in ignored per-user configuration, see the
+[one-click live-edit demo](../examples/vscode-debug-demo/README.md). Its
+pre-launch task builds, deploys, verifies the installed executable, consumes the
+first GDB connection for this snapshot, and leaves the next connection for the
+IDE without using a separate readiness probe.
 
 ## Automated main-plus-user-SUPRX gate
 

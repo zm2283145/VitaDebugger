@@ -1,0 +1,34 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Vita: Build, deploy, and debug demo",
+      "type": "cppdbg",
+      "request": "launch",
+      "program": "${workspaceFolder}/build/vscode-debug-demo.elf",
+      "cwd": "${workspaceFolder}",
+      "MIMode": "gdb",
+      "targetArchitecture": "arm",
+      "miDebuggerPath": "__GENERATED_GDB_PATH__",
+      "stopAtEntry": false,
+      "stopAtConnect": false,
+      "externalConsole": false,
+      "preLaunchTask": "Vita: Build, deploy, and prepare debug",
+      "postDebugTask": "Vita: Stop demo",
+      "customLaunchSetupCommands": [
+        {
+          "description": "Load verified Vita symbols and connect",
+          "text": "__GENERATED_SYMBOL_SOURCE_COMMAND__",
+          "ignoreFailures": false
+        },
+        {
+          "description": "Break where the live value can be edited",
+          "text": "-break-insert -f vscode_demo_breakpoint",
+          "ignoreFailures": false
+        }
+      ],
+      "unknownBreakpointHandling": "stop",
+      "launchCompleteCommand": "exec-continue"
+    }
+  ]
+}

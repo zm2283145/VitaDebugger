@@ -21,7 +21,7 @@ $argumentIndex = 0
         "-validateonly" {
             $validateOnly = $true
             $argumentIndex++
-            continue
+            continue argumentParsing
         }
         "-vitasdkpath" {
             if ($argumentIndex + 1 -ge $invocationArguments.Count) {
@@ -29,7 +29,7 @@ $argumentIndex = 0
             }
             $vitaSdkPath = [string] $invocationArguments[$argumentIndex + 1]
             $argumentIndex += 2
-            continue
+            continue argumentParsing
         }
         "-msys2runtimepath" {
             if ($argumentIndex + 1 -ge $invocationArguments.Count) {
@@ -37,7 +37,7 @@ $argumentIndex = 0
             }
             $msys2RuntimePath = [string] $invocationArguments[$argumentIndex + 1]
             $argumentIndex += 2
-            continue
+            continue argumentParsing
         }
         "-msys2usrbinpath" {
             if ($argumentIndex + 1 -ge $invocationArguments.Count) {
@@ -45,7 +45,7 @@ $argumentIndex = 0
             }
             $msys2UsrBinPath = [string] $invocationArguments[$argumentIndex + 1]
             $argumentIndex += 2
-            continue
+            continue argumentParsing
         }
         "--" {
             $argumentIndex++

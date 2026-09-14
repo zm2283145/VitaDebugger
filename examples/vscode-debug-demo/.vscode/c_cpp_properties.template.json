@@ -1,0 +1,36 @@
+{
+  "configurations": [
+    {
+      "name": "VitaSDK ARM",
+      "compilerPath": "",
+      "intelliSenseMode": "windows-gcc-arm",
+      "cStandard": "gnu11",
+      "cppStandard": "gnu++17",
+      "defines": [
+        "__PSP2__",
+        "__PSP2_USER__"
+      ],
+      "includePath": [
+        "${workspaceFolder}",
+        "__GENERATED_REPO_ROOT__",
+        "__GENERATED_REPO_SRC__",
+        "__GENERATED_KUBRIDGE_DIR__",
+        "__GENERATED_VITASDK_INCLUDE__",
+        "__GENERATED_DEBUGSCREEN_INCLUDE__"
+      ],
+      "browse": {
+        "path": [
+          "${workspaceFolder}",
+          "__GENERATED_REPO_ROOT__",
+          "__GENERATED_REPO_SRC__",
+          "__GENERATED_KUBRIDGE_DIR__",
+          "__GENERATED_VITASDK_INCLUDE__",
+          "__GENERATED_DEBUGSCREEN_INCLUDE__"
+        ],
+        "limitSymbolsToIncludedHeaders": true
+      }
+    }
+  ],
+  "version": 4,
+  "enableConfigurationSquiggles": true
+}

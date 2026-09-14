@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "vitaIp": "YOUR_VITA_IP",
+  "ports": {
+    "ftp": 1337,
+    "companion": 1338,
+    "gdb": 1234
+  },
+  "vitaSdkPath": "C:\\vitasdk",
+  "msys2RuntimePath": "C:\\msys64\\mingw64\\bin",
+  "msys2UsrBinPath": "C:\\msys64\\usr\\bin",
+  "kubridgeDir": "C:\\path\\to\\kubridge",
+  "kubridgeLibDir": "C:\\path\\to\\kubridge\\build-local",
+  "deployPrivateKeyPath": "C:\\private\\path\\deploy_private.pem",
+  "opensslPath": "C:\\msys64\\usr\\bin\\openssl.exe"
+}

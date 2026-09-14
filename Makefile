@@ -152,7 +152,12 @@ host-test-console-transport: test-console-transport$(HOST_EXEEXT)
 	./test-console-transport$(HOST_EXEEXT)
 
 host-test-symbols:
-	$(HOST_PYTHON) -m unittest tests.host.test_gdb_symbols tests.host.test_gdb_build_identity tests.host.test_gdb_symbol_refresh
+	$(HOST_PYTHON) -m unittest \
+		tests.host.test_gdb_symbols \
+		tests.host.test_gdb_symbols_connect_wait \
+		tests.host.test_gdb_build_identity \
+		tests.host.test_gdb_symbol_refresh \
+		tests.host.test_vscode_demo_session
 
 host-test-vfp-lifecycle:
 	$(HOST_PYTHON) -m unittest tests.host.test_gdb_vfp_lifecycle

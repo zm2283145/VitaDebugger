@@ -1,0 +1,110 @@
+{
+  "artifacts": {
+    "eboot": {
+      "sha256": "4909559a9e227e74ad2a42fb95bafd6a13323f3fb214acc338bb61fe3c6df7a8",
+      "size_bytes": 542270
+    },
+    "elf": {
+      "sha256": "db1f401a90f028151520fdd84289f4981a755604a1ce76c679da947f424b4819",
+      "size_bytes": 464884
+    },
+    "vpk": {
+      "sha256": "f11cb3abf5bcc0388ff24b6c91ab67d35797d000ffaea78f269d94c870d24ae3",
+      "size_bytes": 229226
+    }
+  },
+  "build": {
+    "configuration": [
+      "-O0",
+      "-g",
+      "DEMO_GDB_PORT=1234",
+      "library-only persistent debugger",
+      "optional kernel companion not linked"
+    ],
+    "source_base_commit": "9df9d80",
+    "source_tree": "working-tree VS Code integration build"
+  },
+  "deployment": {
+    "agent": "VitaDevDeploy",
+    "installed_build_verification": "local+installed",
+    "result": "installed_and_launched",
+    "title_id": "UVDBDEMO1"
+  },
+  "gdb": {
+    "frontend": "GDB/MI command sequence matching the VS Code C++ adapter",
+    "frontend_result": "PASS",
+    "source_path_with_spaces": "PASS",
+    "version": "GNU gdb (GDB) 15.2"
+  },
+  "hardware": {
+    "device_class": "retail-handheld",
+    "firmware": "3.65"
+  },
+  "recorded_utc_minute": "2026-09-14T20:21Z",
+  "result": "PASS",
+  "safety": {
+    "arbitrary_process_kill_used": false,
+    "kernel_companion_linked": false,
+    "kernel_plugin_changed_for_test": false,
+    "private_key_committed": false,
+    "readiness_probe_consumed_gdb_socket": false,
+    "stop_scope": "UVDBDEMO1 only"
+  },
+  "schema": "vitadebugger-vscode-demo-gdb-mi-live-v1",
+  "sessions": [
+    {
+      "name": "verified ASLR snapshot",
+      "result": "PASS",
+      "steps": [
+        "connected to the first deterministic uvdb_enter stop",
+        "verified the installed eboot against the retained ELF/VPK identity",
+        "captured qOffsets and loaded modules",
+        "detached cleanly without a readiness probe"
+      ]
+    },
+    {
+      "name": "VS Code-equivalent live edit",
+      "result": "PASS",
+      "steps": [
+        "loaded the generated symbol script through GDB/MI",
+        "attached with a readable PC in main.c",
+        "inserted vscode_demo_breakpoint and continued",
+        "stopped at main.c:38",
+        "created a Watch-style variable object with value 1",
+        "assigned demo_value=42 through -var-assign",
+        "read back 42",
+        "continued through the software-breakpoint step-over without E16",
+        "interrupted the running target",
+        "read back 42 again",
+        "detached cleanly"
+      ]
+    },
+    {
+      "name": "persistent reconnect",
+      "result": "PASS",
+      "steps": [
+        "reattached to the library-only persistent server",
+        "received a readable server-thread PC",
+        "read demo_value=42",
+        "detached cleanly"
+      ]
+    },
+    {
+      "name": "actual VS Code F5 UI session",
+      "result": "PASS",
+      "steps": [
+        "pressed F5 to build, deploy, launch, verify identity, load ASLR symbols, and attach",
+        "stopped at the source breakpoint in vscode_demo_breakpoint",
+        "observed demo_value in the Watch panel",
+        "changed demo_value from 1 to 42 while paused",
+        "resumed and observed the successful live change on the Vita",
+        "paused again and completed source-level code-step operations"
+      ]
+    }
+  ],
+  "validation_boundary": {
+    "actual_vscode_f5_ui_gate": "PASS",
+    "dynamic_module_hot_load_refresh": "not tested",
+    "firmware_other_than_3_65": "not tested"
+  }
+}

@@ -20,6 +20,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import time
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -38,6 +39,8 @@ MAX_ELF_SECTIONS = 4096
 MAX_STRING_TABLE = 1024 * 1024
 MAX_SCAN_FILES = 4096
 MAX_SYMBOL_STATE = 1024 * 1024
+MAX_CONNECT_WAIT = 60.0
+CONNECT_RETRY_DELAY = 0.1
 SCAN_SUFFIXES = {".elf", ".velf", ".suprx", ".skprx"}
 SYMBOL_STATE_FORMAT = "VITADEBUGGER-SYMBOL-STATE-1"
 
@@ -639,10 +642,68 @@ def _rsp_frame(payload: bytes) -> bytes:
     return b"$" + payload + f"#{sum(payload) & 0xff:02x}".encode("ascii")
 
 
+def _connect_rsp_socket(
+    host: str,
+    port: int,
+    timeout: float,
+    connect_wait: float,
+) -> socket.socket:
+    """Return the first successfully connected socket within a bounded window.
+
+    A successful TCP connection is the RSP session, not a readiness probe. Only
+    failures raised by ``socket.create_connection`` are retryable; callers must
+    never retry negotiation or any later protocol operation on another socket.
+    """
+
+    if not 0.0 <= connect_wait <= MAX_CONNECT_WAIT:
+        raise SymbolError(
+            f"connect wait must be between 0 and {MAX_CONNECT_WAIT:g} seconds"
+        )
+    deadline = time.monotonic() + connect_wait
+    attempts = 0
+    last_error: OSError | None = None
+    while True:
+        remaining = deadline - time.monotonic()
+        if last_error is not None and remaining <= 0:
+            raise SymbolError(
+                f"GDB TCP endpoint {host}:{port} did not become ready within "
+                f"{connect_wait:g} seconds after {attempts} attempts: {last_error}"
+            ) from last_error
+        attempt_timeout = timeout
+        if connect_wait > 0:
+            attempt_timeout = min(timeout, max(remaining, 0.001))
+        attempts += 1
+        try:
+            return socket.create_connection(
+                (host, port), timeout=attempt_timeout
+            )
+        except OSError as exc:
+            if connect_wait == 0:
+                raise
+            last_error = exc
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise SymbolError(
+                    f"GDB TCP endpoint {host}:{port} did not become ready within "
+                    f"{connect_wait:g} seconds after {attempts} attempts: {exc}"
+                ) from exc
+            time.sleep(min(CONNECT_RETRY_DELAY, remaining))
+
+
 class RspClient:
-    def __init__(self, host: str, port: int, timeout: float):
-        self.socket = socket.create_connection((host, port), timeout=timeout)
-        self.socket.settimeout(timeout)
+    def __init__(
+        self,
+        host: str,
+        port: int,
+        timeout: float,
+        connect_wait: float = 0.0,
+    ):
+        self.socket = _connect_rsp_socket(host, port, timeout, connect_wait)
+        try:
+            self.socket.settimeout(timeout)
+        except Exception:
+            self.socket.close()
+            raise
         self.buffer = bytearray()
         self.ack_mode = True
         self.packet_size = 4096
@@ -764,8 +825,13 @@ class RspClient:
         raise ProtocolError("library XML exceeds the configured chunk limit")
 
 
-def query_target(host: str, port: int, timeout: float) -> TargetSnapshot:
-    client = RspClient(host, port, timeout)
+def query_target(
+    host: str,
+    port: int,
+    timeout: float,
+    connect_wait: float = 0.0,
+) -> TargetSnapshot:
+    client = RspClient(host, port, timeout, connect_wait)
     detached = False
     try:
         client.negotiate()
@@ -1372,6 +1438,18 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--host", required=True)
     parser.add_argument("--port", type=int, default=1234)
     parser.add_argument("--timeout", type=float, default=10.0)
+    parser.add_argument(
+        "--connect-wait",
+        type=float,
+        default=0.0,
+        metavar="SECONDS",
+        help=(
+            "wait up to SECONDS for a freshly launched GDB TCP endpoint "
+            f"(0 disables retries; maximum {MAX_CONNECT_WAIT:g}); only failed "
+            "connection attempts are retried, and the first successful socket "
+            "is used for the snapshot"
+        ),
+    )
     parser.add_argument("--search-root", action="append", type=Path, default=[])
     parser.add_argument("--module", action="append", default=[], metavar="NAME=PATH")
     parser.add_argument("--main-module", help="expected runtime main module name")
@@ -1528,7 +1606,12 @@ def run(args: argparse.Namespace) -> int:
             installed_verified = True
         except build_identity.BuildIdentityError as exc:
             raise SymbolError(f"build identity check failed: {exc}") from exc
-    snapshot = query_target(args.host, args.port, args.timeout)
+    snapshot = query_target(
+        args.host,
+        args.port,
+        args.timeout,
+        getattr(args, "connect_wait", 0.0),
+    )
     main_module = reconcile_main(main_image, snapshot, args.main_module)
     matches, unmatched = match_modules(
         snapshot,
@@ -1612,6 +1695,10 @@ def main() -> int:
     args = build_argument_parser().parse_args()
     if not 1 <= args.port <= 65535 or args.timeout <= 0:
         raise SymbolError("port and timeout must be positive and in range")
+    if not 0.0 <= args.connect_wait <= MAX_CONNECT_WAIT:
+        raise SymbolError(
+            f"connect wait must be between 0 and {MAX_CONNECT_WAIT:g} seconds"
+        )
     if not 1 <= args.ftp_port <= 65535 or args.ftp_timeout <= 0:
         raise SymbolError("FTP port and timeout must be positive and in range")
     if not SAFE_HOST.fullmatch(args.host):

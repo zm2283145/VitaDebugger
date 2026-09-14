@@ -393,6 +393,16 @@ static int uvdb_refresh_thread_inventory(void)
         }
 #else
     uvdb_thread_inventory_reset(&uvdb_inventory);
+    /* In a library-only persistent attach, the private server thread owns the
+     * only register context that can be read safely. Expose it as the stopped
+     * thread for this synthetic trap even though helpers remain hidden during
+     * ordinary application stops. Once an application breakpoint fires, its
+     * exception thread becomes the normal first inventory entry. */
+    if(uvdb_exception_thread > 0 &&
+       uvdb_is_controller_thread(uvdb_exception_thread) &&
+       uvdb_thread_inventory_add(&uvdb_inventory,
+                                 uvdb_exception_thread) < 0)
+        return -1;
     if(uvdb_selection.stopped > 0 &&
        uvdb_should_inventory_thread(uvdb_selection.stopped) &&
        uvdb_thread_inventory_add(&uvdb_inventory,
@@ -3249,6 +3259,20 @@ static void uvdb_main_loop(KuKernelExceptionContext* ctx, int stop_signal)
             if(has_address && !invalid &&
                legacy_thread != uvdb_exception_thread)
                 invalid = 1;
+#ifndef UVDB_KERNEL_THREAD_CONTROL
+            /* GDB names the stopped thread with positive Hc while stepping over
+             * a software breakpoint. In a cooperative library-only process
+             * with exactly that one visible application thread, process scope
+             * is equivalent and is the only truthful execution model: there is
+             * no kernel lease with which to promise selected-thread isolation.
+             * Keep multi-thread and address-override requests fail-closed. */
+            if(!invalid && !has_address && stepping &&
+               plan.scope == UVDB_RESUME_SCOPE_STOPPED_THREAD &&
+               uvdb_inventory.count == 1 &&
+               uvdb_inventory.ids[0] == uvdb_exception_thread &&
+               plan.step_thread == uvdb_exception_thread)
+                plan.scope = UVDB_RESUME_SCOPE_PROCESS;
+#endif
 
             int resume_result = invalid ? -1 :
                 uvdb_apply_resume_plan(&plan, ctx, has_address, address);

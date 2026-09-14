@@ -126,6 +126,17 @@ status includes:
   process refresh, and five main-plus-user-SUPRX source-breakpoint sessions
   across detach/reconnect and two fresh-ASLR relaunches. ASLR correctness and
   the verified-build milestone are complete.
+- An initial Windows VS Code workflow and isolated sample application now turn
+  F5 into build, signed deployment, launch, installed-build verification,
+  live-ASLR symbol loading, GDB attachment, and exact-title cleanup. The Vita
+  IPv4 address, ports, SDK paths, and private-key path live only in ignored
+  per-user files; the demo exposes a visible variable for breakpoint-time
+  mutation. Its build/toolchain gates and the exact GDB/MI attach, Watch-style
+  assignment, continue, interrupt, detach, and reconnect sequence pass on
+  retail 3.65 hardware; see the
+  [validation record](docs/hardware/vscode-debug-demo-gdb-mi-3.65.json). The
+  actual VS Code UI-driven F5 session also passes build/deploy/attach, source
+  breakpoint, Watch-value mutation, resume, pause, and source stepping.
 - A completed bounded `stdout`/`stderr` bridge that emits GDB `O` packets only
   after no-ack negotiation, never gives application threads ownership of the
   RSP socket, and isolates output between reconnect generations. Native tests
@@ -390,8 +401,12 @@ trusted private LAN. It does not add another kernel plugin. It has its own
 
 ### Desktop and IDE tools
 
-The end goal also includes ready-to-use GDB and LLDB command files, VS Code
-build/deploy/debug configurations, a Debug Adapter Protocol bridge, a live log
+The repository now includes an initial
+[VS Code build/deploy/debug sample](examples/vscode-debug-demo/README.md). Each
+developer enters their own Vita IPv4 address once; ignored local configuration
+then drives VitaDevDeploy, installed-build verification, ASLR symbol capture,
+and the single GDB connection used by F5. The end goal additionally includes
+ready-to-use LLDB command files, a Debug Adapter Protocol bridge, a live log
 console, a trace viewer, and documented APIs that other IDE extensions can
 consume. A later authenticated Vita service may consolidate the narrowly
 required file transfer, title launch/stop, screenshot, wake/no-sleep, debugger,
@@ -1165,6 +1180,10 @@ exact matching unstripped ELF on the development computer.
   hardware, and other plugin combinations have not completed the same gates.
 - Build-directory isolation, exported CMake/VitaSDK packages, CI, and a
   project-wide license are not finished.
+- The initial IDE workflow targets Windows, VS Code, and Microsoft's C/C++ GDB
+  adapter. It requires a paired VitaDevDeploy agent and Vita Companion on the
+  same trusted LAN. It safely stops only its fixed sample title; hot-loaded
+  module refresh, other IDEs, and a native DAP adapter remain later work.
 - Long-running reconnect, shutdown, multithread, and fault stress testing is
   still in progress.
 
@@ -1186,10 +1205,10 @@ exact matching unstripped ELF on the development computer.
    register access path. Independently gate a page-protection/data-abort software
    watchpoint design with strict ownership, access decoding, single-step/rearm,
    cleanup, and false-positive tests.
-6. Stress same-process hot module load/unload churn and integrate the existing
-   command-driven symbol refresh into IDE tasks. This is dynamic-module and IDE
-   convenience work; the ASLR and verified-build correctness milestone is
-   complete.
+6. Generalize the hardware-validated VS Code F5 workflow, then stress
+   same-process hot module load/unload churn and add automatic in-session symbol
+   refresh. This is dynamic-module and IDE convenience work; the ASLR,
+   verified-build, and initial VS Code hardware milestones are complete.
 7. Add the profiler binary drain/receiver and desktop viewer, host-application
    instrumentation, guarded PC/PMU ownership and restoration, and explicit
    VitaGL/SceGxm hooks.
@@ -1248,6 +1267,9 @@ exact matching unstripped ELF on the development computer.
   native tests, and integration documentation.
 - `deploy/`: self-contained signed host/Vita remote deployment subproject,
   including its agent, host CLI, tests, security documentation, and license.
+- `examples/vscode-debug-demo/`: isolated sample app plus generated-local VS
+  Code configuration for one-click build, deploy, ASLR-aware attach, live
+  variable editing, and exact-title stop.
 - `tests/`: Vita fixtures and offline host protocol tests.
 - `kernel/`: narrow kernel companion, generated user stubs, the stable boundary
   probe, the fail-closed VFP layout probe, and the disposable staged hardware-
