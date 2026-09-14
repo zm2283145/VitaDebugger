@@ -20,7 +20,7 @@ stacks remain unvalidated unless an individual result says otherwise.
 | 32 ARM/Thumb software breakpoints | Implemented; 32 slots | Add breakpoint-overlap, malformed-packet, disconnect-cleanup, and stress tests |
 | Hardware data watchpoints (`Z2`/`Z3`/`Z4`) | Guarded encoder and kernel-session engine remain compile-time experimental; the staged retail ladder rebooted at DBGVCR, and a later audited runtime DIP 228 set/readback plus one-read A/B also rebooted without a final journal record; no comparator access is advertised | Keep fail-closed while researching boot-time policy, DSE/authentication, OS Lock, and debug-power state offline; only with a supported safe platform access path resume disabled-register, trap/restore, all-core/context-isolation, and watchdog gates |
 | Hardware execution breakpoints (`Z1`) | Planned beyond KVDB's documented `Z2`-`Z4` handlers, but blocked by the same observed DSE-dependent register boundary | Require the same platform-access proof and staged safety gates, then advertise only the number of slots actually validated |
-| ARM/Thumb software single-step | Broad decoder implemented and hardware tested for many common control-flow forms; `Hc0` and `vCont;s:T;c` now hardware-step selected foreign Thumb workers through distinct paths using state-dependent raw-bank selection. The host-tested decoder now adds condition-correct A32/Thumb branches, BLX interworking, in-flight ITSTATE scanning, self-target rejection, and conservative refusal of recognized undecoded PC writers | Hardware-test the expanded ARM/Thumb-2 paths, add scheduler-locked isolation or displaced stepping, and finish semantic decoding of the remaining fail-closed PC-writing forms |
+| ARM/Thumb software single-step | Broad practical decoder implemented. `Hc0` and `vCont;s:T;c` hardware-step deterministic foreign Thumb workers through distinct paths using state-dependent raw-bank selection. GDB's exact-stopped-thread positive-`Hc` breakpoint step-over now retains the all-stop token and passes live `T05`, detach, and reconnect tests; representative A32 `MOV PC`, `LDMDB {..., PC}`, and `LDR PC` steps also pass. Host coverage includes conditional branches, interworking, immediate/immediate-shifted A32 PC ALU operations, register/immediate PC loads, IT placement, alignment checks, and conservative rejection of unsafe forms | Add injected memory/trap-rollback tests and more live encoding fixtures; design scheduler-locked arbitrary-foreign-thread resume or displaced stepping; keep privileged exception returns, `BXJ`, register-controlled A32 shifts, exclusive-load sequences, and other unsafe forms fail-closed until independently modeled |
 | VFP/NEON register reads | The guarded D0-D31/FPSCR kernel gate and automated foreign-thread live-GDB lifecycle gate pass on retail 3.65 | Keep the undocumented read path opt-in and revalidate each new firmware baseline; treat register writes as a separate mutation/restoration project |
 | Prefetch abort, data abort, and undefined-instruction handling | Implemented with GDB signal and structured fault reporting | Add nested-fault containment and explicit previous-handler chaining |
 | ARM register read/write | Strict `p` reads and selected exception-thread core/CPSR `P` writes pass the live retail 3.65 mutation/read-back/restore gate across clean detach/reconnect. The gate also confirms fail-closed foreign core and VFP writes with unchanged read-back. Full-register legacy writes predate this gate. Read-only foreign snapshots are hardware tested in runnable/current bank-0 and sleeping/syscall-return bank-1 states | Revalidate the transactional gate for each firmware/kernel ABI; add a separately restorable kernel mutation ABI before enabling foreign-thread or VFP writes |
@@ -42,16 +42,21 @@ stacks remain unvalidated unless an individual result says otherwise.
 2. Complete the remaining thread-control lifecycle gates. Unified inventory,
    honest `Hc`/`vCont` behavior, fail-closed selection, abandoned-client
    recovery, dynamic register-bank selection, and deterministic foreign-Thumb
-   stepping are hardware tested; selected ARM-state stepping, controlled
-   renew/end failures, cleanup fault injection, and longer stress runs remain.
+   stepping are hardware tested. Exact-stopped-thread positive-`Hc` step-over
+   and representative ARM-state PC writers also pass live GDB. Controlled
+   renew/end failures, cleanup fault injection, arbitrary-foreign-thread
+   scheduler locking, and longer stress runs remain.
 3. Harden RSP parsing and move blocking socket operations outside the global
    debugger lock, with fake-transport tests and fuzzing.
 4. Extend the completed bounded stdout/stderr `O`-packet path with long hardware
    soaks, then add the read-only monitor command framework.
-5. Hardware-test the expanded ARM/Thumb step decoder and the new strict `p`
-   reads plus exception-thread core/CPSR `P` writes. Finish semantic decoding
-   for the remaining fail-closed PC writers. Expose foreign-thread or VFP
-   writes only after a new snapshot/write/read-back/restore kernel gate passes.
+5. Keep the expanded ARM/Thumb decoder's host matrix, exact positive-`Hc`
+   step-over, representative A32 live fixtures, and strict `p` plus selected-
+   exception-thread core/CPSR `P` gates reproducible. Add injected memory-read,
+   trap-install, and rollback coverage plus a bounded exclusive-sequence
+   strategy before relaxing any remaining fail-closed instruction family.
+   Expose foreign-thread or VFP writes only after a new
+   snapshot/write/read-back/restore kernel gate passes.
 6. Keep CP14 and memory-mapped hardware-debug access disabled. Read-only DIP
    inventory, exact runtime Set(228)/readback/Clear, and post-reboot restoration
    passed. The separately reviewed one-read A/B then rebooted after its durable

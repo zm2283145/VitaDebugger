@@ -1,0 +1,140 @@
+{
+  "artifacts": {
+    "eboot": {
+      "sha256": "a20ec805d84b5016b28c26fd800ac03c24fc0dad400db9df34ff8f8971e51833",
+      "size_bytes": 546534
+    },
+    "elf": {
+      "sha256": "25e32d107b466de43e881a643a09b89adec9d8ac5c71ab7cc7d3bc4eb8fd791c",
+      "size_bytes": 480924
+    },
+    "kernel_plugin": {
+      "sha256": "b4bf79a53d88ef34c0f1ac00d29557f8b709e60acb35e14222e292d1f47792bf",
+      "size_bytes": 7908
+    },
+    "vpk": {
+      "sha256": "e406254e79d81d690656e76bf1c04cbd5e8c758e16f62194c7b997bdf7426ac0",
+      "size_bytes": 236184
+    }
+  },
+  "build": {
+    "configuration": [
+      "CFLAGS=-Og",
+      "UVDB_KERNEL_THREAD_CONTROL=1",
+      "UVDB_KERNEL_VFP_READS=1",
+      "UVDB_GDB_VFP_FIXTURE=1"
+    ],
+    "source_commit": "bd8a323"
+  },
+  "deployment": {
+    "agent": "VitaDevDeploy",
+    "agent_session": "reused",
+    "job_id": "1f67454d9d53e729acffaf161d9cf1cb",
+    "manifest_sha256": "ecf38cee2b8817bfc645f2238dfe21001bea99558409bfb42236c057cf341250",
+    "result": "installed_and_launched",
+    "title_id": "SLRS00001"
+  },
+  "gdb": {
+    "version": "GNU gdb (GDB) 15.2"
+  },
+  "hardware": {
+    "device_class": "retail-handheld",
+    "firmware": "3.65",
+    "kernel_abi": "0x0001000b"
+  },
+  "observations": {
+    "arm_state_steps": [
+      {
+        "cpsr_after": "0x80030010",
+        "cpsr_before": "0x80030010",
+        "expected_pc": "0x810411f8",
+        "instruction": "MOV PC, R0",
+        "pc_after": "0x810411f8",
+        "pc_before": "0x810411f0",
+        "result": "PASS",
+        "stop_thread": "0x40010003"
+      },
+      {
+        "cpsr_after": "0x80030010",
+        "cpsr_before": "0x80030010",
+        "expected_pc": "0x8104120c",
+        "instruction": "LDMDB R0!, {R4, PC}",
+        "pc_after": "0x8104120c",
+        "pc_before": "0x81041204",
+        "r0_after": "0x81041210",
+        "r0_before": "0x81041218",
+        "r4_after": "0xccddeeff",
+        "r4_before": "0x8899aabb",
+        "result": "PASS",
+        "stop_thread": "0x40010003"
+      },
+      {
+        "cpsr_after": "0x80030010",
+        "cpsr_before": "0x80030010",
+        "expected_pc": "0x81041228",
+        "instruction": "LDR PC, [R0]",
+        "pc_after": "0x81041228",
+        "pc_before": "0x81041220",
+        "result": "PASS",
+        "stop_thread": "0x40010003"
+      }
+    ],
+    "breakpoint_step_over": {
+      "breakpoint_address": "0x81040b52",
+      "error_E16_observed": false,
+      "instruction_encoding": "0x687b",
+      "instruction_text": "LDR R3, [R7, #4]",
+      "first_stop_pc": "0x81040b52",
+      "packet_sequence": [
+        "Z0,81040b52,2 -> OK",
+        "c -> T05thread:40010003;",
+        "z0,81040b52,2 -> OK",
+        "Hc40010003 -> OK",
+        "s -> T05thread:40010003;",
+        "Z0,81040b52,2 -> OK",
+        "c -> T05thread:40010003;"
+      ],
+      "result": "PASS",
+      "second_stop_pc": "0x81040b52",
+      "stop_thread": "0x40010003"
+    },
+    "reconnect": {
+      "clean_first_detach": true,
+      "clean_second_detach": true,
+      "pc_after_reconnect": "0x81058e68",
+      "result": "PASS",
+      "visible_thread_count": 5
+    }
+  },
+  "recorded_utc": "2026-09-14T14:56:13.8249926Z",
+  "result": "PASS",
+  "safety_scope": {
+    "exact_stopped_exception_thread": "The Hc<T> legacy step retains the healthy kernel stop token and executes its excluded exception thread while peer application threads remain suspended; the internal lease keeper remains runnable to renew the stop.",
+    "independent_target_miss_timeout": false,
+    "peer_hold_directly_sampled_during_step": false,
+    "raw_gdb_transcript_committed": false,
+    "foreign_thread": "vCont;s:T;c still uses a process-wide temporary software breakpoint and is not scheduler locked.",
+    "fail_closed": "Positive-Hc continue, a different or stale positive Hc step, PC override, blocking SVC/WFE/WFI, unsupported execution states, exclusive-load starts, and recognized undecoded PC writers are rejected before resume."
+  },
+  "schema": "vitadebugger-arm-thumb-step-live-gdb-v1",
+  "validation": {
+    "cross_build": "PASS",
+    "host_suites": {
+      "aslr_lifecycle": 13,
+      "dip_probe_records": 3,
+      "gdb_symbols": 13,
+      "target_xml": 9,
+      "vfp_lifecycle": 14
+    },
+    "native_host_binaries": [
+      "RSP serialization",
+      "GDB console serialization",
+      "register-bank selection",
+      "thread control and step planners",
+      "VFP policy",
+      "console queue",
+      "console transport"
+    ],
+    "result": "PASS"
+  }
+}

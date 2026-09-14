@@ -5,9 +5,10 @@ on a retail Vita running system software 3.65 on 2026-09-14. After the initial
 checks and memory-card database update, it completed six consecutive
 launch/exit cycles:
 three SceShell peel closures and three Circle cleanup exits. None produced a GPU
-fault or LiveArea hang. One earlier reported GPU fault did not recur and remains
-recorded as an isolated observation. The headless agent remains the production
-default while broader stress and firmware coverage accumulate.
+fault or LiveArea hang during that sequence. Two intermittent launch-time GPU
+faults have now been observed outside the sequence, so the UI gate no longer
+supports unattended use. The headless agent remains the production default
+until graphics startup/teardown and SceShell transition stress pass.
 
 ## Artifact under test
 
@@ -42,9 +43,38 @@ remained responsive across both launch/exit cycles.
 Following the isolated report, three direct-launch/SceShell-peel-close cycles
 and three direct-launch/Circle-cleanup cycles all completed normally. This
 validates both the intended cleanup path and the ordinary user-facing SceShell
-closure path on the tested configuration. Vita Companion's unauthenticated
-`destroy` path was not part of this gate and should not be used on the display
-build.
+closure path under those repetitions. It does not rule out an intermittent
+startup race. Vita Companion's unauthenticated `destroy` path was not part of
+this gate and should not be used on the display build.
+
+## Later intermittent launch incident
+
+Later on 2026-09-14, Vita Companion's title-scoped kill of `SLRS00001` returned
+`Killed.` and the host immediately requested launch of `VDEVDEP01`. This abrupt
+target-to-deployer transition is outside the supported normal deployment path,
+which starts with the Vita already at LiveArea. The host timed out before it
+could read a fresh `challenge.v1`, FTP became unreachable, and the device
+displayed another GPU fault. No signed job had been uploaded or installed. This
+was the second observed launch-time GPU fault and means the earlier event can
+no longer be classified as non-repeating.
+
+After recovery, the graphical agent was opened again and remained stable at
+its waiting screen. The host reused that exact live challenge with
+`--reuse-running-agent`; job `1f67454d9d53e729acffaf161d9cf1cb` completed
+verification and installation with result zero, and the target launched. This
+separates the intermittent pre-challenge/display-startup failure from the
+signed package verification and promotion path, but it does not yet identify
+which vita2d/GXM or SceShell transition call failed. Do not automate another
+graphical launch/close stress gate until that lifecycle is audited and a
+recovery plan is ready.
+
+The leading hypothesis is a display-resource handoff race: the killed target
+owned a debug-screen framebuffer and did not run an orderly display shutdown,
+while the deployer entered vita2d/GXM immediately on launch. This remains an
+inference, not a confirmed root cause. The next gate should preserve the crash
+dump and startup trace, add markers around vita2d initialization/first draw/
+first swap, wait for the old target and transports to quiesce, and A/B the same
+transition with the headless agent.
 
 ## LiveArea presentation follow-up
 

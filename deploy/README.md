@@ -117,8 +117,11 @@ milestones, determinate verification progress, indeterminate installation
 activity, and distinct waiting, completion, and error states. Its retail 3.65
 lifecycle gate passed six consecutive post-refresh launch/exit cycles: three
 SceShell peel closures and three Circle cleanup exits, with no GPU fault or
-LiveArea hang. One earlier non-repeating GPU fault remains documented. The
-interface stays opt-in while broader stress and firmware coverage accumulate.
+LiveArea hang during that sequence. Two intermittent launch-time GPU faults are
+now documented outside that sequence; the later attempt recovered by reopening
+the agent and reusing its fresh waiting session. The interface stays opt-in and
+must not be used for unattended deployment until the startup/teardown race is
+isolated and fixed.
 See [the hardware report](../docs/hardware/vitadevdeploy-ui-3.65.md) and the
 upstream/license notice in [THIRD_PARTY.md](THIRD_PARTY.md).
 
@@ -610,10 +613,12 @@ after the first installation.
   file alone cannot prove that its process is still alive.
 - The optional graphical status interface passed six consecutive post-refresh
   launch/exit cycles on retail 3.65: three SceShell peel closures and three
-  Circle cleanup exits, with no GPU fault or LiveArea hang. One earlier direct
-  launch reportedly produced a GPU fault that did not recur during any of
-  those repetitions. The interface remains opt-in; production artifacts
-  default to headless while broader stress and firmware coverage accumulate.
+  Circle cleanup exits, with no GPU fault or LiveArea hang in that sequence.
+  Two intermittent launch-time GPU faults have nevertheless been observed. A
+  later manual reopen plus `--reuse-running-agent` completed the same signed
+  install normally, so package verification/promotion remained healthy, but
+  the graphics startup cause is unresolved. The interface remains opt-in;
+  production artifacts default to headless.
 - Updating an already installed app may leave SceShell's cached generic
   LiveArea background visible even when the packaged and installed asset bytes
   match. The ordinary system database update triggered by removing and

@@ -10,20 +10,20 @@ choose a suspended application thread instead of exposing the server thread's
 exception context. `qfThreadInfo`, `qThreadExtraInfo`, `T`, `Hg`, `Hc`, register
 reads, and resume planning all use this same snapshot.
 
-The first six live-hardware phases have validated inventory, selection,
+The first seven live-hardware phases have validated inventory, selection,
 abandoned-client recovery, current-main-thread Thumb stepping, fail-closed
-positive-`Hc` behavior, dynamic raw register-bank selection, and deterministic
-foreign-worker Thumb stepping with exact stop attribution. Phase 5 safely
+foreign/stale positive-`Hc` behavior, exact-stopped-thread positive-`Hc`
+step-over, dynamic raw register-bank selection, deterministic foreign-worker
+Thumb stepping, and representative ARM-state PC writers. Phase 5 safely
 exposed and recovered from the register-bank bug before any foreign thread was
 stepped; Phase 6 verified its user-library fix without changing the kernel
-companion. ARM-state stepping and controlled failure fixtures remain pending.
-Since those runs, the host-tested decoder has added A32 BLX-immediate
-interworking, condition-correct direct paths, Thumb-2 branch planning,
-in-flight ITSTATE scanning, consistent target alignment/self-target rejection,
-and conservative fail-closed classification of recognized undecoded PC writers.
-These newer paths do not inherit the earlier hardware result and remain part of
-the next live gate. Do not describe the thread-control work as fully promoted
-until every check below passes.
+companion. Phase 7 fixed GDB's ordinary hidden-breakpoint step-over `E16`, then
+verified ARM-state `MOV PC`, `LDMDB {..., PC}`, and `LDR PC` execution, clean
+detach, and reconnect. Controlled failure fixtures and longer stress runs
+remain pending. The larger decoder matrix has pure host coverage; only the
+representative forms named in Phase 7 inherit that hardware result. Do not
+describe the entire thread-control work as fully promoted until every check
+below passes.
 
 ## Selection contract
 
@@ -31,11 +31,14 @@ until every check below passes.
   visible thread only if no stopped thread exists. A positive `Hg` ID must be
   present in the current inventory.
 - `Hc0` uses the deterministic stopped-thread fallback for a legacy `s`.
-  `Hc-1` continues the process, but a multi-thread legacy step is rejected.
-  Positive `Hc` is parsed and retained, but a following legacy `c` or `s` fails
-  because that form implies selective resume, which the current all-stop kernel
-  boundary cannot provide. Use `vCont;s:T;c` to step `T` while explicitly
-  continuing its peers.
+  `Hc-1` continues the process, but `Hc-1` plus legacy `s` is rejected when
+  multiple threads are visible.
+  Positive `Hc` followed by legacy `c` is rejected. A following legacy `s` is
+  accepted only if that ID exactly names the current stopped exception thread,
+  the kernel stop token is active and healthy, and there is no address
+  override. That narrow path retains the stop token while the exception thread
+  executes one instruction. Use `vCont;s:T;c` for a foreign thread while
+  explicitly continuing its peers.
 - Stale positive selectors are retained and their next operation fails. They
   are never silently widened to `Hg0`/`Hc-1` or process-wide execution.
 - VitaDebugger does not advertise the multiprocess extension, so `pPID.TID`
@@ -47,20 +50,30 @@ until every check below passes.
   unsupported signals, range steps, stale selectors, partial resume sets,
   malformed IDs, and multi-thread step requests fail without resuming anything.
 
+For the exact stopped exception thread, the kernel stop token already excludes
+the controller whose handler must return. The positive-`Hc` step-over path keeps
+that token active, installs one validated temporary trap, and returns only that
+controller while peer application threads remain suspended. Blocking
+SVC/WFE/WFI operations, exclusive-load starts, PC overrides, unsupported CPSR
+execution states, and unsafe decoder targets fail before resume. This bounded
+path fixed GDB's automatic persistent-breakpoint step-over without adding a
+kernel ABI. The internal lease keeper also remains runnable to renew the stop.
+This path does not yet have an independent target-miss timeout; a future
+resume-one transaction must add cancellation and trap rollback if the
+predicted address is not reached.
+
 For a selected foreign thread, the kernel stop token supplies both raw ARM
 register banks. The user stub selects a valid entry-0 current-user context when
 present, otherwise a valid entry-1 syscall-return context, and fails closed if
-neither is usable. That selected state feeds the existing software-step
-decoder. The temporary instruction breakpoint is process-wide and ending the
-current stop lease resumes the whole process. This provides correct
-selected-thread target calculation, but not
-scheduler-locked execution isolation: another running thread can reach the same
-temporary address first. A future isolated-step design needs a separately
-validated selective-resume kernel boundary or displaced stepping. The test
-application's deterministic worker-step fixture avoids this ambiguity for the
-live validation gate by parking each worker in a different exported function;
-it does not remove the general limitation for application threads that share
-code.
+neither is usable. That selected state feeds the software-step decoder. The
+temporary instruction breakpoint remains process-wide and ending the current
+stop lease resumes the whole process. This provides correct selected-thread
+target calculation, but not scheduler-locked foreign-thread isolation: another
+running thread can reach the same temporary address first. A future design
+needs a validated resume-one/resuspend kernel transaction or displaced
+stepping. The deterministic worker fixture avoids this ambiguity by parking
+each worker in a different exported function; it does not remove the general
+limitation for application threads that share code.
 
 ## Stop/resume failure contract
 
@@ -95,13 +108,19 @@ mode rejection, and neither-valid failure. The thread-control test covers exact
 thread-ID and resume-address parsing, `0`/`-1`, fail-closed stale selection,
 inventory bounds and deduplication, legacy-resume scope, leftmost `vCont`
 matching, explicit/default coverage, stale `vCont` selectors, selected
-stepping, the no-EndStop-with-live-UDF cleanup policy, unsupported actions, and
-malformed packets. Also cross-build library-only, kernel-thread-control, and
-opt-in VFP variants so none of the feature combinations drift.
+stepping, exact-stopped-thread retained-token validation, blocking/exclusive
+instruction rejection, ARM/Thumb direct and memory-address planners, IT
+placement, target/source alignment, conservative PC-writer classification, the
+no-EndStop-with-live-UDF cleanup policy, unsupported actions, and malformed
+packets. These are pure planner/classifier tests. Phase 7 additionally exercises
+successful target-memory reads, temporary-trap insertion, and retained-token
+integration live; injected read/install failures and trap rollback still need
+coverage. Also cross-build library-only, kernel-thread-control, and opt-in VFP
+variants so none of the feature combinations drift.
 
 ## Recorded live-hardware results
 
-All phases used kernel companion ABI `0x00010008` (capabilities
+Phases 1-6 used kernel companion ABI `0x00010008` (capabilities
 `0x8000001f`) and kernel SHA-256
 `01F4A833C548ED71675D73D4C4FB5634B9496D159F952B68244CBC2BC2A884FC`.
 Phases 1-4 used installed `eboot.bin` SHA-256
@@ -121,11 +140,22 @@ ELF SHA-256
 and installed `eboot.bin` SHA-256
 `FA6F6595910A1C944CBA95FE1469D2E1EB6B3EC2F48F18838B51AA302895769D`.
 The Phase 6 installed file was pulled back over FTP and matched exactly. The
-owner has since confirmed that the test Vita used for these runs is running
-system software 3.65. Because the version was not captured contemporaneously
-in the Phase 1-6 transcript or screenshots, record it in-band on the next full
-gate. These results do not establish behavior on any other firmware or device
-class.
+Phase 1-6 test configuration was a retail handheld running system software
+3.65, although the version was not captured contemporaneously in those
+transcripts or screenshots. Phase 7 used kernel ABI `0x0001000b`, kernel
+SHA-256
+`B4BF79A53D88EF34C0F1AC00D29557F8B709E60ACB35E14222E292D1F47792BF`,
+VPK SHA-256
+`E406254E79D81D690656E76BF1C04CBD5E8C758E16F62194C7B997BDF7426AC0`,
+ELF SHA-256
+`25E32D107B466DE43E881A643A09B89ADEC9D8AC5C71AB7CC7D3BC4EB8FD791C`,
+and local packaged `eboot.bin` SHA-256
+`A20EC805D84B5016B28C26FD800AC03C24FC0DAD400DB9DF34FF8F8971E51833`.
+This was source commit `bd8a323`. Its signed VitaDevDeploy job installed and
+launched successfully. The structured
+Phase 7 evidence is
+[`hardware/gdb-arm-thumb-step-3.65.json`](hardware/gdb-arm-thumb-step-3.65.json).
+These results do not establish behavior on any other firmware or device class.
 
 ### Phase 1: inventory and fail-closed selection
 
@@ -178,11 +208,12 @@ step check must flush the register cache before judging PC progression.
 
 This phase validates legacy and explicit-`vCont` stepping only for the current
 main thread in Thumb state. Phase 6 subsequently satisfied the deterministic
-foreign-worker Thumb portion; the selected ARM-state path remains pending. The
-saved Phase 3 log ends while stopped after a final `qC` -> `QC40010003`; it does
-not itself contain the subsequent detach/resume evidence.
+foreign-worker Thumb portion, and Phase 7 subsequently satisfied the named
+ARM-state fixtures. The saved Phase 3 log ends while stopped after a final
+`qC` -> `QC40010003`; it does not itself contain the subsequent detach/resume
+evidence.
 
-### Phase 4: positive-`Hc` fail-closed behavior
+### Phase 4: foreign positive-`Hc` fail-closed behavior
 
 Passed. `phase4-positive-hc.log` records `Hc40010121` selecting worker 0 and
 returning `OK`. The following raw legacy `s` and `c` packets each returned
@@ -266,11 +297,44 @@ This validates state-dependent entry-0 current/runnable and entry-1
 syscall-return selection on hardware, exact foreign-Thumb target decoding, and
 stop attribution for two distinct workers. It does not prove scheduler-locked
 single-thread execution because the current all-stop boundary resumes peer
-threads during the temporary-breakpoint step. Selected ARM-state stepping and
-controlled renew/end failure fixtures also remain pending. The interactive
+threads during the temporary-breakpoint step. Controlled renew/end failure
+fixtures also remain pending. The interactive
 transcript is retained locally as `phase6-bank-selector-read.log` under the
 ignored `local/thread-control-live` directory; it is not presented as a
 repository-hosted evidence file.
+
+### Phase 7: GDB breakpoint step-over and ARM-state stepping
+
+Passed on 2026-09-14 on a retail handheld running system software 3.65. GNU GDB
+15.2 first installed a Thumb software breakpoint at `0x81040b52`, continued to
+it, removed it, selected stopped thread `40010003` with `Hc40010003`, and sent
+legacy `s`. The stopped instruction was `0x687b` (`ldr r3, [r7, #4]`). The
+stub replied `OK` to `Hc`, then returned `T05thread:40010003;` from the step;
+the earlier `E16` was absent. GDB reinserted the persistent breakpoint and the
+next continue hit it normally. This is the exact packet sequence used by GDB's
+automatic hidden-breakpoint step-over, not a hand-crafted substitute.
+
+The same connection then stepped three A32 fixtures with CPSR T clear before
+and after each operation:
+
+- `MOV PC, R0`: PC `0x810411f0` -> expected `0x810411f8`.
+- `LDMDB R0!, {R4, PC}`: PC `0x81041204` -> expected `0x8104120c`, R0
+  `0x81041218` -> `0x81041210`, and R4 `0x8899aabb` -> `0xccddeeff`.
+- `LDR PC, [R0]`: PC `0x81041220` -> expected `0x81041228`.
+
+Every step returned `T05thread:40010003;`. GDB detached cleanly, immediately
+reattached with all five application threads visible and PC in
+`sceKernelDelayThread`, then detached cleanly again. No kernel companion change
+was needed: the exact exception thread is already the controller excluded from
+its active all-stop token, so retaining that healthy token holds its peers
+while the handler returns for one instruction.
+
+This phase hardware-validates only the exact positive-`Hc` stopped-thread path
+and the three named A32 forms. The extended ARM/Thumb decoder matrix has host
+coverage but not a hardware fixture for every encoding. Arbitrary foreign-
+thread scheduler locking, controlled token-renew/end failures, injected memory
+faults, temporary-trap rollback, bounded exclusive-sequence stepping, and long
+stress runs remain separate gates.
 
 ## Deterministic foreign-worker step fixture
 
@@ -329,8 +393,9 @@ info symbol $pc
 The two disassemblies must have non-overlapping address ranges. Worker 0's PC
 must fall within `uvdb_worker_step_path_0`'s displayed range, and worker 1's PC
 must fall within `uvdb_worker_step_path_1`'s range. `info symbol` alone is not
-sufficient proof because it reports the nearest symbol. First exercise the
-positive-`Hc` fail-closed rule while the process is stopped:
+sufficient proof because it reports the nearest symbol. First use `qC` to
+identify the current exception thread, then exercise the foreign positive-`Hc`
+fail-closed rule with a worker ID that is not that stopped thread:
 
 ```gdb
 maintenance packet Hc<WORKER-0-HEX-SCEUID>
@@ -340,12 +405,14 @@ print uvdb_worker_step_ready
 maintenance packet Hc-1
 ```
 
-The initial positive `Hc` and final `Hc-1` packets must return `OK`; both legacy
-`s` and `c` must return `E16` without changing either ready value. Then step
-each foreign worker with the supported all-stop action list. Record the numeric
-PC, current instruction, and CPSR immediately before every step; after the stop,
-select that worker again and flush GDB's register cache before reading its new
-PC:
+The initial foreign positive `Hc` and final `Hc-1` packets must return `OK`;
+both legacy `s` and `c` must return `E16` without changing either ready value.
+An exact positive `Hc` naming the current exception thread is different:
+legacy `s` is its supported retained-token step-over path, while legacy `c`
+still fails closed. Then step each foreign worker with the supported all-stop
+action list. Record the numeric PC, current instruction, and CPSR immediately
+before every step; after the stop, select that worker again and flush GDB's
+register cache before reading its new PC:
 
 ```gdb
 thread <GDB-NUMBER-FOR-WORKER-0>
@@ -442,8 +509,11 @@ companion.
    thread must drive `g`; a nonexistent thread must be rejected without changing
    the previous selection.
 3. Single-step the current stopped thread through both ARM and Thumb code using
-   legacy `Hc0`/`s`, then repeat with GDB's `vCont` path. Confirm that positive
-   `Hc` followed by legacy `c` or `s` is rejected without resuming anything.
+   legacy `Hc0`/`s`, then repeat with GDB's `vCont` path. Exercise an ordinary
+   persistent GDB software breakpoint twice and verify its automatic
+   `z0`/positive-`Hc`/`s`/`Z0` step-over returns `T05` without `E16`. Confirm
+   that legacy `c` after any positive `Hc`, and legacy `s` after a foreign or
+   stale positive `Hc`, are rejected without resuming anything.
 4. Arm the deterministic worker fixture and select each foreign worker in turn
    with `vCont;s:T;c`. The next PC must remain in that worker's distinct path
    and the stop reply must name the selected thread. A different stop thread or

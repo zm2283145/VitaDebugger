@@ -61,9 +61,14 @@ status includes:
 - Thumb-2 `LDMIA/POP.W` returns that restore `PC` from a register list.
 - Thumb `IT` blocks using saved condition flags and width-aware skipping.
 - Thumb-2 `LDMDB` returns that restore `PC` from below the base address.
-- ARM-state `MOV PC, Rm` and increment/decrement load-multiple PC restores.
-- Thumb-2 and ARM immediate load-to-PC forms with protected target reads and
-  correct ARM/Thumb interworking.
+- ARM-state branches, `BX`/`BLX`, data-processing writes to `PC`, and
+  increment/decrement load-multiple PC restores. The data-processing planner
+  covers immediate and immediate-shifted register operands for the practical
+  `AND`/`EOR`/`SUB`/`RSB`/`ADD`/`ADC`/`SBC`/`RSC`/`ORR`/`MOV`/`BIC`/`MVN`
+  forms.
+- Thumb high-register `ADD`/`MOV`/`BX`/`BLX`, `CBZ`/`CBNZ`, and Thumb-2/ARM
+  immediate, negative, pre/post-indexed, and register-offset load-to-PC forms
+  with protected target reads and correct ARM/Thumb interworking.
 - Catching data aborts before the standard Vita crash screen.
 - Structured fault information: exception type, signal, FSR, FAR, PC, LR, SP.
 - Reconnection at a later `uvdb_enter()` after a disconnected session.
@@ -83,8 +88,15 @@ status includes:
   after forced client termination.
 - A bounded unified thread inventory with hardware-tested `Hg`/`Hc` and
   `vCont;c;s` behavior. Deterministic live tests stepped two distinct foreign
-  worker paths and attributed each stop to the requested thread; true
-  scheduler-locked execution isolation remains pending.
+  worker paths and attributed each stop to the requested thread. GDB's normal
+  positive-`Hc` breakpoint step-over now retains the healthy all-stop token,
+  keeps peer application threads suspended while the exact stopped exception
+  thread executes one instruction, and passes detach/reconnect testing. The
+  internal lease keeper remains runnable to maintain the stop. True scheduler-locked
+  execution of an arbitrary foreign thread remains pending.
+- Hardware-tested ARM-state software stepping for `MOV PC, Rm`, decrementing
+  load-multiple with writeback, and `LDR PC, [Rn]`, including exact PC and
+  register-effect checks plus clean detach and reconnect.
 - Hardware-tested read-only GDB register integration for main and worker
   threads owned by an active stop session, including state-dependent selection
   of runnable/current and syscall-return ARM banks plus symbolized stack frames.
@@ -154,7 +166,7 @@ classes. They also make no claim about other firmware, newlib revisions,
 development hardware, or plugin combinations.
 
 The kernel boundary is being introduced in deliberately small stages. These
-unedited Vita screenshots record the completed probe results:
+Vita screenshots and structured records capture the completed probe results:
 
 | Milestone | Hardware evidence | What it validates |
 | --- | --- | --- |
@@ -168,12 +180,13 @@ unedited Vita screenshots record the completed probe results:
 | VFP v8 | [Corrected D32/FPSCR probe](docs/hardware/kernel-vfp-probe-v8-bank0-pass.jpg) | Guarded D0-D31 capture, raw FPSCR entry-0 mapping, ownership rejection, two-thread stop/resume, and clean worker restoration |
 | VFP live GDB | [Lifecycle evidence](docs/hardware/gdb-vfp-live-3.65.json) | Foreign-thread D0/D31/FPSCR reads across continue/interrupt, detach/reconnect, transport loss without `D`, recovery, and final detach |
 | Individual `p`/`P` | [Transactional evidence](docs/hardware/gdb-register-pp-3.65.json) | Direct R0/CPSR packet mutation, byte-exact read-back and restoration in two sessions, clean detach/reconnect, and unchanged foreign core/VFP state after rejected writes |
+| ARM/Thumb step | [Live GDB evidence](docs/hardware/gdb-arm-thumb-step-3.65.json) | GDB's exact positive-`Hc` hidden-breakpoint step-over without `E16`, three representative ARM-state PC writers with exact register effects, clean detach, and reconnect |
 | ASLR + user SUPRX | [Lifecycle evidence](docs/hardware/gdb-aslr-suprx-3.65.json) | Main and loaded-user-module source breakpoints in five GDB sessions, stable same-process layout, automatic symbols after relaunch, explicit-symbol regeneration, and observed main/SUPRX address changes on both relaunches |
 | DebugNet v24 | [Sustained UDP stream](docs/hardware/debugnet-v24-sustained-stream.jpg) | Logging remains live after a loaded stop/restart cycle, with the displayed queue draining and no packet drops or send errors |
 | Profiler v1 | [User-mode profiler probe](docs/hardware/profiler-user-mode-probe-v1.jpg) | Eleven passing checks for live zones, frames, counters, memory/thread snapshots, wire encoding, four-producer pressure/drop accounting, uniqueness, and ring reuse without kernel calls |
-| VitaDevDeploy UI | [Retail 3.65 lifecycle evidence](docs/hardware/vitadevdeploy-ui-3.65.md) | Native vita2d waiting screen, six clean post-refresh launch/exit cycles through both SceShell peel-close and Circle cleanup, packaged LiveArea asset integrity, and successful artwork refresh; one earlier non-repeating GPU fault remains recorded |
+| VitaDevDeploy UI | [Retail 3.65 lifecycle evidence](docs/hardware/vitadevdeploy-ui-3.65.md) | Native vita2d waiting screen, six clean post-refresh launch/exit cycles through both SceShell peel-close and Circle cleanup, packaged LiveArea asset integrity, and successful artwork refresh; two intermittent launch-time GPU faults are now recorded and keep this mode experimental |
 
-Every displayed probe check passed. These images document controlled test
+Every listed probe check passed. These records document controlled test
 coverage; they do not claim that arbitrary applications or every firmware and
 plugin combination are already supported.
 
@@ -951,12 +964,22 @@ exact matching unstripped ELF on the development computer.
 - `Hg`, `Hc`, and the advertised `vCont;c;s` subset share one bounded selection
   model and fail closed on uncovered or multi-step action sets. Selected foreign
   Thumb-thread decoding and stop attribution pass on two deterministic,
-  non-overlapping worker paths. The temporary breakpoint is still process-wide
-  and the current kernel boundary resumes the whole process; true
-  scheduler-locked per-thread execution isolation remains unimplemented.
-- Positive `Hc` followed by legacy `c` or `s` is rejected because it implies a
-  selective resume. The supported explicit all-stop form is `vCont;s:T;c`,
-  which steps thread `T` while continuing every other inventoried thread.
+  non-overlapping worker paths. An exact positive `Hc` for the current stopped
+  exception thread has a hardware-tested one-instruction path that retains the
+  kernel stop token and holds its peers. The `vCont;s:T;c` foreign-thread path
+  still uses a process-wide temporary breakpoint and resumes peer threads;
+  scheduler-locked execution of an arbitrary foreign thread remains
+  unimplemented.
+- Positive `Hc` followed by legacy `c` remains rejected. Legacy `s` is accepted
+  only when the positive ID exactly names the stopped exception thread, the
+  kernel stop token is active and healthy, and no PC override was requested.
+  Different, stale, library-only, multi-thread, and address-override forms fail
+  closed. The explicit foreign-thread form remains `vCont;s:T;c`.
+- The retained-token step-over has no independent target-miss timeout yet. Its
+  decoder therefore rejects waits, syscalls, exclusive-load starts, unsupported
+  execution states, and uncertain PC writers, but a production resume-one path
+  still needs transactional cancellation and trap rollback if the predicted
+  instruction target is not reached.
 - The initial accept path and exception/RSP path still hold a global spin lock
   across blocking work. Shutdown, registration, nested faults, and handler
   chaining need a bounded state-machine refactor before this is suitable for
@@ -983,13 +1006,18 @@ exact matching unstripped ELF on the development computer.
   rebooted without returning to its final journal write. No comparator access
   or enabled comparator has passed a hardware gate, so GDB does not advertise
   `Z1`-`Z4`.
-- Software stepping now chooses one condition-correct target for common
-  ARM/Thumb branches, interworking returns, PC loads, and in-flight IT blocks,
-  rejects self-targets, and conservatively refuses recognized PC-writing forms
-  that it cannot yet decode. Remaining semantic decoders are concentrated in
-  shifted PC-writing data-processing forms, register-offset/negative/pre/post-
-  indexed PC loads, and uncommon ARM/Thumb control flow. The expanded paths
-  have host coverage and still need the dedicated live-GDB hardware gate.
+- Software stepping now chooses one condition-correct target for practical
+  ARM/Thumb branches, interworking returns, immediate/immediate-shifted
+  data-processing writes to `PC`, register/immediate PC loads, load-multiple
+  returns, and in-flight IT blocks. It rejects self-targets, misaligned ARM
+  targets and word sources, unsupported CPSR execution states, and selected-
+  thread operations that could block. The former positive-`Hc` `E16` step-over
+  and representative ARM-state `MOV`/`LDMDB`/`LDR` fixtures pass live GDB on
+  retail 3.65. Privileged exception returns (`RFE`, `ERET`, and S-form ALU/LDM
+  returns), `BXJ`, legacy Thumb-2 PC moves, register-controlled ARM shifts, and
+  exclusive-load sequences remain deliberately fail-closed. The broader
+  decoder matrix has pure host-planner coverage; additional injected-memory
+  and trap-rollback integration fixtures remain.
 - The ASLR-aware host tool safely automates symbol loading only when matching
   unstripped ELFs are available. Main-module and loaded-user-SUPRX source
   breakpoints pass across detach/reconnect and two relaunches on retail 3.65.
@@ -1028,6 +1056,12 @@ exact matching unstripped ELF on the development computer.
 - Deployment is serialized and one-shot, starts from LiveArea, does not provide
   general target-app rollback, and still needs full bootstrap recovery and
   interrupted-install fault-injection testing before it is production-ready.
+- The optional vita2d deployment UI has now produced two intermittent
+  launch-time GPU faults on the retail 3.65 test configuration despite six
+  clean supervised launch/exit cycles. A later retry reached its waiting state
+  and completed the signed install successfully. The exact graphics/SceShell
+  transition cause is not isolated; keep unattended deployment headless until
+  startup and teardown are hardened and stress-tested.
 - The tested compatibility target is retail handheld Vita and Vita TV hardware
   running system software 3.65 with the tested Kubridge release. Individual
   experimental feature gates may cover only the device class named in their
@@ -1047,9 +1081,11 @@ exact matching unstripped ELF on the development computer.
    [thread-control validation gate](docs/gdb-thread-control-validation.md).
    Unified inventory, `Hg`/`Hc`, `vCont;c;s`, fail-closed selection,
    abandoned-client recovery, and deterministic selected foreign-Thumb-thread
-   stepping are hardware tested. ARM-state stepping, controlled renew/end
-   failures, cleanup fault injection, and longer stress runs remain. Then design
-   scheduler-locked selective resume or displaced stepping so a process-wide
+   stepping are hardware tested. The exact stopped-thread positive-`Hc`
+   step-over and representative ARM-state PC writers now pass the live gate.
+   Controlled renew/end failures, cleanup fault injection, and longer stress
+   runs remain. Then extend the retained-stop design into scheduler-locked
+   arbitrary-foreign-thread resume or displaced stepping so a process-wide
    temporary breakpoint cannot be won by another running thread.
 3. Move blocking accept/RSP work outside the global spin lock; add nested-fault
    handling, previous-handler chaining, strict packet parsing, fake-kernel host
@@ -1059,11 +1095,12 @@ exact matching unstripped ELF on the development computer.
    soaks. Decide whether queue/transport loss counters need a stable public API;
    retain DebugNet as the sustained-log and profiler path.
 5. Keep the completed strict `p` and selected exception-thread core/CPSR `P`
-   retail 3.65 transactional gate reproducible. Finish the remaining
-   fail-closed ARM/Thumb-2 PC-writer semantic decoders and their hardware
-   fixtures. Design a new kernel ABI with snapshot, write, read-back, rollback,
-   lease-expiry, and detach restoration before enabling any foreign-thread or
-   VFP write.
+   retail 3.65 transactional gate reproducible. Keep the expanded practical
+   ARM/Thumb-2 PC-writer decoder and its live ARM fixtures reproducible; add
+   injected-memory/trap-rollback coverage and a bounded LDREX/STREX strategy
+   before relaxing any remaining fail-closed instruction family. Design a new
+   kernel ABI with snapshot, write, read-back, rollback, lease-expiry, and
+   detach restoration before enabling any foreign-thread or VFP write.
 6. Keep hardware `Z1`-`Z4` fail-closed. The late-runtime DIP 228 path has now
    been tested and did not yield a safely returning DBGVCR read. Research
    boot-time policy, DSE/authentication, OS Lock, and debug-power state offline;
@@ -1085,12 +1122,14 @@ exact matching unstripped ELF on the development computer.
    build directories, exported VitaSDK/CMake packages, CI, a firmware matrix,
    and a project-wide license.
 10. Keep the completed VitaDevDeploy signed-install and optional graphical-UI
-   lifecycle gates reproducible. Finish interrupted-install and recovery fault
-   injection. Research a versioned, fail-closed SceShell content/cache refresh
-   for artwork updates; never make destructive `app.db` deletion an automatic
-   deployment step. Then integrate it with VS Code build/deploy/stop,
-   IntelliSense, GDB, logs,
-   and profiles. Later replace the external Vita Companion dependency with a
+   lifecycle gates reproducible. Isolate the intermittent graphical launch
+   fault, add a fail-safe graphics startup/teardown state machine, and stress
+   transitions from recently closed applications. Finish interrupted-install
+   and recovery fault injection. Research a versioned, fail-closed SceShell
+   content/cache refresh for artwork updates; never make destructive `app.db`
+   deletion an automatic deployment step. Then integrate it with VS Code
+   build/deploy/stop, IntelliSense, GDB, logs, and profiles. Later replace the
+   external Vita Companion dependency with a
    versioned authenticated device service if its implementation audit supports
    that design.
 11. Add optional attachment to applications not compiled with the library.
