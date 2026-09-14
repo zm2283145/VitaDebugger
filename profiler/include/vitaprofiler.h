@@ -15,12 +15,36 @@ extern "C" {
 #define VP_CLOCK_HZ 1000000u
 #define VP_WIRE_FLAG_LITTLE_ENDIAN 1u
 
+/* Names travel in a separate, versioned block so the version-1 event stream
+ * and its fixed 32-byte records remain unchanged. */
+#define VP_NAME_WIRE_MAGIC 0x4d4e5056u /* "VPNM" in little-endian order. */
+#define VP_NAME_WIRE_VERSION 1u
+#define VP_NAME_WIRE_HEADER_SIZE 24u
+#define VP_NAME_WIRE_ENTRY_HEADER_SIZE 8u
+#define VP_NAME_WIRE_FLAG_LITTLE_ENDIAN 1u
+#define VP_NAME_MAX_LENGTH 255u
+#define VP_NAME_DICTIONARY_MAX_ENTRIES 4096u
+#define VP_BUILTIN_NAME_COUNT 8u
+
 enum vp_result {
     VP_RESULT_OK = 0,
     VP_RESULT_DROPPED = 1,
+    VP_RESULT_END = 2,
     VP_ERROR_INVALID_ARGUMENT = -1,
     VP_ERROR_NOT_INITIALIZED = -2,
     VP_ERROR_PLATFORM = -3,
+    VP_ERROR_CAPACITY = -4,
+    VP_ERROR_NAME_CONFLICT = -5,
+    VP_ERROR_SEALED = -6,
+    VP_ERROR_BUFFER_TOO_SMALL = -7,
+    VP_ERROR_MALFORMED = -8,
+    VP_ERROR_UNSUPPORTED = -9,
+    VP_ERROR_NOT_FOUND = -10,
+};
+
+enum vp_name_flags {
+    VP_NAME_FLAG_NONE = 0,
+    VP_NAME_FLAG_BUILTIN = 1u << 0,
 };
 
 enum vp_event_type {
@@ -138,6 +162,71 @@ struct vp_stats {
     uint32_t dropped;
 };
 
+/* Name registration is deliberately separate from the event hot path. The
+ * caller supplies both tables; no profiler function allocates memory. Entries
+ * are kept sorted by ID, while text is appended to the caller's arena. */
+struct vp_name_entry {
+    uint32_t name_id;
+    uint32_t text_offset;
+    uint16_t text_length;
+    uint16_t reserved;
+};
+
+struct vp_name_dictionary_config {
+    struct vp_name_entry* entries;
+    uint32_t entry_capacity;
+    char* text;
+    uint32_t text_capacity;
+};
+
+/* Treat fields as private after initialization. Registration, sealing, and
+ * teardown are quiescent operations. Once sealed, any number of threads may
+ * perform read-only lookup and snapshot operations concurrently. */
+struct vp_name_dictionary {
+    struct vp_name_entry* entries;
+    char* text;
+    uint32_t entry_capacity;
+    uint32_t text_capacity;
+    uint32_t entry_count;
+    uint32_t text_used;
+    uint32_t initialized;
+    uint32_t sealed;
+};
+
+struct vp_name_dictionary_stats {
+    uint32_t user_entries;
+    uint32_t builtin_entries;
+    uint32_t total_entries;
+    uint32_t entry_capacity;
+    uint32_t text_used;
+    uint32_t text_capacity;
+    uint32_t sealed;
+};
+
+/* name points either into immutable built-in storage, the sealed caller-owned
+ * text arena, or an encoded wire buffer. Use name_length; wire views are not
+ * NUL-terminated. */
+struct vp_name_view {
+    const char* name;
+    uint32_t name_id;
+    uint16_t name_length;
+    uint16_t flags;
+};
+
+struct vp_name_wire_info {
+    uint32_t entry_count;
+    uint32_t total_size;
+    uint16_t version;
+    uint16_t flags;
+};
+
+struct vp_name_wire_cursor {
+    const uint8_t* data;
+    uint32_t total_size;
+    uint32_t offset;
+    uint32_t remaining;
+};
+
 struct vp_vita_memory_snapshot {
     uint64_t timestamp_us;
     uint64_t process_time_us;
@@ -187,6 +276,50 @@ int vp_get_stats(const struct vp_context* context, struct vp_stats* stats);
 
 /* Stable 32-bit FNV-1a name ID. Zero is reserved for unnamed events. */
 uint32_t vp_name_id(const char* name);
+
+/* Build a bounded dictionary during application initialization, then seal it
+ * before producer or export threads start. Re-registering an identical name is
+ * idempotent. An FNV collision with a different name is rejected. Eight Vita
+ * adapter metric names are included automatically and consume no caller
+ * storage. */
+int vp_name_dictionary_init(
+    struct vp_name_dictionary* dictionary,
+    const struct vp_name_dictionary_config* config);
+void vp_name_dictionary_deinit(struct vp_name_dictionary* dictionary);
+int vp_name_dictionary_register(struct vp_name_dictionary* dictionary,
+                                const char* name, uint32_t* name_id);
+int vp_name_dictionary_seal(struct vp_name_dictionary* dictionary);
+int vp_name_dictionary_get_stats(
+    const struct vp_name_dictionary* dictionary,
+    struct vp_name_dictionary_stats* stats);
+int vp_name_dictionary_lookup(const struct vp_name_dictionary* dictionary,
+                              uint32_t name_id, struct vp_name_view* view);
+int vp_name_dictionary_entry_at(
+    const struct vp_name_dictionary* dictionary, uint32_t index,
+    struct vp_name_view* view);
+
+/* The dictionary block is independent of the event block. Export it beside an
+ * event capture or prefix it and use total_size to locate the following VPRF
+ * header. Encoding is all-or-nothing; BUFFER_TOO_SMALL leaves output untouched
+ * and reports the required byte count through written. */
+int vp_name_dictionary_wire_size(
+    const struct vp_name_dictionary* dictionary, size_t* required);
+int vp_encode_name_dictionary_le(
+    const struct vp_name_dictionary* dictionary, uint8_t* output,
+    size_t output_capacity, size_t* written);
+
+/* Allocation-free receiver helpers. Cursor initialization fully validates the
+ * bounded block, including ordering, built-in records, FNV IDs, and padding.
+ * vp_name_wire_cursor_next() returns VP_RESULT_END after the final entry. */
+int vp_name_wire_validate_le(const uint8_t* input, size_t input_size,
+                             struct vp_name_wire_info* info);
+int vp_name_wire_cursor_init(struct vp_name_wire_cursor* cursor,
+                             const uint8_t* input, size_t input_size,
+                             struct vp_name_wire_info* info);
+int vp_name_wire_cursor_next(struct vp_name_wire_cursor* cursor,
+                             struct vp_name_view* view);
+int vp_name_wire_lookup_le(const uint8_t* input, size_t input_size,
+                           uint32_t name_id, struct vp_name_view* view);
 
 void vp_wire_header_init(struct vp_wire_header* header,
                          uint64_t stream_start_us);
@@ -246,6 +379,8 @@ VP_STATIC_ASSERT(offsetof(struct vp_wire_header, reserved) == 24,
                  "vp_wire_header reserved offset changed");
 VP_STATIC_ASSERT(sizeof(struct vp_slot) == 40,
                  "vp_slot ABI changed");
+VP_STATIC_ASSERT(sizeof(struct vp_name_entry) == 12,
+                 "vp_name_entry ABI changed");
 VP_STATIC_ASSERT(sizeof(struct vp_vita_memory_snapshot) == 32,
                  "memory snapshot ABI changed");
 VP_STATIC_ASSERT(sizeof(struct vp_vita_thread_snapshot) == 32,

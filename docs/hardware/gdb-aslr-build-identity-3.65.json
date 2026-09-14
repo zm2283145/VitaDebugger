@@ -1,0 +1,218 @@
+{
+  "artifacts": {
+    "build_identity": {
+      "sha256": "3c86c0ff5213cb1b351e58651be91b06a7fdb19aa9631b1cfb7bbc7d7453f4c5",
+      "size_bytes": 912
+    },
+    "main": {
+      "installed_eboot": {
+        "sha256": "8c33610a8101a80740b44132eeffa5635b238105ab692c174a244cb672489a41",
+        "size_bytes": 718526
+      },
+      "symbols_elf": {
+        "sha256": "68980bccf3757a44f2959e5acfa32bf45950c0b17a55d1d695b9e329d4678bc1",
+        "size_bytes": 652984
+      }
+    },
+    "user_module": {
+      "installed_suprx": {
+        "sha256": "92a5848c19fe7ebad6e18adbbb4831208ee708b195ca34b4db71cef075228de2",
+        "size_bytes": 5057
+      },
+      "name": "UVDBAslrFixture",
+      "symbols_elf": {
+        "sha256": "dd10a31a97f638f49854098861cf1d185b8ae3ae22aa9739950fdacd859d58b4",
+        "size_bytes": 15660
+      },
+      "velf": {
+        "sha256": "3eadece609026f626490609458be46d7f1d308fe82fefc5899a9aa5fa0349e58",
+        "size_bytes": 17084
+      }
+    },
+    "vpk": {
+      "sha256": "7b5c93f72b702503eb08685b523308e64458719d2d2bd014686031ed659d6abe",
+      "size_bytes": 315202
+    }
+  },
+  "build": {
+    "configuration": [
+      "CFLAGS=-O2",
+      "UVDB_KERNEL_THREAD_CONTROL=1",
+      "UVDB_KERNEL_VFP_READS=1",
+      "UVDB_GDB_VFP_FIXTURE=1",
+      "UVDB_GDB_ASLR_FIXTURE=1",
+      "UVDB_MONITOR_DISPLAY=1",
+      "VITADEBUG_KERNEL_BUILD_DIR=kernel/build-vfp-live3"
+    ],
+    "source_base_commit": "5bc356f4e36e64db72ac1efe864a2218c7836280",
+    "source_tree": "working-tree feature build"
+  },
+  "deployment": {
+    "agent": "VitaDevDeploy",
+    "job_id": "a588fc5360eef1f2e9e10d3056699e4b",
+    "manifest_sha256": "95784cef79751681e8008ea6fd4d8bd4a44c934c762bed60b7b1d95e6f7adebe",
+    "result": "installed_and_launched",
+    "title_id": "SLRS00001"
+  },
+  "evidence_artifact_window_utc": {
+    "finished": "2026-09-14T17:00:55.6633659Z",
+    "started": "2026-09-14T16:55:56.1166495Z"
+  },
+  "gates": {
+    "deliberate_mismatch": {
+      "candidate": {
+        "build_identity_sha256": "c80b1b8277535925b04eebaf11a50846fb960b42414e1f0df44c621e730f1c0e",
+        "installed_eboot": {
+          "sha256": "e5537319edd1819bc7ad73558c4e6d0be5025995139111d864a7c1fedeee2866",
+          "size_bytes": 111696
+        },
+        "vpk": {
+          "sha256": "438ec6804272f85edf589c9062389163d8ed93878032f616426cf4e685cdc4cb",
+          "size_bytes": 109541
+        }
+      },
+      "installed_eboot_actual": {
+        "sha256": "8c33610a8101a80740b44132eeffa5635b238105ab692c174a244cb672489a41",
+        "size_bytes": 718526
+      },
+      "last_good_script_preserved": true,
+      "last_good_state_preserved": true,
+      "publication_attempted": false,
+      "result": "EXPECTED_REJECTION",
+      "rsp_connection_attempted": false
+    },
+    "final_identity_refresh": {
+      "build_changed": false,
+      "changes": {
+        "added": [],
+        "rebased": [
+          "SceAppUtil",
+          "UVDBAslrFixture",
+          "test.elf"
+        ],
+        "removed": [],
+        "symbol_changes": []
+      },
+      "module_count": 15,
+      "result": "PASS",
+      "script_sha256": "4a92b7a8d23fbfaa9f92fe128b9a096b3d52b41d246b1ae433eb705364d2ac00",
+      "state_file_sha256": "d5240d06a400f32c6fdcf63474f431149c97673c5d18b622e65cc2039a42bf2a",
+      "verification": "local+installed"
+    },
+    "installed_build_verification": {
+      "checked_installed_paths": [
+        "eboot.bin",
+        "module/uvdb_aslr_fixture.suprx"
+      ],
+      "required_module": "UVDBAslrFixture",
+      "result": "PASS",
+      "verification": "local+installed"
+    },
+    "same_process_refresh": {
+      "build_changed": false,
+      "changes": {
+        "added": [],
+        "rebased": [],
+        "removed": [],
+        "symbol_changes": []
+      },
+      "published_script_changed": false,
+      "published_state_changed": false,
+      "result": "PASS"
+    },
+    "source_breakpoints_across_reconnect_and_relaunch": {
+      "address_change_observed": true,
+      "clean_relaunches": 2,
+      "gdb_sessions": 5,
+      "lifecycle_evidence_sha256": "33d26ffbb481fe97f1a273b8deeb7216ff1e5b223a7ec739804a607019442612",
+      "main_source_breakpoint_hits": 5,
+      "result": "PASS",
+      "user_suprx_source_breakpoint_hits": 5
+    }
+  },
+  "hardware": {
+    "device_class": "retail-handheld",
+    "firmware": "3.65",
+    "kernel_abi": "0x0001000b",
+    "kernel_plugin": {
+      "sha256": "1fff3fe7872513f76f8a4b8ef2e7c83d51559a352f44a262965513fc47029220",
+      "size_bytes": 7906
+    }
+  },
+  "lifecycle": {
+    "address_changes": [
+      {
+        "label": "initial_to_first_relaunch",
+        "main_after": [
+          "0x81013000",
+          "0x81080000"
+        ],
+        "main_before": [
+          "0x81065000",
+          "0x81100000"
+        ],
+        "suprx_after": [
+          "0x81077000",
+          "0x81078000"
+        ],
+        "suprx_before": [
+          "0x810d7000",
+          "0x810e2000"
+        ]
+      },
+      {
+        "label": "first_to_second_relaunch",
+        "main_after": [
+          "0x8104f000",
+          "0x81080000"
+        ],
+        "main_before": [
+          "0x81013000",
+          "0x81080000"
+        ],
+        "suprx_after": [
+          "0x8107f000",
+          "0x810d2000"
+        ],
+        "suprx_before": [
+          "0x81077000",
+          "0x81078000"
+        ]
+      }
+    ],
+    "finished_utc": "2026-09-14T17:00:16.529719+00:00",
+    "gdb_version": "GNU gdb (GDB) 15.2",
+    "phases": [
+      "initial_solib",
+      "same_process_solib_reconnect",
+      "relaunched_solib_reuse",
+      "explicit_current_launch",
+      "explicit_regenerated_after_relaunch"
+    ],
+    "started_utc": "2026-09-14T16:59:39.845917+00:00"
+  },
+  "result": "PASS",
+  "safety": {
+    "failed_identity_check_published_partial_view": false,
+    "identity_failure_entered_compatibility_mode": false,
+    "installed_verification_is_read_only": true,
+    "kernel_plugin_changed_for_test": false,
+    "mismatch_rejected_before_rsp": true
+  },
+  "schema": "vitadebugger-aslr-build-identity-live-v1",
+  "validation": {
+    "aslr_lifecycle_host_tests": {
+      "count": 13,
+      "result": "PASS"
+    },
+    "build_identity_and_symbol_host_tests": {
+      "count": 29,
+      "result": "PASS"
+    },
+    "installed_identity": "PASS",
+    "mismatch_fail_closed": "PASS",
+    "real_gdb_lifecycle": "PASS",
+    "same_process_idempotence": "PASS",
+    "vita_cross_build": "PASS"
+  }
+}

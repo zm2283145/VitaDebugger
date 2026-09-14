@@ -42,6 +42,7 @@ static const unsigned int COLOR_ERROR = RGBA8(251, 113, 133, 255);
 static const unsigned int COLOR_ERROR_DARK = RGBA8(127, 29, 29, 255);
 
 static int ui_ready;
+static int ui_frame_presented;
 static vita2d_pgf *ui_font;
 static uint64_t waiting_frame;
 static uint64_t last_promotion_frame = UINT64_MAX;
@@ -234,6 +235,16 @@ static void draw_frame(enum VdevUiMode mode, int percent,
         chip_color = COLOR_ERROR_DARK;
     }
 
+    /*
+     * libvita2d resets and reuses one temporary vertex/font pool in
+     * vita2d_start_drawing(). Startup deliberately presents several status
+     * frames in quick succession, so make sure the GPU has consumed the
+     * previous frame before allowing that pool to be overwritten. The first
+     * frame remains nonblocking.
+     */
+    if (ui_frame_presented) {
+        vita2d_wait_rendering_done();
+    }
     vita2d_start_drawing();
     vita2d_clear_screen();
     vita2d_draw_fill_circle(872.0f, -20.0f, 205.0f,
@@ -283,6 +294,7 @@ static void draw_frame(enum VdevUiMode mode, int percent,
 
     vita2d_end_drawing();
     vita2d_swap_buffers();
+    ui_frame_presented = 1;
 }
 
 int vdev_ui_init(void)
@@ -299,6 +311,7 @@ int vdev_ui_init(void)
     }
 
     ui_ready = 1;
+    ui_frame_presented = 0;
     waiting_frame = 0u;
     last_promotion_frame = UINT64_MAX;
     vdev_ui_status(2, "Starting", "Initializing the deployment agent");
@@ -313,6 +326,7 @@ void vdev_ui_finish(void)
     ui_font = NULL;
     vita2d_fini();
     ui_ready = 0;
+    ui_frame_presented = 0;
 }
 
 void vdev_ui_status(int percent, const char *stage, const char *detail)

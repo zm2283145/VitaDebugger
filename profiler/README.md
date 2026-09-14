@@ -18,6 +18,9 @@ The current increment provides:
   operation and explicit drop accounting.
 - A versioned 32-byte stream header and 32-byte event encoding with fixed-width
   fields and explicit little-endian serialization.
+- A bounded caller-owned name dictionary, automatic names for the eight Vita
+  metrics, and a separately versioned little-endian dictionary block for trace
+  receivers. The event wire ABI remains version 1.
 
 It does not start threads, allocate memory, open files, use the network, stop an
 application, or call the VitaDebugger kernel companion. No kernel plugin change
@@ -30,19 +33,37 @@ is part of this foundation.
 
 static struct vp_context profiler;
 static struct vp_slot profiler_slots[1024]; /* 40 KiB */
+static struct vp_name_dictionary profiler_names;
+static struct vp_name_entry profiler_name_entries[128];
+static char profiler_name_text[4096];
 
 static uint32_t frame_id;
 static uint32_t update_id;
+static uint32_t draw_calls_id;
 
 void profiler_start(void)
 {
+    struct vp_name_dictionary_config names = {
+        .entries = profiler_name_entries,
+        .entry_capacity = 128,
+        .text = profiler_name_text,
+        .text_capacity = sizeof(profiler_name_text),
+    };
+
     if (vp_vita_init(&profiler, profiler_slots, 1024) != VP_RESULT_OK)
         return;
 
-    /* Hash names once, outside hot paths. The future viewer will use the same
-       stable IDs and a name table supplied by the application/build. */
-    frame_id = vp_name_id("main frame");
-    update_id = vp_name_id("update");
+    /* Registration copies text into bounded caller-owned storage. Perform it
+       once before worker threads start, then seal the immutable dictionary. */
+    if (vp_name_dictionary_init(&profiler_names, &names) != VP_RESULT_OK ||
+        vp_name_dictionary_register(&profiler_names, "main frame",
+                                    &frame_id) != VP_RESULT_OK ||
+        vp_name_dictionary_register(&profiler_names, "update", &update_id) !=
+            VP_RESULT_OK ||
+        vp_name_dictionary_register(&profiler_names, "draw calls",
+                                    &draw_calls_id) != VP_RESULT_OK ||
+        vp_name_dictionary_seal(&profiler_names) != VP_RESULT_OK)
+        return;
 }
 
 void run_one_frame(void)
@@ -57,9 +78,14 @@ void run_one_frame(void)
         update_game();
     }
 
-    vp_counter(&profiler, vp_name_id("draw calls"), draw_call_count);
+    vp_counter(&profiler, draw_calls_id, draw_call_count);
 }
 ```
+
+Register every name that a trace receiver should display; cached IDs avoid
+hashing strings in hot paths.
+See [Profiler name dictionary](docs/name-dictionary.md) for complete lifecycle,
+wire-format, receiver, collision, and capacity details.
 
 Call `vp_vita_record_memory()` at a low frequency, such as once per second, not
 once per draw. Call `vp_vita_record_thread()` with `0` for the current thread or
@@ -81,10 +107,10 @@ struct vp_event batch[64];
 size_t count = vp_drain(&profiler, batch, 64);
 ```
 
-The current foundation intentionally stops at this boundary. A later transport
-can encode each record with `vp_encode_event_le()` and send batches through a
-binary telemetry channel, a file, or a desktop trace viewer without changing
-instrumented game code.
+An exporter can encode each record with `vp_encode_event_le()` and send batches
+through a binary telemetry channel, a file, or a desktop trace viewer without
+changing instrumented game code. Export the sealed name dictionary with
+`vp_encode_name_dictionary_le()` so that receiver can label each numeric ID.
 
 ## Concurrency and overload behavior
 
@@ -141,10 +167,11 @@ of the file/network ABI. The header records wire version 1, 32-byte header and
 event sizes, and a 1 MHz timestamp frequency.
 
 Names are not copied into the hot ring. `vp_name_id()` returns stable 32-bit
-FNV-1a IDs; callers should cache them and eventually provide an ID-to-name table
-to the viewer. Hash collisions are possible and must be rejected when such a
-table is built. IDs from `0xfff00001` through `0xfff00008` are reserved for the
-built-in Vita samples.
+FNV-1a IDs; callers should cache them. The name dictionary now provides the
+ID-to-name table for the viewer, rejects collisions during registration, and
+validates IDs again when a receiver opens the encoded block. IDs from
+`0xfff00001` through `0xfff00008` are reserved and automatically resolve to the
+built-in Vita sample names.
 
 ## What works without the kernel companion
 
@@ -196,8 +223,10 @@ On a Unix-like development host with a native C compiler:
 make host-test
 ```
 
-The native test checks validation, bounded drop/reuse behavior, FIFO ordering,
-zone/frame semantics, exact wire bytes, and concurrent multi-producer delivery.
+The native tests check validation, bounded drop/reuse behavior, FIFO ordering,
+zone/frame semantics, exact event and dictionary wire bytes, dictionary
+collisions/capacity/truncation, concurrent multi-producer delivery, and
+concurrent read-only name resolution after sealing.
 
 From a Visual Studio Developer Command Prompt on Windows:
 
@@ -205,6 +234,8 @@ From a Visual Studio Developer Command Prompt on Windows:
 if not exist build\host mkdir build\host
 cl /nologo /std:c11 /O2 /W4 /WX /Iinclude src\vitaprofiler.c tests\test_vitaprofiler.c /Febuild\host\test_vitaprofiler.exe
 build\host\test_vitaprofiler.exe
+cl /nologo /std:c11 /O2 /W4 /WX /Iinclude src\vitaprofiler.c src\vitaprofiler_names.c tests\test_vitaprofiler_names.c /Febuild\host\test_vitaprofiler_names.exe
+build\host\test_vitaprofiler_names.exe
 ```
 
 The Vita adapter is intentionally excluded from the native executable because
@@ -223,16 +254,21 @@ The resulting `build/vita-probe/vitaprofiler-probe.vpk` is an ordinary
 user-mode application with title ID `VDPR00001`. It does not call or require
 the VitaDebugger kernel plugin. On real hardware it displays PASS/FAIL checks
 for timing zones, frame markers, counters, memory and current-thread snapshots,
-exact wire encoding, concurrent multi-producer pressure/drop accounting, and
-ring reuse. The result remains on screen for five minutes before the diagnostic
-exits normally.
+exact event and name-dictionary encoding, live ID-to-name resolution,
+concurrent multi-producer pressure/drop accounting, and ring reuse. The result
+remains on screen for five minutes before the diagnostic exits normally.
 
-The first run on the project's retail Vita running system software 3.65 passed
-all 11 checks, including four concurrent producers accepting the 64-slot
-capacity, accounting for all 448 excess events as drops, draining unique
-complete records, and reusing a drained slot. The app
-then exited normally after its five-minute result display. See the [unedited
-result screenshot](../docs/hardware/profiler-user-mode-probe-v1.jpg).
+The original retail 3.65 run passed all 11 core checks, including four
+concurrent producers accepting the 64-slot capacity, accounting for all 448
+excess events as drops, draining unique complete records, and reusing a
+drained slot. See the [original unedited result
+screenshot](../docs/hardware/profiler-user-mode-probe-v1.jpg).
+
+The dictionary-enabled probe subsequently passed all 13 checks on retail 3.65.
+The two added gates prove bounded dictionary encoding and live resolution of
+every captured event ID, including custom and built-in names. See the [unedited
+13-check result
+screenshot](../docs/hardware/profiler-name-dictionary-3.65.jpg).
 
 The probe link reserves `__sce_headroom=0x1000`. This uses the VitaSDK linker
 script's supported SCE-metadata headroom mechanism and avoids a Windows

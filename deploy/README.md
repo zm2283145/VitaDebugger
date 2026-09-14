@@ -118,10 +118,12 @@ activity, and distinct waiting, completion, and error states. Its retail 3.65
 lifecycle gate passed six consecutive post-refresh launch/exit cycles: three
 SceShell peel closures and three Circle cleanup exits, with no GPU fault or
 LiveArea hang during that sequence. Two intermittent launch-time GPU faults are
-now documented outside that sequence; the later attempt recovered by reopening
-the agent and reusing its fresh waiting session. The interface stays opt-in and
-must not be used for unattended deployment until the startup/teardown race is
-isolated and fixed.
+now documented outside that sequence. Both dumps resolve to the third rapid
+startup frame while `vita2d_swap_buffers` is adding its display-queue entry.
+The UI now waits for prior GPU rendering before libvita2d can reset and reuse
+its shared transient vertex/font pool. The guard is host tested but still needs
+a hardware stress gate, so the interface stays opt-in and must not be used for
+unattended deployment yet.
 See [the hardware report](../docs/hardware/vitadevdeploy-ui-3.65.md) and the
 upstream/license notice in [THIRD_PARTY.md](THIRD_PARTY.md).
 
@@ -616,9 +618,12 @@ after the first installation.
   Circle cleanup exits, with no GPU fault or LiveArea hang in that sequence.
   Two intermittent launch-time GPU faults have nevertheless been observed. A
   later manual reopen plus `--reuse-running-agent` completed the same signed
-  install normally, so package verification/promotion remained healthy, but
-  the graphics startup cause is unresolved. The interface remains opt-in;
-  production artifacts default to headless.
+  install normally, so package verification/promotion remained healthy. Both
+  preserved dumps identify the third rapid startup presentation and its
+  `vita2d_swap_buffers` display-queue submission. A new guard prevents reuse of
+  libvita2d's shared transient pool until prior rendering finishes; hardware
+  stress validation is pending. The interface remains opt-in; production
+  artifacts default to headless.
 - Updating an already installed app may leave SceShell's cached generic
   LiveArea background visible even when the packaged and installed asset bytes
   match. The ordinary system database update triggered by removing and

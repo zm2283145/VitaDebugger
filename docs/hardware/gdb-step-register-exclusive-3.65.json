@@ -1,0 +1,138 @@
+{
+  "artifacts": {
+    "elf": {
+      "sha256": "68980bccf3757a44f2959e5acfa32bf45950c0b17a55d1d695b9e329d4678bc1",
+      "size_bytes": 652984
+    },
+    "vpk": {
+      "sha256": "7b5c93f72b702503eb08685b523308e64458719d2d2bd014686031ed659d6abe",
+      "size_bytes": 315202
+    }
+  },
+  "finished_utc": "2026-09-14T17:25:14.148163Z",
+  "gdb": {
+    "individual_register_packets_forced": true,
+    "version": "GNU gdb (GDB) 15.2"
+  },
+  "hardware": {
+    "device_class": "retail-handheld",
+    "firmware": "3.65",
+    "kernel_abi": "0x0001000b"
+  },
+  "observations": {
+    "abrupt_disconnect_cleanup": {
+      "abrupt_disconnect_without_detach": true,
+      "armed_breakpoint_count": 2,
+      "clean_final_detach": true,
+      "exact_bytes_after": {
+        "arm_step_exclusive_after": "000052e3",
+        "thumb_step_exclusive_after": "002a"
+      },
+      "exact_bytes_before": {
+        "arm_step_exclusive_after": "000052e3",
+        "thumb_step_exclusive_after": "002a"
+      },
+      "recovered_breakpoint_count": 0,
+      "result": "PASS"
+    },
+    "arm_exclusive_step": {
+      "after": "0x8101343c",
+      "bounded_sequence_step": true,
+      "pc_after": "0x8101343c",
+      "result": "PASS",
+      "site": "0x81013430",
+      "state": "A32",
+      "stop_reason": "end-stepping-range",
+      "stop_thread": "0x40010003",
+      "strex_status_r2": "0x00000000",
+      "word_after": "0x24683cf8",
+      "word_before": "0x24683cf7"
+    },
+    "clean_reconnect": {
+      "application_progressed": true,
+      "clean_detach_count": 2,
+      "progress_after": "0x00005366",
+      "progress_before": "0x00005346",
+      "result": "PASS",
+      "software_breakpoints": 0
+    },
+    "fixture_byte_preflight": {
+      "bytes": {
+        "arm_step_exclusive_after": "000052e3",
+        "arm_step_exclusive_site": "9f1f90e1",
+        "step_target": "80b4",
+        "thumb_step_exclusive_after": "002a",
+        "thumb_step_exclusive_site": "50e8001f"
+      },
+      "checked_before_first_breakpoint": true,
+      "result": "PASS"
+    },
+    "hidden_breakpoint_step_over": {
+      "E16_observed": false,
+      "address": "0x81012b4a",
+      "first_pc": "0x81012b4a",
+      "gdb_hidden_step_over": true,
+      "result": "PASS",
+      "second_pc": "0x81012b4a",
+      "symbol": "step_target"
+    },
+    "register_transactions": {
+      "all_mutations_restored_before_resume_or_detach": true,
+      "cpsr": {
+        "mutated": "0x70010010",
+        "mutation_bit": "V",
+        "original": "0x60010010",
+        "packet_write_reply": "OK",
+        "read_back": true,
+        "restoration_read_back": true,
+        "restored": true
+      },
+      "gdb_thread": 1,
+      "individual_p_P_forced": true,
+      "r0": {
+        "mutated": "0x925b9fa7",
+        "original": "0x810c0478",
+        "packet_write_reply": "OK",
+        "read_back": true,
+        "restoration_read_back": true,
+        "restored": true
+      },
+      "result": "PASS",
+      "selected_exception_thread": "0x40010003"
+    },
+    "thumb_exclusive_step": {
+      "after": "0x8101341e",
+      "bounded_sequence_step": true,
+      "pc_after": "0x8101341e",
+      "result": "PASS",
+      "site": "0x81013414",
+      "state": "Thumb-2",
+      "stop_reason": "end-stepping-range",
+      "stop_thread": "0x40010003",
+      "strex_status_r2": "0x00000000",
+      "word_after": "0x13574e09",
+      "word_before": "0x13574e08"
+    }
+  },
+  "result": "PASS",
+  "safety": {
+    "abrupt_disconnect_cleanup_verified": true,
+    "application_deployed_by_gate": false,
+    "kernel_plugin_changed": false,
+    "register_mutations_restored_before_resume_or_detach": true
+  },
+  "schema": "vitadebugger-step-register-live-gdb-v1",
+  "sessions": [
+    {
+      "kind": "stepping_register_clean_detach",
+      "mi_record_count": 378,
+      "mi_sha256": "3a99e7e5720812bc48b958cef3ec19aac863234d678e4898bc3048466254d5d2"
+    },
+    {
+      "kind": "clean_reconnect_and_detach",
+      "mi_record_count": 88,
+      "mi_sha256": "22702c717cc286b3ec7163b2dc66745c262c0cdef38554a9e5fa7c0844d1f7d9"
+    }
+  ],
+  "started_utc": "2026-09-14T17:25:00.383381Z"
+}

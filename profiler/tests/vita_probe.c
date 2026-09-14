@@ -16,6 +16,10 @@
 static struct vp_context functional_context;
 static struct vp_slot functional_slots[FUNCTIONAL_CAPACITY];
 static struct vp_event functional_events[FUNCTIONAL_CAPACITY];
+static struct vp_name_dictionary functional_names;
+static struct vp_name_entry functional_name_entries[8];
+static char functional_name_text[128];
+static uint8_t functional_name_wire[1024];
 
 static struct vp_context stress_context;
 static struct vp_slot stress_slots[STRESS_CAPACITY];
@@ -77,6 +81,14 @@ static int encoded_event_matches(const struct vp_event* event)
            read_u16_le(encoded + 30) == event->flags;
 }
 
+static int name_view_matches(const struct vp_name_view* view,
+                             const char* expected)
+{
+    size_t length = strlen(expected);
+    return length == view->name_length &&
+           memcmp(view->name, expected, length) == 0;
+}
+
 static int test_exact_wire_encoding(void)
 {
     struct vp_wire_header header;
@@ -115,26 +127,51 @@ static int test_exact_wire_encoding(void)
 
 static void test_functional_events(void)
 {
+    struct vp_name_dictionary_config name_config;
     struct vp_zone_scope zone;
     struct vp_vita_memory_snapshot memory;
     struct vp_vita_thread_snapshot thread;
     struct vp_stats stats;
-    uint32_t zone_name = vp_name_id("probe zone");
-    uint32_t frame_name = vp_name_id("probe frame");
-    uint32_t counter_name = vp_name_id("probe counter");
+    uint32_t zone_name = 0u;
+    uint32_t frame_name = 0u;
+    uint32_t counter_name = 0u;
+    size_t name_wire_size = 0u;
     size_t count;
     size_t i;
     int calls_ok = 1;
     int zone_started;
     int event_shape_ok;
     int live_wire_ok = 1;
+    int names_ok;
+    int names_resolve_ok = 1;
 
+    memset(&name_config, 0, sizeof(name_config));
     memset(&zone, 0, sizeof(zone));
     memset(&memory, 0, sizeof(memory));
     memset(&thread, 0, sizeof(thread));
+    name_config.entries = functional_name_entries;
+    name_config.entry_capacity =
+        sizeof(functional_name_entries) / sizeof(functional_name_entries[0]);
+    name_config.text = functional_name_text;
+    name_config.text_capacity = sizeof(functional_name_text);
+    names_ok =
+        vp_name_dictionary_init(&functional_names, &name_config) ==
+            VP_RESULT_OK &&
+        vp_name_dictionary_register(&functional_names, "probe zone",
+                                    &zone_name) == VP_RESULT_OK &&
+        vp_name_dictionary_register(&functional_names, "probe frame",
+                                    &frame_name) == VP_RESULT_OK &&
+        vp_name_dictionary_register(&functional_names, "probe counter",
+                                    &counter_name) == VP_RESULT_OK &&
+        vp_name_dictionary_seal(&functional_names) == VP_RESULT_OK &&
+        vp_encode_name_dictionary_le(&functional_names, functional_name_wire,
+                                      sizeof(functional_name_wire),
+                                      &name_wire_size) == VP_RESULT_OK;
+    report_check("name dictionary registers, seals and encodes", names_ok);
     if (vp_vita_init(&functional_context, functional_slots,
                      FUNCTIONAL_CAPACITY) != VP_RESULT_OK) {
         report_check("functional profiler context initialized", 0);
+        vp_name_dictionary_deinit(&functional_names);
         return;
     }
     if (zone_name == 0u || frame_name == 0u || counter_name == 0u)
@@ -203,12 +240,31 @@ static void test_functional_events(void)
     report_check("13 live events retain FIFO shape and values", event_shape_ok);
 
     for (i = 0; i < count; ++i) {
-        if (!encoded_event_matches(&functional_events[i])) {
+        struct vp_name_view view;
+        if (!encoded_event_matches(&functional_events[i]))
             live_wire_ok = 0;
-            break;
-        }
+        if (!names_ok ||
+            vp_name_wire_lookup_le(functional_name_wire, name_wire_size,
+                                   functional_events[i].name_id, &view) !=
+                VP_RESULT_OK)
+            names_resolve_ok = 0;
     }
     report_check("live events survive wire encode/decode", live_wire_ok);
+    if (names_resolve_ok) {
+        struct vp_name_view zone_view;
+        struct vp_name_view builtin_view;
+        names_resolve_ok =
+            vp_name_wire_lookup_le(functional_name_wire, name_wire_size,
+                                   zone_name, &zone_view) == VP_RESULT_OK &&
+            name_view_matches(&zone_view, "probe zone") &&
+            vp_name_wire_lookup_le(functional_name_wire, name_wire_size,
+                                   VP_METRIC_FREE_USER_BYTES,
+                                   &builtin_view) == VP_RESULT_OK &&
+            name_view_matches(&builtin_view,
+                              "vita.memory.free_user_bytes");
+    }
+    report_check("captured event IDs resolve to useful names",
+                 names_resolve_ok);
     report_check("exact wire header and event byte layout",
                  test_exact_wire_encoding());
 
@@ -230,6 +286,7 @@ static void test_functional_events(void)
                          (uint32_t)(thread.run_clocks >> 32),
                          (uint32_t)thread.run_clocks);
     vp_deinit(&functional_context);
+    vp_name_dictionary_deinit(&functional_names);
 }
 
 static int stress_worker(SceSize args, void* argp)

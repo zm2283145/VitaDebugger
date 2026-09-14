@@ -32,6 +32,8 @@
 
 static volatile int test_value;
 volatile int trigger_fault;
+volatile uint32_t uvdb_thumb_exclusive_word = UINT32_C(0x13572468);
+volatile uint32_t uvdb_arm_exclusive_word = UINT32_C(0x24681357);
 static volatile int worker_values[2];
 static volatile unsigned int worker_ready_mask;
 /*
@@ -72,6 +74,8 @@ void thumb_step_ldr_pc_fixture(void);
 void arm_step_mov_fixture(void);
 void arm_step_ldm_fixture(void);
 void arm_step_ldr_pc_fixture(void);
+void thumb_step_exclusive_fixture(void);
+void arm_step_exclusive_fixture(void);
 
 __attribute__((noreturn)) static void hold_failed_gate(void)
 {
@@ -453,6 +457,8 @@ int main(void)
         arm_step_mov_fixture();
         arm_step_ldm_fixture();
         arm_step_ldr_pc_fixture();
+        thumb_step_exclusive_fixture();
+        arm_step_exclusive_fixture();
         if((i % 10) == 0)
         {
             psvDebugScreenPrintf("alive: i=%d value=%d\n", i, test_value);

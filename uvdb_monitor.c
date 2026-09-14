@@ -7,6 +7,83 @@
 
 static const char truncated_marker[] = "... output truncated\n";
 
+void uvdb_monitor_display_stop_reset(
+    struct uvdb_monitor_display_stop* stop)
+{
+    if(stop)
+        memset(stop, 0, sizeof(*stop));
+}
+
+int uvdb_monitor_display_stop_begin(
+    struct uvdb_monitor_display_stop* stop,
+    uint32_t generation)
+{
+    if(!stop || !generation ||
+       stop->phase != UVDB_MONITOR_DISPLAY_STOP_IDLE)
+        return -1;
+    stop->generation = generation;
+    stop->phase = UVDB_MONITOR_DISPLAY_STOP_NEEDS_SAMPLE;
+    return 0;
+}
+
+uint32_t uvdb_monitor_display_stop_pending_generation(
+    const struct uvdb_monitor_display_stop* stop)
+{
+    if(!stop || stop->phase != UVDB_MONITOR_DISPLAY_STOP_NEEDS_SAMPLE)
+        return 0;
+    return stop->generation;
+}
+
+int uvdb_monitor_display_stop_arm(
+    struct uvdb_monitor_display_stop* stop,
+    uint32_t generation)
+{
+    if(!stop || !generation ||
+       stop->phase != UVDB_MONITOR_DISPLAY_STOP_NEEDS_SAMPLE ||
+       stop->generation != generation)
+        return -1;
+    stop->phase = UVDB_MONITOR_DISPLAY_STOP_ARMED;
+    return 0;
+}
+
+enum uvdb_monitor_display_stop_action uvdb_monitor_display_stop_on_exception(
+    struct uvdb_monitor_display_stop* stop,
+    int is_initial_stop_trap)
+{
+    if(!stop)
+        return UVDB_MONITOR_DISPLAY_STOP_NOT_OURS;
+
+    if(is_initial_stop_trap)
+    {
+        if(stop->phase == UVDB_MONITOR_DISPLAY_STOP_ARMED)
+        {
+            uvdb_monitor_display_stop_reset(stop);
+            return UVDB_MONITOR_DISPLAY_STOP_HANDLE;
+        }
+        if(stop->phase == UVDB_MONITOR_DISPLAY_STOP_CANCELLED)
+        {
+            uvdb_monitor_display_stop_reset(stop);
+            return UVDB_MONITOR_DISPLAY_STOP_IGNORE;
+        }
+        return UVDB_MONITOR_DISPLAY_STOP_NOT_OURS;
+    }
+
+    if(stop->phase == UVDB_MONITOR_DISPLAY_STOP_NEEDS_SAMPLE)
+        uvdb_monitor_display_stop_reset(stop);
+    else if(stop->phase == UVDB_MONITOR_DISPLAY_STOP_ARMED)
+        stop->phase = UVDB_MONITOR_DISPLAY_STOP_CANCELLED;
+    return UVDB_MONITOR_DISPLAY_STOP_NOT_OURS;
+}
+
+int uvdb_monitor_display_generation_is_current(
+    uint32_t sample_generation,
+    int active_socket,
+    uint32_t active_generation)
+{
+    return active_socket >= 0 && sample_generation &&
+           sample_generation == active_generation;
+}
+
 struct monitor_builder {
     char* output;
     size_t capacity;
@@ -24,6 +101,52 @@ static int hex_value(char digit)
     if(digit >= 'A' && digit <= 'F')
         return digit - 'A' + 10;
     return -1;
+}
+
+int uvdb_monitor_ieee754_to_millihz(
+    uint32_t bits,
+    uint32_t* millihz)
+{
+    if(!millihz || (bits >> 31u))
+        return -1;
+    uint32_t exponent = (bits >> 23u) & 0xffu;
+    uint32_t fraction = bits & 0x7fffffu;
+    if(exponent == 0xffu)
+        return -1;
+
+    uint64_t significand;
+    int shift;
+    if(exponent)
+    {
+        significand = 0x800000u | fraction;
+        shift = (int)exponent - 150;
+    }
+    else
+    {
+        significand = fraction;
+        shift = -149;
+    }
+
+    uint64_t scaled = significand * 1000u;
+    if(shift >= 0)
+    {
+        if(shift >= 64 ||
+           scaled > ((uint64_t)UINT32_MAX >> (unsigned int)shift))
+            return -1;
+        scaled <<= shift;
+    }
+    else
+    {
+        unsigned int right = (unsigned int)-shift;
+        if(right >= 64u)
+            scaled = 0;
+        else if(right)
+            scaled = (scaled + (UINT64_C(1) << (right - 1u))) >> right;
+    }
+    if(scaled > 1000000u)
+        return -1;
+    *millihz = (uint32_t)scaled;
+    return 0;
 }
 
 static int command_equals(const char* command, size_t size, const char* value)
@@ -82,6 +205,10 @@ int uvdb_monitor_parse_qrcmd(
         *command = UVDB_MONITOR_COMMAND_THREADS;
     else if(command_equals(text, size, "modules"))
         *command = UVDB_MONITOR_COMMAND_MODULES;
+    else if(command_equals(text, size, "console"))
+        *command = UVDB_MONITOR_COMMAND_CONSOLE;
+    else if(command_equals(text, size, "display"))
+        *command = UVDB_MONITOR_COMMAND_DISPLAY;
     else
         return UVDB_MONITOR_PARSE_UNKNOWN;
     return UVDB_MONITOR_PARSE_OK;
@@ -199,7 +326,9 @@ static void render_help(struct monitor_builder* builder)
         "  help     Show this command list\n"
         "  status   Show debugger, stop-session, and fault state\n"
         "  threads  List stopped process threads and selections\n"
-        "  modules  List loaded modules and memory segments\n");
+        "  modules  List loaded modules and memory segments\n"
+        "  console  Show bounded GDB console queue and transport statistics\n"
+        "  display  Show read-only framebuffer and display state\n");
 }
 
 static void render_status(
@@ -375,6 +504,199 @@ static void render_modules(
     }
 }
 
+static void append_record_bytes(
+    struct monitor_builder* builder,
+    uint32_t records,
+    uint32_t bytes)
+{
+    append_u64_decimal(builder, records);
+    append_string(builder, " records / ");
+    append_u64_decimal(builder, bytes);
+    append_string(builder, " bytes");
+}
+
+static void render_console(
+    struct monitor_builder* builder,
+    const struct uvdb_monitor_console* console)
+{
+    append_string(builder, "VitaDebugger console\n");
+    if(!console->available)
+    {
+        append_string(builder, "  unavailable\n");
+        return;
+    }
+
+    append_string(builder, "  session: ");
+    append_string(builder, console->session_open ? "open" : "closed");
+    append_string(builder, ", generation=");
+    append_u64_decimal(builder, console->session_generation);
+    append_string(builder, ", no-ack=");
+    append_string(builder, console->no_ack_mode ? "yes" : "no");
+    append_string(builder, ", transport-failed=");
+    append_string(builder, console->transport_failed ? "yes" : "no");
+
+    append_string(builder, "\n  queued: ");
+    append_record_bytes(builder, console->queued_records,
+                        console->queued_bytes);
+    append_string(builder, "\n  accepted: ");
+    append_record_bytes(builder, console->accepted_records,
+                        console->accepted_bytes);
+    append_string(builder, "\n  sent: ");
+    append_record_bytes(builder, console->sent_records,
+                        console->sent_bytes);
+
+    append_string(builder, "\n  dropped-disconnected: ");
+    append_record_bytes(builder, console->dropped_disconnected_records,
+                        console->dropped_disconnected_bytes);
+    append_string(builder, "\n  dropped-contention: ");
+    append_record_bytes(builder, console->dropped_contention_records,
+                        console->dropped_contention_bytes);
+    append_string(builder, "\n  dropped-full: ");
+    append_record_bytes(builder, console->dropped_full_records,
+                        console->dropped_full_bytes);
+    append_string(builder, "\n  dropped-stale: ");
+    append_record_bytes(builder, console->dropped_stale_records,
+                        console->dropped_stale_bytes);
+
+    uint64_t dropped_records =
+        (uint64_t)console->dropped_disconnected_records +
+        console->dropped_contention_records +
+        console->dropped_full_records + console->dropped_stale_records;
+    uint64_t dropped_bytes =
+        (uint64_t)console->dropped_disconnected_bytes +
+        console->dropped_contention_bytes +
+        console->dropped_full_bytes + console->dropped_stale_bytes;
+    append_string(builder, "\n  dropped-total: ");
+    append_u64_decimal(builder, dropped_records);
+    append_string(builder, " records / ");
+    append_u64_decimal(builder, dropped_bytes);
+    append_string(builder, " bytes");
+
+    append_string(builder, "\n  lifecycle: sessions=");
+    append_u64_decimal(builder, console->sessions_opened);
+    append_string(builder, " reconnects=");
+    append_u64_decimal(builder, console->reconnects);
+    append_string(builder, "\n  transport: frames=");
+    append_u64_decimal(builder, console->frames_sent);
+    append_string(builder, " frame-bytes=");
+    append_u64_decimal(builder, console->frame_bytes_sent);
+    append_string(builder, " would-block=");
+    append_u64_decimal(builder, console->would_block);
+    append_string(builder, " commit-busy=");
+    append_u64_decimal(builder, console->commit_busy);
+    append_string(builder, "\n  transport-errors: partial=");
+    append_u64_decimal(builder, console->partial_writes);
+    append_string(builder, " hard=");
+    append_u64_decimal(builder, console->hard_errors);
+    append_string(builder, " session=");
+    append_u64_decimal(builder, console->session_errors);
+    append_string(builder, " last-native=");
+    append_hex32(builder, (uint32_t)console->last_native_error);
+    append_char(builder, '\n');
+}
+
+static const char* pixel_format_name(uint32_t format)
+{
+    if(format == 0x00000000u)
+        return "A8B8G8R8";
+    if(format == 0x60800000u)
+        return "A2B10G10R10";
+    return "unknown";
+}
+
+static void render_framebuffer(
+    struct monitor_builder* builder,
+    const char* label,
+    const struct uvdb_monitor_framebuffer* framebuffer)
+{
+    append_string(builder, "  framebuffer-");
+    append_string(builder, label);
+    append_string(builder, ": ");
+    if(framebuffer->query_result < 0)
+    {
+        append_string(builder, "unavailable, result=");
+        append_hex32(builder, (uint32_t)framebuffer->query_result);
+        append_char(builder, '\n');
+        return;
+    }
+    append_string(builder, "address=");
+    append_hex32(builder, framebuffer->address);
+    append_string(builder, " size=");
+    append_u64_decimal(builder, framebuffer->width);
+    append_char(builder, 'x');
+    append_u64_decimal(builder, framebuffer->height);
+    append_string(builder, " pitch=");
+    append_u64_decimal(builder, framebuffer->pitch);
+    append_string(builder, " format=");
+    append_string(builder, pixel_format_name(framebuffer->pixel_format));
+    append_char(builder, '(');
+    append_hex32(builder, framebuffer->pixel_format);
+    append_string(builder, ")\n");
+}
+
+static void render_display(
+    struct monitor_builder* builder,
+    const struct uvdb_monitor_display* display)
+{
+    append_string(builder, "VitaDebugger display\n");
+    if(!display->available)
+    {
+        append_string(builder,
+                      "  unavailable: no safe cached server-thread sample\n");
+        return;
+    }
+
+    append_string(builder, "  primary-head: ");
+    if(display->primary_head < 0)
+    {
+        append_string(builder, "unavailable, result=");
+        append_hex32(builder, (uint32_t)display->primary_head);
+    }
+    else
+        append_u64_decimal(builder, (uint32_t)display->primary_head);
+    append_string(builder, "\n  vcount: ");
+    if(display->vcount < 0)
+    {
+        append_string(builder, "unavailable, result=");
+        append_hex32(builder, (uint32_t)display->vcount);
+    }
+    else
+        append_u64_decimal(builder, (uint32_t)display->vcount);
+
+    append_string(builder, "\n  refresh-rate: ");
+    if(display->refresh_query_result < 0)
+    {
+        append_string(builder, "unavailable, result=");
+        append_hex32(builder, (uint32_t)display->refresh_query_result);
+    }
+    else
+    {
+        append_u64_decimal(builder, display->refresh_millihz / 1000u);
+        append_char(builder, '.');
+        uint32_t fraction = display->refresh_millihz % 1000u;
+        append_char(builder, (char)('0' + fraction / 100u));
+        append_char(builder, (char)('0' + (fraction / 10u) % 10u));
+        append_char(builder, (char)('0' + fraction % 10u));
+        append_string(builder, " Hz");
+    }
+
+    append_string(builder, "\n  maximum-framebuffer: ");
+    if(display->maximum_query_result < 0)
+    {
+        append_string(builder, "unavailable, result=");
+        append_hex32(builder, (uint32_t)display->maximum_query_result);
+    }
+    else
+    {
+        append_u64_decimal(builder, display->maximum_width);
+        append_char(builder, 'x');
+        append_u64_decimal(builder, display->maximum_height);
+    }
+    append_char(builder, '\n');
+    render_framebuffer(builder, "immediate", &display->immediate);
+    render_framebuffer(builder, "next", &display->next_frame);
+}
+
 static int snapshot_valid(
     enum uvdb_monitor_command command,
     const struct uvdb_monitor_snapshot* snapshot)
@@ -399,7 +721,9 @@ static int snapshot_valid(
     }
     return command == UVDB_MONITOR_COMMAND_STATUS ||
            command == UVDB_MONITOR_COMMAND_THREADS ||
-           command == UVDB_MONITOR_COMMAND_MODULES;
+           command == UVDB_MONITOR_COMMAND_MODULES ||
+           command == UVDB_MONITOR_COMMAND_CONSOLE ||
+           command == UVDB_MONITOR_COMMAND_DISPLAY;
 }
 
 int uvdb_monitor_render(
@@ -433,6 +757,12 @@ int uvdb_monitor_render(
             break;
         case UVDB_MONITOR_COMMAND_MODULES:
             render_modules(&builder, snapshot);
+            break;
+        case UVDB_MONITOR_COMMAND_CONSOLE:
+            render_console(&builder, &snapshot->console);
+            break;
+        case UVDB_MONITOR_COMMAND_DISPLAY:
+            render_display(&builder, &snapshot->display);
             break;
         default:
             return UVDB_MONITOR_RENDER_INVALID;

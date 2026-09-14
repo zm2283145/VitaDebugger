@@ -203,4 +203,59 @@ arm_step_ldr_pc_target:
     .word .Larm_ldr_table
 .size arm_step_ldr_pc_fixture, .-arm_step_ldr_pc_fixture
 
+/* A software trap immediately after LDREX would clear the local exclusive
+ * monitor and perturb STREX. These two fixtures let the debugger validate its
+ * bounded straight-line LDREX..STREX sequence step in both execution states.
+ * The label immediately after STREX is the expected temporary-trap stop. */
+
+.thumb
+.balign 4
+.global thumb_step_exclusive_fixture
+.global thumb_step_exclusive_site
+.global thumb_step_exclusive_store
+.global thumb_step_exclusive_after
+.type thumb_step_exclusive_fixture, %function
+.thumb_func
+thumb_step_exclusive_fixture:
+    push {r4, lr}
+    ldr r0, .Lthumb_exclusive_word_address
+.Lthumb_exclusive_retry:
+thumb_step_exclusive_site:
+    ldrex r1, [r0]
+    adds r1, #1
+thumb_step_exclusive_store:
+    strex r2, r1, [r0]
+thumb_step_exclusive_after:
+    cmp r2, #0
+    bne .Lthumb_exclusive_retry
+    pop {r4, pc}
+    .balign 4
+.Lthumb_exclusive_word_address:
+    .word uvdb_thumb_exclusive_word
+.size thumb_step_exclusive_fixture, .-thumb_step_exclusive_fixture
+
+.arm
+.balign 4
+.global arm_step_exclusive_fixture
+.global arm_step_exclusive_site
+.global arm_step_exclusive_store
+.global arm_step_exclusive_after
+.type arm_step_exclusive_fixture, %function
+arm_step_exclusive_fixture:
+    push {r4, lr}
+    ldr r0, .Larm_exclusive_word_address
+.Larm_exclusive_retry:
+arm_step_exclusive_site:
+    ldrex r1, [r0]
+    add r1, r1, #1
+arm_step_exclusive_store:
+    strex r2, r1, [r0]
+arm_step_exclusive_after:
+    cmp r2, #0
+    bne .Larm_exclusive_retry
+    pop {r4, pc}
+.Larm_exclusive_word_address:
+    .word uvdb_arm_exclusive_word
+.size arm_step_exclusive_fixture, .-arm_step_exclusive_fixture
+
 .thumb

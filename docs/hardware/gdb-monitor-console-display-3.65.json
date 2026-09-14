@@ -1,0 +1,223 @@
+{
+  "artifacts": {
+    "eboot": {
+      "sha256": "8c33610a8101a80740b44132eeffa5635b238105ab692c174a244cb672489a41",
+      "size_bytes": 718526
+    },
+    "elf": {
+      "sha256": "68980bccf3757a44f2959e5acfa32bf45950c0b17a55d1d695b9e329d4678bc1",
+      "size_bytes": 652984
+    },
+    "vpk": {
+      "sha256": "7b5c93f72b702503eb08685b523308e64458719d2d2bd014686031ed659d6abe",
+      "size_bytes": 315202
+    }
+  },
+  "build": {
+    "configuration": [
+      "CFLAGS=-O2",
+      "UVDB_KERNEL_THREAD_CONTROL=1",
+      "UVDB_KERNEL_VFP_READS=1",
+      "UVDB_GDB_VFP_FIXTURE=1",
+      "UVDB_GDB_ASLR_FIXTURE=1",
+      "UVDB_MONITOR_DISPLAY=1",
+      "VITADEBUG_KERNEL_BUILD_DIR=kernel/build-vfp-live3"
+    ],
+    "source_base_commit": "5bc356f4e36e64db72ac1efe864a2218c7836280",
+    "source_tree": "working-tree feature build"
+  },
+  "deployment": {
+    "agent": "VitaDevDeploy",
+    "agent_session": "reused",
+    "job_id": "a588fc5360eef1f2e9e10d3056699e4b",
+    "manifest_sha256": "95784cef79751681e8008ea6fd4d8bd4a44c934c762bed60b7b1d95e6f7adebe",
+    "result": "installed_and_launched",
+    "title_id": "SLRS00001"
+  },
+  "gdb": {
+    "frontend_commands": [
+      "monitor help",
+      "monitor status",
+      "monitor threads",
+      "monitor modules",
+      "monitor console",
+      "monitor display",
+      "detach"
+    ],
+    "frontend_result": "PASS",
+    "version": "GNU gdb (GDB) 15.2"
+  },
+  "hardware": {
+    "device_class": "retail-handheld",
+    "firmware": "3.65",
+    "kernel_abi": "0x0001000b"
+  },
+  "observations": {
+    "console": {
+      "dropped_bytes": 0,
+      "dropped_records": 0,
+      "hard_errors": 0,
+      "session_errors": 0,
+      "transport_failed": false
+    },
+    "display": {
+      "format": "A8B8G8R8",
+      "framebuffer_address": "0x61000000",
+      "gdb_frontend_vcount": 3435,
+      "height": 544,
+      "pitch": 960,
+      "refresh_millihz": 59940,
+      "vcount_advanced": true,
+      "width": 960
+    },
+    "module_count": 15,
+    "normal_output_truncated": false,
+    "thread_count": 6
+  },
+  "recorded_utc_minute": "2026-09-14T17:12Z",
+  "result": "PASS",
+  "safety": {
+    "console_queue_consumed_or_reset": false,
+    "display_address_or_size_client_controlled": false,
+    "framebuffer_pixels_read": false,
+    "kernel_plugin_changed_for_test": false,
+    "malformed_command_rejected": true,
+    "selected_pc_preserved": true,
+    "thread_inventory_preserved": true,
+    "unknown_command_rejected": true
+  },
+  "schema": "vitadebugger-gdb-monitor-console-display-live-v1",
+  "sessions": {
+    "gdb_frontend": {
+      "clean_detach": true,
+      "module_count": 15,
+      "reports_displayed": [
+        "help",
+        "status",
+        "threads",
+        "modules",
+        "console",
+        "display"
+      ],
+      "thread_count": 6
+    },
+    "raw_rsp": {
+      "clean_detach_count": 2,
+      "console_generations": [
+        1,
+        2
+      ],
+      "display_vcounts": [
+        39,
+        3116
+      ],
+      "no_ack_negotiated_count": 2,
+      "reconnect": true,
+      "session_count": 2,
+      "stop_reply": "T05"
+    }
+  },
+  "validation": {
+    "complete_host_suite": "PASS",
+    "focused_monitor_suite": "PASS",
+    "gdb_frontend": "PASS",
+    "python_smoke_compile": "PASS",
+    "raw_rsp_two_session": "PASS",
+    "vita_cross_build": "PASS"
+  },
+  "follow_up": {
+    "artifacts": {
+      "eboot": {
+        "sha256": "a50195987e00fdc00bfc3f6ee9f2e858b3f9c003e0b1a6c9fa7c0aa3765cffee",
+        "size_bytes": 730766
+      },
+      "elf": {
+        "sha256": "677781d6a08c73e6f024baeabb3f39ef4ddcf3cdce0424454b0f64b26a73a478",
+        "size_bytes": 664912
+      },
+      "vpk": {
+        "sha256": "4458b2b522bce2633c2b04a25de09377ae0c3e314b692f3fc6e40bd5972a253f",
+        "size_bytes": 319899
+      }
+    },
+    "build": {
+      "configuration": [
+        "CFLAGS=-O2",
+        "UVDB_KERNEL_THREAD_CONTROL=1",
+        "UVDB_KERNEL_VFP_READS=1",
+        "UVDB_GDB_VFP_FIXTURE=1",
+        "UVDB_GDB_ASLR_FIXTURE=1",
+        "UVDB_MONITOR_DISPLAY=1",
+        "VITADEBUG_KERNEL_BUILD_DIR=kernel/build-vfp-live3"
+      ],
+      "source_base_commit": "5bc356f4e36e64db72ac1efe864a2218c7836280",
+      "source_tree": "working-tree post-fix feature build"
+    },
+    "deployment": {
+      "agent": "VitaDevDeploy",
+      "agent_session": "reused",
+      "action": "install_launch",
+      "job_id": "457cbe443ae7164b1e39b156fbe1b944",
+      "manifest_sha256": "7df5ef8ff228c46c252c0abcb7316f58143a3e689d545af0ca31e853ded343ba",
+      "result": "success",
+      "title_id": "SLRS00001"
+    },
+    "hardware": {
+      "device_class": "retail-handheld",
+      "firmware": "3.65",
+      "kernel_abi": "0x0001000b",
+      "kernel_plugin_changed_for_test": false
+    },
+    "observations": {
+      "application_idle_before_first_accept": true,
+      "console": {
+        "dropped_bytes": 0,
+        "dropped_records": 0,
+        "hard_errors": 0,
+        "session_errors": 0,
+        "transport_failed": false
+      },
+      "display": {
+        "format": "A8B8G8R8",
+        "height": 544,
+        "refresh_millihz": 59940,
+        "vcounts": [
+          2050,
+          2135
+        ],
+        "width": 960
+      },
+      "module_count": 15,
+      "thread_count": 6
+    },
+    "recorded_utc_minute": "2026-09-14T18:43Z",
+    "result": "PASS",
+    "scope": {
+      "gdb_frontend_rerun": false,
+      "gdb_frontend_note": "GDB 15.2 remains validated by the original full functional gate above; this rebuilt-artifact follow-up used raw RSP only.",
+      "raw_rsp_rerun": true
+    },
+    "sessions": {
+      "raw_rsp": {
+        "clean_detach_count": 2,
+        "console_generations": [
+          1,
+          2
+        ],
+        "display_vcounts": [
+          2050,
+          2135
+        ],
+        "reconnect": true,
+        "session_count": 2,
+        "stop_reply": "T05"
+      }
+    },
+    "validation": {
+      "current_generation_display_publish": "PASS",
+      "first_post_accept_sample": "PASS",
+      "raw_rsp_two_session": "PASS"
+    },
+    "interpretation": "Because the application was intentionally left idle before the first accept, the first reported vcount of 2050 demonstrates post-accept sampling for the current connection generation rather than reuse of a startup cache."
+  }
+}

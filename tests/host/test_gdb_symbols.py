@@ -264,6 +264,13 @@ class ProtocolTests(unittest.TestCase):
                 b'<library-list version="1.0"><library name="bad"/>'
                 b'</library-list>'
             )
+        with self.assertRaisesRegex(symbols.ProtocolError, "duplicate"):
+            symbols.parse_library_xml(
+                b'<library-list version="1.0">'
+                b'<library name="same"><segment address="0x82000000"/></library>'
+                b'<library name="same"><segment address="0x83000000"/></library>'
+                b'</library-list>'
+            )
 
     def test_live_query_chunks_and_detaches(self):
         filler = b"".join(
@@ -415,6 +422,12 @@ class WorkflowTests(unittest.TestCase):
                 allow_stem_match=False,
                 mode="solib",
                 solib_cache_root=None,
+                build_identity=None,
+                allow_unverified_build=True,
+                vpk=None,
+                verify_installed=False,
+                ftp_port=1337,
+                ftp_timeout=5,
                 output=output,
                 gdb=None,
             )
@@ -428,6 +441,7 @@ class WorkflowTests(unittest.TestCase):
             self.assertIn("sharedlibrary", generated)
             self.assertNotIn("add-symbol-file", generated)
             self.assertIn("RuntimeLib", generated)
+            self.assertIn("UNVERIFIED COMPATIBILITY MODE", generated)
             cached = list((root / ".uvdb-solib").glob("*/RuntimeLib"))
             self.assertEqual(len(cached), 1)
             self.assertEqual(

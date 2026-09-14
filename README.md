@@ -94,9 +94,12 @@ status includes:
   thread executes one instruction, and passes detach/reconnect testing. The
   internal lease keeper remains runnable to maintain the stop. True scheduler-locked
   execution of an arbitrary foreign thread remains pending.
-- Hardware-tested ARM-state software stepping for `MOV PC, Rm`, decrementing
-  load-multiple with writeback, and `LDR PC, [Rn]`, including exact PC and
-  register-effect checks plus clean detach and reconnect.
+- Hardware-tested practical GDB stepping for the exact positive-`Hc` hidden-
+  breakpoint step-over without `E16`, representative ARM-state `MOV PC, Rm`,
+  decrementing load-multiple, and `LDR PC, [Rn]` writers, plus bounded Thumb-2
+  and A32 `LDREX`/`STREX` sequences. Both exclusive sequences completed one
+  successful store and stopped after `STREX`; abrupt disconnect recovery
+  removed both armed traps and restored their exact original instruction bytes.
 - Hardware-tested read-only GDB register integration for main and worker
   threads owned by an active stop session, including state-dependent selection
   of runnable/current and syscall-return ARM banks plus symbolized stack frames.
@@ -117,12 +120,12 @@ status includes:
   gate also passes foreign-thread reads through continue, clean detach,
   transport loss, and two reconnect paths.
 - GDB loaded-module discovery through chunk-safe `qXfer:libraries:read` and
-  main-module `qOffsets` derived from the same live segment metadata,
-  hardware-tested with 14 executable and system modules. A bounded host tool
-  matches compatible unstripped ELFs and generates ASLR-aware GDB setup. Its
-  live main-plus-user-SUPRX gate passes five source-breakpoint sessions across
-  same-process detach/reconnect, two fresh-ASLR relaunches, automatic solib
-  reuse, and explicit-address regeneration.
+  main-module `qOffsets` derived from the same live segment metadata. The
+  bounded host workflow now passes installed main/SUPRX build-identity checks,
+  deliberate mismatch rejection before RSP connection, an idempotent same-
+  process refresh, and five main-plus-user-SUPRX source-breakpoint sessions
+  across detach/reconnect and two fresh-ASLR relaunches. ASLR correctness and
+  the verified-build milestone are complete.
 - A completed bounded `stdout`/`stderr` bridge that emits GDB `O` packets only
   after no-ack negotiation, never gives application threads ownership of the
   RSP socket, and isolates output between reconnect generations. Native tests
@@ -133,11 +136,18 @@ status includes:
   streams, stopped with `T02` on Ctrl-C, remained quiet while stopped, and
   detached cleanly before the fresh reconnect.
 - A fixed read-only GDB `qRcmd` registry for `monitor help`, `status`,
-  `threads`, and `modules`. Exact command parsing, bounded snapshots, safe name
-  rendering, and line-safe response truncation pass native host tests. On a
-  retail Vita running system software 3.65, the automated two-session gate and
-  a real GDB 15.2 session passed all four commands, state preservation, clean
-  detach, and reconnect with five stopped threads and 14 loaded modules.
+  `threads`, `modules`, `console`, and `display`. The latter two expose bounded
+  console transport/loss statistics and framebuffer/display metadata without
+  consuming the log queue or reading pixels. Exact command parsing, bounded
+  snapshots, safe name rendering, and line-safe response truncation pass native
+  host tests. On a retail Vita running system software 3.65, two raw-RSP
+  sessions and GDB 15.2 passed all six commands, state preservation, clean
+  detach, and reconnect with six stopped threads, 15 loaded modules, a healthy
+  console transport, and coherent 960x544 display state at 59.940 Hz. A later
+  two-session raw-RSP follow-up on the rebuilt artifact also passed the
+  generation-scoped post-accept display sampler with vcounts 2050 and 2135,
+  clean reconnect, and no console loss or transport errors. The GDB front-end
+  portion remains evidence from the original full functional gate.
 - Hardware-tested DebugNet-compatible UDP logging with bounded messages,
   concurrent producers, stop/restart under load, and GDB attach/detach
   coexistence.
@@ -146,8 +156,10 @@ status includes:
   frame markers, Vita memory snapshots, and known-thread statistics.
 - A hardware-tested user-mode Vita profiler self-test covering event order,
   timing zones, counters, memory/thread snapshots, bounded multithreaded
-  pressure, wire encoding, exact drop accounting, and queue-slot reuse. All 11
-  on-device checks pass without calling the kernel plugin.
+  pressure, wire encoding, exact drop accounting, queue-slot reuse, and the
+  bounded name dictionary. All 13 on-device checks pass, including live
+  resolution of every captured custom and built-in event ID, without calling
+  the kernel plugin.
 - A bundled, separately licensed VitaDevDeploy subproject. Its signed normal
   install-and-launch path has passed on retail hardware and its host-side
   validation, signing, startup, transport, and recovery logic has 73 automated
@@ -187,9 +199,11 @@ Vita screenshots and structured records capture the completed probe results:
 | VFP live GDB | [Lifecycle evidence](docs/hardware/gdb-vfp-live-3.65.json) | Foreign-thread D0/D31/FPSCR reads across continue/interrupt, detach/reconnect, transport loss without `D`, recovery, and final detach |
 | Individual `p`/`P` | [Transactional evidence](docs/hardware/gdb-register-pp-3.65.json) | Direct R0/CPSR packet mutation, byte-exact read-back and restoration in two sessions, clean detach/reconnect, and unchanged foreign core/VFP state after rejected writes |
 | ARM/Thumb step | [Live GDB evidence](docs/hardware/gdb-arm-thumb-step-3.65.json) | GDB's exact positive-`Hc` hidden-breakpoint step-over without `E16`, three representative ARM-state PC writers with exact register effects, clean detach, and reconnect |
-| ASLR + user SUPRX | [Lifecycle evidence](docs/hardware/gdb-aslr-suprx-3.65.json) | Main and loaded-user-module source breakpoints in five GDB sessions, stable same-process layout, automatic symbols after relaunch, explicit-symbol regeneration, and observed main/SUPRX address changes on both relaunches |
+| Practical step/register gate | [Exclusive-step lifecycle evidence](docs/hardware/gdb-step-register-exclusive-3.65.json) | Hidden-breakpoint step-over without `E16`, bounded Thumb-2 and A32 `LDREX`/`STREX`, restored R0/CPSR `p`/`P` transactions, exact trap-byte restoration after abrupt disconnect, and clean reconnect |
+| ASLR + verified build | [Build-identity lifecycle evidence](docs/hardware/gdb-aslr-build-identity-3.65.json) | Installed main/SUPRX identity verification, deliberate mismatch rejection with the last good view preserved, idempotent same-process refresh, and five source-breakpoint sessions across reconnect and two ASLR relaunches |
+| GDB monitor registry | [Console/display lifecycle evidence](docs/hardware/gdb-monitor-console-display-3.65.json) | Two raw-RSP sessions and GDB 15.2 passed `help`, `status`, `threads`, `modules`, `console`, and `display` with state preservation, clean detach/reconnect, non-consuming console statistics, and read-only display metadata |
 | DebugNet v24 | [Sustained UDP stream](docs/hardware/debugnet-v24-sustained-stream.jpg) | Logging remains live after a loaded stop/restart cycle, with the displayed queue draining and no packet drops or send errors |
-| Profiler v1 | [User-mode profiler probe](docs/hardware/profiler-user-mode-probe-v1.jpg) | Eleven passing checks for live zones, frames, counters, memory/thread snapshots, wire encoding, four-producer pressure/drop accounting, uniqueness, and ring reuse without kernel calls |
+| Profiler + names | [13-check probe](docs/hardware/profiler-name-dictionary-3.65.json) | Thirteen passing user-mode checks, including the original timing/counter/snapshot/ring-pressure coverage plus bounded dictionary encoding and live resolution of every captured custom and built-in event ID; no kernel calls |
 | VitaDevDeploy UI | [Retail 3.65 lifecycle evidence](docs/hardware/vitadevdeploy-ui-3.65.md) | Native vita2d waiting screen, six clean post-refresh launch/exit cycles through both SceShell peel-close and Circle cleanup, packaged LiveArea asset integrity, and successful artwork refresh; two intermittent launch-time GPU faults are now recorded and keep this mode experimental |
 
 Every listed probe check passed. These records document controlled test
@@ -490,6 +504,18 @@ socket readiness and nonblocking send path, in addition to `SceNetPs_stub`.
 Applications using module discovery must also link
 `SceKernelModulemgr_stub`; the included test Makefile supplies all three
 dependencies automatically.
+
+The read-only `monitor display` sampler is opt-in so the base archive does not
+force a display-library dependency on every application. Build with
+`UVDB_MONITOR_DISPLAY=1` and add `SceDisplay_stub` to the final application link
+when that command is needed. For a server-owned connection, the initial
+synthetic stop is deferred until after `accept`; sampling then occurs on the
+ordinary server thread outside the global debugger lock and exception context.
+The sample is published only for that same live socket generation, and the
+stopped exception path reads only the complete current-generation cache. A real
+fault cancels the deferred handoff and its later queued synthetic trap is
+ignored. A direct `uvdb_enter()` can therefore report display data as
+unavailable until the current generation receives an ordinary-context sample.
 
 Build the included test VPK with:
 
@@ -803,6 +829,15 @@ exception callback. It removes debugger breakpoints and handlers, closes
 sockets, restores redirected `stdout` and `stderr`, and releases debugger-owned
 buffers and the safe-memory message pipe.
 
+Orderly teardown first joins the server, obtains or recovers a coherent stop,
+verifies restoration of every debugger-owned breakpoint byte, ends the stop
+session, releases handlers, and only then joins the lease keeper and other
+helpers. `uvdb_stop_server()` may retain the lease keeper when a breakpoint
+restoration obligation is still outstanding; this prevents the watchdog from
+resuming application threads into an uncertain trap. This shutdown ordering is
+host-reviewed and host-tested, but the restoration-failure path has not yet
+received a fault-injected live-hardware proof.
+
 ### Optional stdout/stderr forwarding
 
 Start the persistent debugger service, then install the bridge after Vita
@@ -882,12 +917,12 @@ handler. Kernel-integrated builds suspend the other process threads coherently
 and can report a selected suspended thread's dynamically selected current or
 syscall-return general registers, PC, SP, LR, and CPSR. The new kernel boundary
 can capture a selected thread's candidate D0-D31 state and both raw FPSCR bank
-values without changing them. GDB
-  exposure remains compile-time opt-in pending the live GDB lifecycle gate;
-  foreign register writes are rejected. Strict `p` reads can select any
-  readable stopped thread. Strict `P` writes are limited to ARM core/CPSR state
-  in the selected exception thread and run inside a renewed stop-operation
-  boundary; VFP/FPA and foreign-thread writes return an error.
+values without changing them. GDB exposure remains compile-time opt-in; its
+retail 3.65 live lifecycle gate passed, while foreign register writes remain
+rejected. Strict `p` reads can select any readable stopped thread. Strict `P`
+writes are limited to ARM core/CPSR state in the selected exception thread and
+run inside a renewed stop-operation boundary; VFP/FPA and foreign-thread writes
+return an error.
 
 ## Connecting with GDB
 
@@ -936,14 +971,21 @@ monitor help
 monitor status
 monitor threads
 monitor modules
+monitor console
+monitor display
 ```
 
 The commands report debugger/stop/fault state, the stopped thread inventory,
-and loaded-module segments. They do not execute arbitrary command text. Output
-is returned as one bounded final hex-encoded `qRcmd` reply and ends with an
-explicit truncation marker if the full report cannot fit. See the
+loaded-module segments, bounded console transport/loss counters, and read-only
+display metadata. They do not consume the console queue, read framebuffer
+pixels, or execute arbitrary command text. Output is returned as one bounded
+final hex-encoded `qRcmd` reply and ends with an explicit truncation marker if
+the full report cannot fit. See the
 [GDB monitor-command guide](docs/gdb-monitor-commands.md) for the exact
-read-only boundary, report fields, host tests, and live-hardware evidence.
+read-only boundary and report fields. The retail 3.65 evidence preserves the
+original complete GDB 15.2 gate and a distinct rebuilt-artifact raw-RSP
+follow-up for current-generation, post-accept display sampling in the
+[console/display lifecycle record](docs/hardware/gdb-monitor-console-display-3.65.json).
 The automated two-session gate is:
 
 ```powershell
@@ -1002,11 +1044,13 @@ exact matching unstripped ELF on the development computer.
   kernel stop token is active and healthy, and no PC override was requested.
   Different, stale, library-only, multi-thread, and address-override forms fail
   closed. The explicit foreign-thread form remains `vCont;s:T;c`.
-- The retained-token step-over has no independent target-miss timeout yet. Its
-  decoder therefore rejects waits, syscalls, exclusive-load starts, unsupported
-  execution states, and uncertain PC writers, but a production resume-one path
-  still needs transactional cancellation and trap rollback if the predicted
-  instruction target is not reached.
+- The retained-token step-over has no independent target-miss timeout yet. It
+  accepts only bounded, recognized Thumb-2 or A32 `LDREX`-through-`STREX`
+  sequences at an exclusive-load start; unmatched, nested, overlong, or otherwise
+  unsupported exclusive sequences fail closed. Waits, syscalls, unsupported
+  execution states, and uncertain PC writers are also rejected. A production
+  resume-one path still needs transactional cancellation and trap rollback if
+  the predicted instruction target is not reached.
 - The initial accept path and exception/RSP path still hold a global spin lock
   across blocking work. Shutdown, registration, nested faults, and handler
   chaining need a bounded state-machine refactor before this is suitable for
@@ -1040,22 +1084,34 @@ exact matching unstripped ELF on the development computer.
   targets and word sources, unsupported CPSR execution states, and selected-
   thread operations that could block. The former positive-`Hc` `E16` step-over
   and representative ARM-state `MOV`/`LDMDB`/`LDR` fixtures pass live GDB on
-  retail 3.65. Privileged exception returns (`RFE`, `ERET`, and S-form ALU/LDM
-  returns), `BXJ`, legacy Thumb-2 PC moves, register-controlled ARM shifts, and
-  exclusive-load sequences remain deliberately fail-closed. The broader
+  retail 3.65. The bounded Thumb-2 and A32 `LDREX`/`STREX` fixtures also pass
+  with a successful single store and exact abrupt-disconnect trap restoration.
+  Privileged exception returns (`RFE`, `ERET`, and S-form ALU/LDM returns),
+  `BXJ`, legacy Thumb-2 PC moves, register-controlled ARM shifts, and
+  unsupported exclusive forms remain deliberately fail-closed. The broader
   decoder matrix has pure host-planner coverage; additional injected-memory
   and trap-rollback integration fixtures remain.
-- The ASLR-aware host tool safely automates symbol loading only when matching
-  unstripped ELFs are available. Main-module and loaded-user-SUPRX source
-  breakpoints pass across detach/reconnect and two relaunches on retail 3.65.
-  The runtime module list has names and segment addresses but no build digest,
-  so the developer must retain symbols from the exact deployed build. Sony
-  system modules remain unmatched unless suitable symbols are supplied.
+- The ASLR-aware host workflow requires the exact VPK, identity receipt, and
+  retained unstripped ELFs. Its retail 3.65 gate passed read-only verification
+  of the installed main and SUPRX bytes, deliberate mismatch rejection before
+  RSP connection with the last good view preserved, idempotent same-process
+  refresh, and the five-session main/SUPRX relaunch lifecycle. This completes
+  the ASLR and verified-build milestone. The receipt proves equality to the
+  retained artifacts, not publisher authenticity, and Sony system modules
+  remain unmatched unless suitable symbols are supplied. Live same-process
+  hot module churn and automatic IDE-triggered refresh are later convenience
+  integration, not unfinished ASLR correctness.
 - Remote syscall catching is not implemented.
 - Kernel plugins cannot be debugged with the current application-side stub.
-- Disconnect and error cleanup needs broader fault injection to prove bounded
-  socket shutdown, removal of every software breakpoint, all-stop release, and
-  recovery from a client or lease-keeper failure.
+- The practical gate proves exact cleanup of two armed exclusive-step traps
+  after an abrupt socket loss. Broader disconnect/error fault injection is still
+  needed for bounded socket shutdown, arbitrary breakpoint sets, all-stop
+  release, and recovery from a client or lease-keeper failure.
+- Shutdown now retains the lease keeper until every outstanding breakpoint
+  restoration obligation is resolved, then ends the stop session and releases
+  handlers and helpers in order. That safety change passes host review and
+  tests, but forced restoration failure has not yet been exercised live on a
+  Vita.
 - GDB console forwarding is intentionally bounded and lossy. It begins only
   after `QStartNoAckMode`, emits no unsolicited `O` packets after a stop reply,
   discards an old connection's bytes on reconnect, and can drop under socket or
@@ -1064,12 +1120,16 @@ exact matching unstripped ELF on the development computer.
   before calling `uvdb_restore_stdio()`; `uvdb_shutdown()` does this
   automatically. Use DebugNet for sustained logging.
 - GDB monitor commands are limited to the exact read-only `help`, `status`,
-  `threads`, and `modules` registry. Arguments and unregistered commands are
+  `threads`, `modules`, `console`, and `display` registry. Arguments and
+  unregistered commands are
   rejected; decoded command text is never executed or forwarded. Reports use
   fixed snapshot and packet bounds and visibly truncate at a complete line when
   possible. The retail 3.65 live gate passed state preservation, two clean raw-
-  RSP detach/reconnect sessions, and display through GDB 15.2. Other firmware
-  versions remain untested.
+  RSP detach/reconnect sessions, and display through GDB 15.2. A separate
+  rebuilt-artifact raw-RSP follow-up passed generation-scoped sampling after
+  `accept`; the front-end portion was not rerun in that follow-up. `display`
+  reports buffer metadata only; it does not copy pixels or produce screenshots.
+  Other firmware versions remain untested.
 - The optional stdio bridge uses Vita newlib's private descriptor map because
   Vita newlib does not export `dup2`. Its current close/retry behavior was
   audited against newlib commit
@@ -1080,10 +1140,11 @@ exact matching unstripped ELF on the development computer.
   trusted LAN; pairing, peer allowlists, and a secured control plane remain
   release blockers.
 - `libvitaprofiler` currently records explicit zones, counters, frame markers,
-  memory snapshots, and supplied known-thread statistics. It does not yet have
-  a name dictionary, binary network/file drain, desktop viewer, arbitrary
-  thread PC/call-stack sampling, PMU ownership, or automatic VitaGL/SceGxm GPU
-  instrumentation.
+  memory snapshots, supplied known-thread statistics, and a bounded name
+  dictionary; its 13-check retail 3.65 probe resolved every captured custom and
+  built-in event ID. It does not yet have a binary network/file drain, desktop
+  viewer, arbitrary thread PC/call-stack sampling, PMU ownership, or automatic
+  VitaGL/SceGxm GPU instrumentation.
 - VitaDevDeploy currently depends on Vita Companion's unauthenticated FTP and
   command transport. Signed one-use jobs protect the install decision, but do
   not authenticate or encrypt Companion itself; use it only on a private LAN.
@@ -1092,10 +1153,11 @@ exact matching unstripped ELF on the development computer.
   interrupted-install fault-injection testing before it is production-ready.
 - The optional vita2d deployment UI has now produced two intermittent
   launch-time GPU faults on the retail 3.65 test configuration despite six
-  clean supervised launch/exit cycles. A later retry reached its waiting state
-  and completed the signed install successfully. The exact graphics/SceShell
-  transition cause is not isolated; keep unattended deployment headless until
-  startup and teardown are hardened and stress-tested.
+  clean supervised launch/exit cycles. Both dumps resolve to the third rapid
+  startup frame in `vita2d_swap_buffers`; the UI now waits for prior GPU work
+  before libvita2d resets its shared transient pool. This mitigation is host
+  tested but still needs a hardware stress gate, so keep unattended deployment
+  headless until startup and teardown are hardened and revalidated.
 - The tested compatibility target is retail handheld Vita and Vita TV hardware
   running system software 3.65 with the tested Kubridge release. Individual
   experimental feature gates may cover only the device class named in their
@@ -1108,71 +1170,38 @@ exact matching unstripped ELF on the development computer.
 
 ## Roadmap
 
-1. Keep the completed opt-in foreign-thread GDB D0/D31/FPSCR lifecycle gate and
-   its 3.65 evidence reproducible. Revalidate both VFP gates before supporting
-   another firmware baseline; keep writes as a separate restoration project.
-2. Complete the remaining
-   [thread-control validation gate](docs/gdb-thread-control-validation.md).
-   Unified inventory, `Hg`/`Hc`, `vCont;c;s`, fail-closed selection,
-   abandoned-client recovery, and deterministic selected foreign-Thumb-thread
-   stepping are hardware tested. The exact stopped-thread positive-`Hc`
-   step-over and representative ARM-state PC writers now pass the live gate.
-   Controlled renew/end failures, cleanup fault injection, and longer stress
-   runs remain. Then extend the retained-stop design into scheduler-locked
-   arbitrary-foreign-thread resume or displaced stepping so a process-wide
-   temporary breakpoint cannot be won by another running thread.
-3. Move blocking accept/RSP work outside the global spin lock; add nested-fault
-   handling, previous-handler chaining, strict packet parsing, fake-kernel host
-   tests, fuzzing, and long reconnect/shutdown/multithread hardware soaks.
-4. Extend the completed single-owner, no-ack GDB `O`-packet console bridge with
-   longer on-device pressure, abrupt-disconnect, restore/retry, and shutdown
-   soaks. Keep the completed read-only `qRcmd`
-   `help`/`status`/`threads`/`modules` two-session hardware gate reproducible,
-   and require the same gate before extending its command set. Decide whether console
-   queue/transport loss counters need a stable public API; retain DebugNet as
-   the sustained-log and profiler path.
-5. Keep the completed strict `p` and selected exception-thread core/CPSR `P`
-   retail 3.65 transactional gate reproducible. Keep the expanded practical
-   ARM/Thumb-2 PC-writer decoder and its live ARM fixtures reproducible; add
-   injected-memory/trap-rollback coverage and a bounded LDREX/STREX strategy
-   before relaxing any remaining fail-closed instruction family. Design a new
-   kernel ABI with snapshot, write, read-back, rollback, lease-expiry, and
-   detach restoration before enabling any foreign-thread or VFP write.
-6. Keep hardware `Z1`-`Z4` fail-closed. The late-runtime DIP 228 path has now
-   been tested and did not yield a safely returning DBGVCR read. Research
-   boot-time policy, DSE/authentication, OS Lock, and debug-power state offline;
-   do not resume CP14 comparator, debug-status, identity-spoof, boot patch, or
-   memory-mapped probes without a separately reviewed safe path. Only then
-   restart the staged
-   [KVDB feature-parity](docs/kvdb-feature-parity.md) gates for disabled-register
-   restore, one context-scoped execution breakpoint, one data watchpoint,
-   correct stop replies, and lease/detach cleanup. In parallel, evaluate a
-   page-protection/data-abort software-watchpoint fallback with strict page
-   ownership, access decoding, single-step/rearm, and false-positive tests.
-7. Extend the completed main-plus-user-SUPRX ASLR lifecycle gate with deployed-
-   artifact build identity, dynamic module load/unload refresh, and IDE-managed
-   symbol regeneration. Continue leaving unmatched system modules explicit.
-8. Extend the profiler foundation with a name dictionary, binary drain/receiver,
-   desktop trace viewer, and host-application instrumentation; evaluate narrow
-   kernel PC/PMU sampling and explicit VitaGL/SceGxm hooks separately.
-9. Add protocol authentication/pairing and peer allowlists, isolated feature
-   build directories, exported VitaSDK/CMake packages, CI, a firmware matrix,
-   and a project-wide license.
-10. Keep the completed VitaDevDeploy signed-install and optional graphical-UI
-   lifecycle gates reproducible. Isolate the intermittent graphical launch
-   fault, add a fail-safe graphics startup/teardown state machine, and stress
-   transitions from recently closed applications. Finish interrupted-install
-   and recovery fault injection. Research a versioned, fail-closed SceShell
-   content/cache refresh for artwork updates; never make destructive `app.db`
-   deletion an automatic deployment step. Then integrate it with VS Code
-   build/deploy/stop, IntelliSense, GDB, logs, and profiles. Later replace the
-   external Vita Companion dependency with a
-   versioned authenticated device service if its implementation audit supports
-   that design.
-11. Add optional attachment to applications not compiled with the library.
-12. As the final compatibility milestone after all debugger and profiler paths
-    are confirmed, validate LLDB remote-protocol behavior and add a Debug
-    Adapter Protocol bridge for IDEs without regressing GDB.
+1. Finish controlled thread renew/end failure injection and long multithreaded
+   hardware soaks, then add scheduler-locked arbitrary-foreign-thread execution
+   or displaced stepping so another running thread cannot win a temporary trap.
+2. Refactor blocking debugger work outside the global lock, contain nested
+   faults and chain prior handlers, harden remaining packet and memory/register
+   parsers, and expand fake-transport, fake-kernel, and fuzz coverage.
+3. Run long on-device console pressure, abrupt-disconnect, restore/retry, and
+   shutdown soaks while retaining DebugNet for sustained logging.
+4. Add a separately restorable kernel mutation ABI before foreign-thread core
+   or VFP writes, and add injected-memory/trap-rollback coverage before enabling
+   privileged exception returns, unsupported exclusive forms, or other unsafe
+   instruction families.
+5. Keep hardware `Z1`-`Z4` fail-closed while researching a supported debug-
+   register access path. Independently gate a page-protection/data-abort software
+   watchpoint design with strict ownership, access decoding, single-step/rearm,
+   cleanup, and false-positive tests.
+6. Stress same-process hot module load/unload churn and integrate the existing
+   command-driven symbol refresh into IDE tasks. This is dynamic-module and IDE
+   convenience work; the ASLR and verified-build correctness milestone is
+   complete.
+7. Add the profiler binary drain/receiver and desktop viewer, host-application
+   instrumentation, guarded PC/PMU ownership and restoration, and explicit
+   VitaGL/SceGxm hooks.
+8. Complete protocol authentication/pairing and peer allowlists, isolated build
+   directories, exported VitaSDK/CMake packages, CI and firmware coverage, and
+   the project-wide licensing/release work.
+9. Hardware-stress the VitaDevDeploy GPU synchronization fix and startup/
+   teardown lifecycle, then finish interrupted-install and bootstrap-recovery
+   fault injection.
+10. Add optional attachment to applications not compiled with the library.
+11. Validate LLDB remote-protocol behavior and add a Debug Adapter Protocol
+    bridge without regressing GDB.
 
 ## Repository layout
 

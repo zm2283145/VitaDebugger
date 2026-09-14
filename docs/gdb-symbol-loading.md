@@ -20,20 +20,56 @@ and
 
 ## Create a verified symbol view
 
-Builds need an unstripped ELF on the PC. Load the application on the Vita, then
-run, for example:
+Builds need the exact VPK and its unstripped ELF files on the PC. First create
+a versioned identity immediately after packaging, while those artifacts are
+known to belong to the same build:
+
+```powershell
+py -3 tools/gdb_build_identity.py `
+  --vpk build/game.vpk `
+  --main-elf build/game.elf `
+  --title-id GAME00001 `
+  --output build/game.identity.json
+```
+
+For a packaged user module, also bind its retained unstripped ELF and
+VPK-relative installed binary:
+
+```powershell
+py -3 tools/gdb_build_identity.py `
+  --vpk build/game.vpk `
+  --main-elf build/game.elf `
+  --module MyPlugin=build/MyPlugin.elf `
+  --module-installed MyPlugin=module/MyPlugin.suprx `
+  --title-id GAME00001 `
+  --output build/game.identity.json
+```
+
+The generator validates the complete VPK with VitaDevDeploy's bounded parser,
+reads its `TITLE_ID`, requires normal unstripped ARM ELFs, and hashes the VPK,
+every ELF, `eboot.bin`, and every named packaged module. It refuses to overwrite
+an existing identity unless `--force` is explicit.
+
+Install that VPK, load the application on the Vita, then create the symbol view:
 
 ```powershell
 py -3 tools/gdb_symbols.py `
   --host VITA_IP `
   --main-elf build/game.elf `
+  --vpk build/game.vpk `
+  --build-identity build/game.identity.json `
+  --verify-installed `
   --search-root build `
   --output build/game-live.gdb
 ```
 
-The tool connects to port 1234, negotiates RSP no-ack mode when available,
-stops the process, obtains every library-list chunk, obtains `qOffsets`, and
-cleanly detaches. It then:
+Before touching the GDB connection, `--verify-installed` opens a read-only Vita
+Companion FTP session and hashes `ux0:app/<TITLE_ID>/eboot.bin` plus every
+recorded packaged user module. A missing file, FTP error, size difference, or
+hash difference stops the tool; there is no offline or name-only fallback. It
+then connects to port 1234, negotiates RSP no-ack mode when available, stops the
+process, obtains every library-list chunk, obtains `qOffsets`, and cleanly
+detaches. It then:
 
 1. parses the main ARM ELF's `PT_LOAD` and allocated section layout;
 2. calculates every main runtime segment implied by `qOffsets`;
@@ -58,6 +94,9 @@ Or have the snapshot tool start it immediately:
 py -3 tools/gdb_symbols.py `
   --host VITA_IP `
   --main-elf build/game.elf `
+  --vpk build/game.vpk `
+  --build-identity build/game.identity.json `
+  --verify-installed `
   --search-root build `
   --output build/game-live.gdb `
   --gdb C:\vitasdk\bin\arm-vita-eabi-gdb.exe
@@ -82,6 +121,14 @@ module set, or changing an explicit mapping. The optional `--gdb` form
 minimizes the gap during the initial validation. If modules can load or unload
 during that gap, stop at a deterministic application gate before generating
 the symbol view.
+
+Identity enforcement is the default CLI policy. `--build-identity` requires
+the exact `--vpk`; the local VPK, main ELF, and every currently matched module
+ELF must match the receipt. `--verify-installed` is the stronger live gate and
+is required when claiming that the running Vita contains that build. The only
+way to use the old name/layout-only behavior is the visibly explicit
+`--allow-unverified-build` option. A missing, malformed, unknown-version, or
+mismatched identity never silently enters compatibility mode.
 
 For diagnosis, `--mode explicit` emits an `add-symbol-file` command for each
 module with the runtime address of every non-empty allocated ELF section. That
@@ -112,7 +159,11 @@ When automatic exact matching is not possible, specify the association:
 
 ```powershell
 py -3 tools/gdb_symbols.py `
+  --host VITA_IP `
   --main-elf build/game.elf `
+  --vpk build/game.vpk `
+  --build-identity build/game.identity.json `
+  --verify-installed `
   --search-root build `
   --module MyPlugin=plugins/MyPlugin.elf
 ```
@@ -131,18 +182,76 @@ then fails instead of silently producing a partial application symbol set.
 ## Trust boundary
 
 The standard library-list XML provides names and segment starts, but no build
-ID or cryptographic digest. A unique exact name and compatible ELF layout avoid
-unsafe guesses; they cannot prove that a same-named local file is byte-for-byte
-the installed build. Generated scripts record SHA-256 hashes of every selected
-local ELF for build/deploy logs. A release or IDE pipeline should retain the
-ELFs that produced the deployed VPK and use explicit mappings for project
-modules.
+ID or cryptographic digest. The identity receipt closes that gap for the normal
+VitaDevDeploy workflow: it binds retained symbols to one exact VPK, and the
+opt-in live gate compares installed executable/module bytes to that receipt.
+The receipt is not a remote attestation or signature. Its authenticity depends
+on retaining it with trusted build output; VitaDevDeploy separately
+authenticates the signed installation job. Creating a new receipt from an
+arbitrary mismatched VPK/ELF pair asserts that pair intentionally, so generate
+it as part of the same build/package job rather than later by guesswork.
 
 The parser is deliberately bounded and fail-closed: at most 1 MiB of RSP/XML,
 256 modules, four segments per module, 4,096 local candidates, and 4,096 ELF
-sections. It rejects DTDs/entities, malformed addresses, mixed `qOffsets`
+sections. Identity JSON is capped at 64 KiB and individual recorded artifacts
+at 1 GiB. It rejects DTDs/entities, malformed addresses, mixed `qOffsets`
 styles, allocated sections outside `PT_LOAD`, stripped files, unsafe generated
-GDB section names, and reuse of one ELF for multiple live modules.
+GDB section names, duplicate runtime module names, unsafe installed paths, and
+reuse of one ELF for multiple binaries.
+
+## Refresh loaded modules and ASLR state
+
+Every successful invocation writes a hash-linked companion state beside the
+script as `OUTPUT.state.json` (or at `--state-file`). On the next invocation it
+validates that state and the previous script hash before opening the debugger
+connection. The fresh bounded snapshot is compared with the prior one and
+reports:
+
+- `added`: modules loaded since the previous snapshot;
+- `removed`: modules unloaded since the previous snapshot;
+- `rebased`: same-named modules whose complete segment address list changed;
+- `symbol_changes`: modules whose matched ELF or match reason changed;
+- `build_changed`: a different verified receipt or main ELF.
+
+Rerun the same command after a plug-in load/unload, target reconnect, or app
+relaunch. Identity-backed explicit mappings may be temporarily absent, but
+their local hashes are still checked, so an unloaded module can be matched
+safely when a later refresh sees it. Unrecorded matched user modules still fail
+closed. A malformed previous state, failed identity check, failed RSP snapshot,
+or failed publication leaves the previous usable script/state in place.
+Publication stages both files and rolls back a partial commit.
+
+VitaDebugger accepts one GDB client at a time. Detach the current GDB session
+before running a refresh; the refresh itself stops only long enough to collect
+one snapshot and then sends a clean detach. This is command-driven refresh, not
+background polling, so it does not repeatedly interrupt the game.
+
+## Noninteractive and IDE task workflow
+
+`--gdb` turns identity verification, dynamic refresh, and applying the
+generated script into one command. For a bounded CI smoke test:
+
+```powershell
+py -3 tools/gdb_symbols.py `
+  --host VITA_IP `
+  --main-elf build/game.elf `
+  --vpk build/game.vpk `
+  --build-identity build/game.identity.json `
+  --verify-installed `
+  --search-root build `
+  --output build/game-live.gdb `
+  --gdb C:\vitasdk\bin\arm-vita-eabi-gdb.exe `
+  --gdb-batch `
+  --gdb-arg=--quiet
+```
+
+For an IDE adapter that consumes GDB/MI, replace the final two options with
+`--gdb-arg=--interpreter=mi2`. Standard input/output remain attached directly
+to GDB, and the launcher uses an argument vector with no command shell. Launch
+arguments are deliberately allowlisted; extra command files and `-ex`/shell
+overrides are rejected so they cannot bypass the generated identity-checked
+script. The state JSON is stable machine-readable input for a pre-launch task
+or later Debug Adapter Protocol integration.
 
 ## Automated main-plus-user-SUPRX gate
 
@@ -202,7 +311,7 @@ ABI, and kernel-plugin metadata can be supplied with `--device-class`,
 local paths, and raw GDB output. `--include-sensitive-transcript` is only for
 local diagnosis and its output must not be published.
 
-### Retail 3.65 result
+### Retail 3.65 results
 
 The complete gate passed on a retail handheld Vita running system software
 3.65 with kernel ABI v1.11 and VitaSDK GDB 15.2. All five sessions reached both
@@ -219,6 +328,16 @@ That archived v1 record predates remote-name minimization; its captured module
 inventory was reviewed before publication and contains only the test fixture
 and standard system-module names. Newly generated v2 evidence stores only the
 module count.
-This completes the main-plus-user-SUPRX hardware gate. Build identity beyond
-retained artifact hashes, dynamic module load/unload refresh, and IDE-managed
-symbol regeneration remain future work.
+
+The follow-up installed-build gate also passed on retail 3.65. It verified the
+installed `eboot.bin` and user SUPRX against the versioned receipt, rejected a
+deliberately mismatched VPK before opening RSP or changing the last good symbol
+view, and proved that a same-process refresh is idempotent. It then incorporated
+the five-session main-plus-user-SUPRX lifecycle across two clean relaunches and
+published a final identity-backed refresh for the new layout. The combined
+record is [retail 3.65 build-identity and ASLR evidence](hardware/gdb-aslr-build-identity-3.65.json).
+
+This completes the ASLR and verified-build correctness milestone. Stressing
+same-process hot module load/unload churn and triggering the existing command-
+driven refresh automatically from IDE tasks are later dynamic-module/IDE
+convenience integration, not unfinished ASLR correctness.

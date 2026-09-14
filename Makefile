@@ -1,7 +1,7 @@
 all: libuvdb.a
 
 clean:
-	rm -f *.o tests/*.o *.a *.elf *.velf eboot.bin param.sfo *.vpk *.psp2dmp test-rsp test-rsp.exe test-rsp-console test-rsp-console.exe test-register-bank test-register-bank.exe test-thread-control test-thread-control.exe test-monitor test-monitor.exe test-console-queue test-console-queue.exe test-console-transport test-console-transport.exe test-vfp-policy test-vfp-policy.exe kernel/dipsw-read-probe/test-record kernel/dipsw-read-probe/test-record.exe kernel/dipsw-set-restore-probe/test-record kernel/dipsw-set-restore-probe/test-record.exe kernel/dipsw-dbgvcr-probe/test-record kernel/dipsw-dbgvcr-probe/test-record.exe $(UVDB_ASLR_FIXTURE_OBJECT) $(UVDB_ASLR_FIXTURE_ELF) $(UVDB_ASLR_FIXTURE_VELF) $(UVDB_ASLR_FIXTURE_SELF)
+	rm -f *.o tests/*.o *.a *.elf *.velf eboot.bin param.sfo *.vpk *.psp2dmp test-rsp test-rsp.exe test-rsp-console test-rsp-console.exe test-register-bank test-register-bank.exe test-thread-control test-thread-control.exe test-monitor test-monitor.exe test-breakpoint-patch test-breakpoint-patch.exe test-exclusive-step test-exclusive-step.exe test-console-queue test-console-queue.exe test-console-transport test-console-transport.exe test-vfp-policy test-vfp-policy.exe kernel/dipsw-read-probe/test-record kernel/dipsw-read-probe/test-record.exe kernel/dipsw-set-restore-probe/test-record kernel/dipsw-set-restore-probe/test-record.exe kernel/dipsw-dbgvcr-probe/test-record kernel/dipsw-dbgvcr-probe/test-record.exe $(UVDB_ASLR_FIXTURE_OBJECT) $(UVDB_ASLR_FIXTURE_ELF) $(UVDB_ASLR_FIXTURE_VELF) $(UVDB_ASLR_FIXTURE_SELF)
 
 package: uvdb-test.vpk
 
@@ -35,6 +35,10 @@ endif
 
 ifeq ($(UVDB_GDB_CONSOLE_TEST),1)
 override EXTRA_CFLAGS += -DUVDB_GDB_CONSOLE_TEST
+endif
+
+ifeq ($(UVDB_MONITOR_DISPLAY),1)
+override CFLAGS += -DUVDB_MONITOR_DISPLAY
 endif
 
 ifeq ($(UVDB_KERNEL_THREAD_CONTROL),1)
@@ -96,7 +100,7 @@ psvDebugScreen.o: $(VITASDK)/share/gcc-arm-vita-eabi/samples/common/debugScreen.
 tests/thumb_step_returns.o: tests/thumb_step_returns.S
 	arm-vita-eabi-gcc $< $(CFLAGS) -c -o $@
 
-libuvdb.a: uvdb.o uvdb_registers.o uvdb_rsp.o uvdb_thread_control.o uvdb_monitor.o $(UVDB_VFP_OBJECTS) uvdb_console.o uvdb_console_transport.o uvdb_debugnet.o stdio_redirect.o
+libuvdb.a: uvdb.o uvdb_registers.o uvdb_rsp.o uvdb_thread_control.o uvdb_monitor.o uvdb_breakpoint_patch.o uvdb_exclusive_step.o $(UVDB_VFP_OBJECTS) uvdb_console.o uvdb_console_transport.o uvdb_debugnet.o stdio_redirect.o
 	arm-vita-eabi-ar rcs $@ $^
 
 HOST_CC ?= cc
@@ -113,9 +117,9 @@ HOST_CC_RUN ?= $(HOST_CC)
 HOST_PYTHON ?= python3
 endif
 
-.PHONY: host-tests host-test-rsp host-test-rsp-console host-test-register-bank host-test-thread-control host-test-monitor host-test-vfp-policy host-test-console-queue host-test-console-transport host-test-symbols host-test-vfp-lifecycle host-test-aslr-lifecycle host-test-target-xml host-test-dipsw-probe-record host-test-dipsw-set-restore-record host-test-dipsw-dbgvcr-record aslr-fixture
+.PHONY: host-tests host-test-rsp host-test-rsp-console host-test-register-bank host-test-thread-control host-test-monitor host-test-breakpoint-patch host-test-exclusive-step host-test-vfp-policy host-test-console-queue host-test-console-transport host-test-symbols host-test-vfp-lifecycle host-test-aslr-lifecycle host-test-live-gates host-test-target-xml host-test-dipsw-probe-record host-test-dipsw-set-restore-record host-test-dipsw-dbgvcr-record aslr-fixture
 
-host-tests: host-test-rsp host-test-rsp-console host-test-register-bank host-test-thread-control host-test-monitor host-test-vfp-policy host-test-console-queue host-test-console-transport host-test-symbols host-test-vfp-lifecycle host-test-aslr-lifecycle host-test-target-xml host-test-dipsw-probe-record host-test-dipsw-set-restore-record host-test-dipsw-dbgvcr-record
+host-tests: host-test-rsp host-test-rsp-console host-test-register-bank host-test-thread-control host-test-monitor host-test-breakpoint-patch host-test-exclusive-step host-test-vfp-policy host-test-console-queue host-test-console-transport host-test-symbols host-test-vfp-lifecycle host-test-aslr-lifecycle host-test-live-gates host-test-target-xml host-test-dipsw-probe-record host-test-dipsw-set-restore-record host-test-dipsw-dbgvcr-record
 
 host-test-rsp: test-rsp$(HOST_EXEEXT)
 	./test-rsp$(HOST_EXEEXT)
@@ -132,6 +136,12 @@ host-test-thread-control: test-thread-control$(HOST_EXEEXT)
 host-test-monitor: test-monitor$(HOST_EXEEXT)
 	./test-monitor$(HOST_EXEEXT)
 
+host-test-breakpoint-patch: test-breakpoint-patch$(HOST_EXEEXT)
+	./test-breakpoint-patch$(HOST_EXEEXT)
+
+host-test-exclusive-step: test-exclusive-step$(HOST_EXEEXT)
+	./test-exclusive-step$(HOST_EXEEXT)
+
 host-test-vfp-policy: test-vfp-policy$(HOST_EXEEXT)
 	./test-vfp-policy$(HOST_EXEEXT)
 
@@ -142,13 +152,16 @@ host-test-console-transport: test-console-transport$(HOST_EXEEXT)
 	./test-console-transport$(HOST_EXEEXT)
 
 host-test-symbols:
-	$(HOST_PYTHON) -m unittest tests.host.test_gdb_symbols
+	$(HOST_PYTHON) -m unittest tests.host.test_gdb_symbols tests.host.test_gdb_build_identity tests.host.test_gdb_symbol_refresh
 
 host-test-vfp-lifecycle:
 	$(HOST_PYTHON) -m unittest tests.host.test_gdb_vfp_lifecycle
 
 host-test-aslr-lifecycle:
 	$(HOST_PYTHON) -m unittest tests.host.test_gdb_aslr_lifecycle
+
+host-test-live-gates:
+	$(HOST_PYTHON) -m unittest tests.host.test_gdb_monitor_smoke tests.host.test_gdb_step_register_gate
 
 host-test-target-xml:
 	$(HOST_PYTHON) -m unittest tests.host.test_target_xml
@@ -176,6 +189,12 @@ test-thread-control$(HOST_EXEEXT): uvdb_thread_control.c uvdb_thread_control.h t
 
 test-monitor$(HOST_EXEEXT): uvdb_monitor.c uvdb_monitor.h tests/host/test_monitor.c
 	$(HOST_CC_RUN) $(HOST_CFLAGS) uvdb_monitor.c tests/host/test_monitor.c -o $@
+
+test-breakpoint-patch$(HOST_EXEEXT): uvdb_breakpoint_patch.c uvdb_breakpoint_patch.h tests/host/test_breakpoint_patch.c
+	$(HOST_CC_RUN) $(HOST_CFLAGS) uvdb_breakpoint_patch.c tests/host/test_breakpoint_patch.c -o $@
+
+test-exclusive-step$(HOST_EXEEXT): uvdb_exclusive_step.c uvdb_exclusive_step.h tests/host/test_exclusive_step.c
+	$(HOST_CC_RUN) $(HOST_CFLAGS) uvdb_exclusive_step.c tests/host/test_exclusive_step.c -o $@
 
 test-vfp-policy$(HOST_EXEEXT): uvdb_vfp_policy.c uvdb_vfp_policy.h kernel/include/vitadebug_kernel.h tests/host/test_vfp_policy.c tests/host/include/psp2/types.h
 	$(HOST_CC_RUN) $(HOST_CFLAGS) -Itests/host/include -Ikernel/include uvdb_vfp_policy.c tests/host/test_vfp_policy.c -o $@

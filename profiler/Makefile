@@ -49,7 +49,11 @@ $(VITA_BUILD)/vitaprofiler_vita.o: src/vitaprofiler_vita.c include/vitaprofiler.
 	mkdir -p $(VITA_BUILD)
 	$(VITA_CC) $(CPPFLAGS) $(VITA_CFLAGS) -c $< -o $@
 
-$(VITA_BUILD)/libvitaprofiler.a: $(VITA_BUILD)/vitaprofiler.o $(VITA_BUILD)/vitaprofiler_vita.o
+$(VITA_BUILD)/vitaprofiler_names.o: src/vitaprofiler_names.c include/vitaprofiler.h
+	mkdir -p $(VITA_BUILD)
+	$(VITA_CC) $(CPPFLAGS) $(VITA_CFLAGS) -c $< -o $@
+
+$(VITA_BUILD)/libvitaprofiler.a: $(VITA_BUILD)/vitaprofiler.o $(VITA_BUILD)/vitaprofiler_vita.o $(VITA_BUILD)/vitaprofiler_names.o
 	$(VITA_AR) rcs $@ $^
 
 $(VITA_PROBE_BUILD)/vita_probe.o: tests/vita_probe.c include/vitaprofiler.h
@@ -80,8 +84,13 @@ $(HOST_BUILD)/test_vitaprofiler: src/vitaprofiler.c tests/test_vitaprofiler.c in
 	mkdir -p $(HOST_BUILD)
 	$(HOST_CC) $(CPPFLAGS) $(HOST_CFLAGS) -pthread src/vitaprofiler.c tests/test_vitaprofiler.c -o $@
 
-host-test: $(HOST_BUILD)/test_vitaprofiler
+$(HOST_BUILD)/test_vitaprofiler_names: src/vitaprofiler.c src/vitaprofiler_names.c tests/test_vitaprofiler_names.c include/vitaprofiler.h
+	mkdir -p $(HOST_BUILD)
+	$(HOST_CC) $(CPPFLAGS) $(HOST_CFLAGS) -pthread src/vitaprofiler.c src/vitaprofiler_names.c tests/test_vitaprofiler_names.c -o $@
+
+host-test: $(HOST_BUILD)/test_vitaprofiler $(HOST_BUILD)/test_vitaprofiler_names
 	$(HOST_BUILD)/test_vitaprofiler
+	$(HOST_BUILD)/test_vitaprofiler_names
 
 check: host-test vita-check
 

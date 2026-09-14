@@ -1,0 +1,57 @@
+{
+  "artifacts": {
+    "elf": {
+      "sha256": "b2dc868c43b330cd1c3ee92b665dc5cbba742681ee7b069218888fe673a2d06b",
+      "size_bytes": 129056
+    },
+    "screenshot": {
+      "path": "profiler-name-dictionary-3.65.jpg",
+      "sha256": "762d79834198e3e1fc0b542145bb60bcd6b70733cc29444c31594640f8aa909b",
+      "size_bytes": 50855
+    },
+    "vpk": {
+      "sha256": "75c2d9ee905bb0780809b315505d99f9a1d11fceb4b7f474e2f04deaed67a9d4",
+      "size_bytes": 77935
+    }
+  },
+  "deployment": {
+    "agent": "VitaDevDeploy",
+    "agent_session": "reused",
+    "job_id": "27f11f52d529139c25629aee63eb0ebd",
+    "manifest_sha256": "401480b346957bfc4dad6872ddb3c65c420d7e7d65e4ca5510ec711672aeec4c",
+    "result": "installed_and_launched",
+    "title_id": "VDPR00001"
+  },
+  "hardware": {
+    "device_class": "retail-handheld",
+    "firmware": "3.65",
+    "kernel_plugin_required": false
+  },
+  "observations": {
+    "accepted_events": 64,
+    "check_count": 13,
+    "dropped_events": 448,
+    "failure_count": 0,
+    "name_dictionary": {
+      "bounded_encoding": "PASS",
+      "captured_ids_resolved": "PASS",
+      "collision_rejection": "covered_by_host_suite",
+      "custom_and_builtin_names": "PASS",
+      "register_seal_encode": "PASS"
+    },
+    "producer_threads": 4,
+    "result_line": "Result: PASS (13 checks, 0 failures)",
+    "ring_reuse": "PASS",
+    "wire_encoding": "PASS"
+  },
+  "recorded_utc": "2026-09-14T17:04:41Z",
+  "result": "PASS",
+  "schema": "vitadebugger-profiler-name-dictionary-live-v1",
+  "validation": {
+    "host_profiler_suite": "PASS",
+    "host_name_dictionary_suite": "PASS",
+    "screenshot_visually_verified": true,
+    "vita_cross_build": "PASS",
+    "vita_probe": "PASS"
+  }
+}

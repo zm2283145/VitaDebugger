@@ -16,6 +16,8 @@ enum uvdb_monitor_command {
     UVDB_MONITOR_COMMAND_STATUS,
     UVDB_MONITOR_COMMAND_THREADS,
     UVDB_MONITOR_COMMAND_MODULES,
+    UVDB_MONITOR_COMMAND_CONSOLE,
+    UVDB_MONITOR_COMMAND_DISPLAY,
 };
 
 enum uvdb_monitor_parse_result {
@@ -35,6 +37,28 @@ enum uvdb_monitor_state {
     UVDB_MONITOR_STATE_LISTENING,
     UVDB_MONITOR_STATE_CONNECTED,
     UVDB_MONITOR_STATE_ERROR,
+};
+
+/* The first display sample for a server-owned connection must be collected
+ * after accept, but SceDisplay must never be called from the exception path.
+ * This small state machine hands that sample to a deferred synthetic stop and
+ * suppresses it if a real fault wins the race. */
+enum uvdb_monitor_display_stop_phase {
+    UVDB_MONITOR_DISPLAY_STOP_IDLE = 0,
+    UVDB_MONITOR_DISPLAY_STOP_NEEDS_SAMPLE,
+    UVDB_MONITOR_DISPLAY_STOP_ARMED,
+    UVDB_MONITOR_DISPLAY_STOP_CANCELLED,
+};
+
+enum uvdb_monitor_display_stop_action {
+    UVDB_MONITOR_DISPLAY_STOP_NOT_OURS = 0,
+    UVDB_MONITOR_DISPLAY_STOP_HANDLE,
+    UVDB_MONITOR_DISPLAY_STOP_IGNORE,
+};
+
+struct uvdb_monitor_display_stop {
+    uint32_t generation;
+    enum uvdb_monitor_display_stop_phase phase;
 };
 
 enum uvdb_monitor_thread_flag {
@@ -95,6 +119,60 @@ struct uvdb_monitor_module {
     size_t segment_count;
 };
 
+struct uvdb_monitor_console {
+    int available;
+    uint32_t session_open;
+    uint32_t session_generation;
+    uint32_t queued_records;
+    uint32_t queued_bytes;
+    uint32_t sessions_opened;
+    uint32_t reconnects;
+    uint32_t accepted_records;
+    uint32_t accepted_bytes;
+    uint32_t sent_records;
+    uint32_t sent_bytes;
+    uint32_t dropped_disconnected_records;
+    uint32_t dropped_disconnected_bytes;
+    uint32_t dropped_contention_records;
+    uint32_t dropped_contention_bytes;
+    uint32_t dropped_full_records;
+    uint32_t dropped_full_bytes;
+    uint32_t dropped_stale_records;
+    uint32_t dropped_stale_bytes;
+    uint32_t no_ack_mode;
+    uint32_t transport_failed;
+    uint32_t frames_sent;
+    uint32_t frame_bytes_sent;
+    uint32_t would_block;
+    uint32_t commit_busy;
+    uint32_t partial_writes;
+    uint32_t hard_errors;
+    uint32_t session_errors;
+    int32_t last_native_error;
+};
+
+struct uvdb_monitor_framebuffer {
+    int32_t query_result;
+    uint32_t address;
+    uint32_t pitch;
+    uint32_t pixel_format;
+    uint32_t width;
+    uint32_t height;
+};
+
+struct uvdb_monitor_display {
+    int available;
+    int32_t primary_head;
+    int32_t vcount;
+    int32_t refresh_query_result;
+    uint32_t refresh_millihz;
+    int32_t maximum_query_result;
+    uint32_t maximum_width;
+    uint32_t maximum_height;
+    struct uvdb_monitor_framebuffer immediate;
+    struct uvdb_monitor_framebuffer next_frame;
+};
+
 struct uvdb_monitor_snapshot {
     struct uvdb_monitor_status status;
     const struct uvdb_monitor_thread* threads;
@@ -105,6 +183,8 @@ struct uvdb_monitor_snapshot {
     size_t module_scanned_count;
     size_t module_skipped_count;
     int module_query_result;
+    struct uvdb_monitor_console console;
+    struct uvdb_monitor_display display;
 };
 
 /* Parse one complete qRcmd packet. The command bytes are hex encoded after the
@@ -124,3 +204,34 @@ int uvdb_monitor_render(
     char* output,
     size_t capacity,
     size_t* output_size);
+
+/* Convert a nonnegative finite IEEE-754 binary32 refresh rate into rounded
+ * millihertz without executing floating-point instructions in debugger code. */
+int uvdb_monitor_ieee754_to_millihz(
+    uint32_t bits,
+    uint32_t* millihz);
+
+void uvdb_monitor_display_stop_reset(
+    struct uvdb_monitor_display_stop* stop);
+
+int uvdb_monitor_display_stop_begin(
+    struct uvdb_monitor_display_stop* stop,
+    uint32_t generation);
+
+uint32_t uvdb_monitor_display_stop_pending_generation(
+    const struct uvdb_monitor_display_stop* stop);
+
+int uvdb_monitor_display_stop_arm(
+    struct uvdb_monitor_display_stop* stop,
+    uint32_t generation);
+
+enum uvdb_monitor_display_stop_action uvdb_monitor_display_stop_on_exception(
+    struct uvdb_monitor_display_stop* stop,
+    int is_initial_stop_trap);
+
+/* A display snapshot is intentionally unavailable until it belongs to the
+ * exact currently connected socket generation. */
+int uvdb_monitor_display_generation_is_current(
+    uint32_t sample_generation,
+    int active_socket,
+    uint32_t active_generation);

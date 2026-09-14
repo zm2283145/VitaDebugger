@@ -19,10 +19,13 @@ import socket
 import struct
 import subprocess
 import sys
+import tempfile
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Iterable, Sequence
+
+import uvdb_build_identity as build_identity
 
 
 MAX_RSP_PACKET = 1024 * 1024
@@ -34,7 +37,9 @@ MAX_ELF_SEGMENTS = 4
 MAX_ELF_SECTIONS = 4096
 MAX_STRING_TABLE = 1024 * 1024
 MAX_SCAN_FILES = 4096
+MAX_SYMBOL_STATE = 1024 * 1024
 SCAN_SUFFIXES = {".elf", ".velf", ".suprx", ".skprx"}
+SYMBOL_STATE_FORMAT = "VITADEBUGGER-SYMBOL-STATE-1"
 
 PT_LOAD = 1
 SHT_SYMTAB = 2
@@ -54,6 +59,11 @@ HEX_ADDRESS = re.compile(r"(?:0x)?([0-9a-fA-F]{1,8})\Z")
 SAFE_SECTION_NAME = re.compile(r"[A-Za-z0-9_.-]+\Z")
 SAFE_HOST = re.compile(r"[A-Za-z0-9.-]+\Z")
 SAFE_MODULE_FILENAME = re.compile(r"[A-Za-z0-9_.+-]{1,64}\Z")
+SAFE_GDB_ARGUMENTS = {
+    "-q", "--quiet", "-batch", "--batch", "-nh", "--nh",
+    "--return-child-result",
+}
+SAFE_GDB_INTERPRETER = re.compile(r"--interpreter=mi(?:[23])?\Z")
 
 
 class SymbolError(RuntimeError):
@@ -160,6 +170,15 @@ class ModuleMatch:
     runtime: RuntimeModule
     image: ElfImage
     reason: str
+
+
+@dataclass(frozen=True)
+class ModuleChanges:
+    added: tuple[str, ...]
+    removed: tuple[str, ...]
+    rebased: tuple[str, ...]
+    symbol_changes: tuple[str, ...]
+    build_changed: bool
 
 
 def _checked_range(offset: int, size: int, file_size: int, label: str) -> None:
@@ -380,6 +399,7 @@ def parse_library_xml(data: bytes) -> tuple[RuntimeModule, ...]:
     if len(root) > MAX_MODULES:
         raise ProtocolError("library list contains too many modules")
     modules: list[RuntimeModule] = []
+    module_names: set[str] = set()
     for node in root:
         if node.tag != "library" or set(node.attrib) != {"name"}:
             raise ProtocolError("unexpected element or attributes in library list")
@@ -388,6 +408,9 @@ def parse_library_xml(data: bytes) -> tuple[RuntimeModule, ...]:
             raise ProtocolError("invalid runtime module name")
         if any(ord(char) > 0x7E for char in name):
             raise ProtocolError("runtime module name is not printable ASCII")
+        if name in module_names:
+            raise ProtocolError(f"duplicate runtime module name {name!r}")
+        module_names.add(name)
         if node.text and node.text.strip():
             raise ProtocolError(f"module {name!r} contains unexpected text")
         if node.tail and node.tail.strip():
@@ -524,10 +547,11 @@ def match_modules(
     images: Sequence[ElfImage],
     explicit: dict[str, ElfImage],
     allow_stem_match: bool = False,
+    allow_absent_explicit: bool = False,
 ) -> tuple[tuple[ModuleMatch, ...], tuple[RuntimeModule, ...]]:
     runtime_names = {module.name for module in snapshot.modules}
     unknown_explicit = sorted(set(explicit) - runtime_names)
-    if unknown_explicit:
+    if unknown_explicit and not allow_absent_explicit:
         raise SymbolError(
             "explicit mappings name modules not present in the live snapshot: "
             + ", ".join(unknown_explicit)
@@ -795,6 +819,396 @@ def sha256_file(path: Path) -> str:
             digest.update(block)
 
 
+def _state_exact_keys(value: object, expected: set[str], label: str) -> dict:
+    if not isinstance(value, dict) or any(not isinstance(key, str) for key in value):
+        raise SymbolError(f"{label} must be a JSON object")
+    keys = set(value)
+    if keys != expected:
+        raise SymbolError(f"{label} has unexpected or missing fields")
+    return value
+
+
+def _state_json_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise SymbolError(f"duplicate JSON field {key!r} in symbol state")
+        result[key] = value
+    return result
+
+
+def validate_symbol_state(value: object) -> dict:
+    """Validate a previous machine-readable refresh state fail closed."""
+
+    state = _state_exact_keys(
+        value,
+        {"format", "build", "main", "offsets", "modules", "script_sha256"},
+        "symbol state",
+    )
+    if state["format"] != SYMBOL_STATE_FORMAT:
+        raise SymbolError(f"unsupported symbol state format {state['format']!r}")
+    if not isinstance(state["script_sha256"], str) or not re.fullmatch(
+        r"[0-9a-f]{64}", state["script_sha256"]
+    ):
+        raise SymbolError("symbol state has an invalid script SHA-256")
+    build = _state_exact_keys(
+        state["build"],
+        {"verification", "title_id", "vpk_sha256", "identity_sha256"},
+        "symbol state build",
+    )
+    if build["verification"] not in {"unverified", "local", "local+installed"}:
+        raise SymbolError("symbol state has an invalid build verification mode")
+    if build["verification"] == "unverified":
+        if (
+            build["title_id"] is not None
+            or build["vpk_sha256"] is not None
+            or build["identity_sha256"] is not None
+        ):
+            raise SymbolError("unverified symbol state must not claim a build identity")
+    else:
+        if (
+            not isinstance(build["title_id"], str)
+            or build_identity.TITLE_ID_RE.fullmatch(build["title_id"]) is None
+            or not isinstance(build["vpk_sha256"], str)
+            or build_identity.SHA256_RE.fullmatch(build["vpk_sha256"]) is None
+            or not isinstance(build["identity_sha256"], str)
+            or build_identity.SHA256_RE.fullmatch(build["identity_sha256"]) is None
+        ):
+            raise SymbolError("verified symbol state has invalid build identity fields")
+    main = _state_exact_keys(
+        state["main"], {"name", "elf_sha256"}, "symbol state main"
+    )
+    if (
+        not isinstance(main["name"], str)
+        or not main["name"]
+        or len(main["name"]) > 255
+        or any(ord(char) < 0x20 or ord(char) > 0x7E for char in main["name"])
+        or not isinstance(main["elf_sha256"], str)
+        or build_identity.SHA256_RE.fullmatch(main["elf_sha256"]) is None
+    ):
+        raise SymbolError("symbol state has invalid main-module fields")
+    offsets = _state_exact_keys(
+        state["offsets"], {"style", "text", "data"}, "symbol state offsets"
+    )
+    if offsets["style"] not in {"segments", "offsets"}:
+        raise SymbolError("symbol state has invalid offset style")
+    for name in ("text", "data"):
+        item = offsets[name]
+        if item is not None and (
+            isinstance(item, bool) or not isinstance(item, int) or not 0 <= item <= 0xFFFFFFFF
+        ):
+            raise SymbolError(f"symbol state has invalid {name} offset")
+    modules = state["modules"]
+    if not isinstance(modules, list) or not 1 <= len(modules) <= MAX_MODULES:
+        raise SymbolError("symbol state has an invalid module list")
+    names: set[str] = set()
+    for index, raw in enumerate(modules):
+        module = _state_exact_keys(
+            raw,
+            {"name", "segments", "symbol_sha256", "match_reason"},
+            f"symbol state module {index}",
+        )
+        name = module["name"]
+        if (
+            not isinstance(name, str)
+            or not name
+            or len(name) > 255
+            or any(ord(char) < 0x20 or ord(char) > 0x7E for char in name)
+            or name in names
+        ):
+            raise SymbolError("symbol state has an invalid or duplicate module name")
+        names.add(name)
+        segments = module["segments"]
+        if (
+            not isinstance(segments, list)
+            or not 1 <= len(segments) <= MAX_SEGMENTS
+            or any(
+                isinstance(address, bool)
+                or not isinstance(address, int)
+                or not 0 < address <= 0xFFFFFFFF
+                for address in segments
+            )
+            or len(set(segments)) != len(segments)
+        ):
+            raise SymbolError(f"symbol state module {name!r} has invalid segments")
+        symbol_digest = module["symbol_sha256"]
+        if symbol_digest is not None and (
+            not isinstance(symbol_digest, str)
+            or build_identity.SHA256_RE.fullmatch(symbol_digest) is None
+        ):
+            raise SymbolError(f"symbol state module {name!r} has an invalid symbol hash")
+        reason = module["match_reason"]
+        if reason is not None and (
+            not isinstance(reason, str)
+            or not reason
+            or len(reason) > 64
+            or any(ord(char) < 0x20 or ord(char) > 0x7E for char in reason)
+        ):
+            raise SymbolError(f"symbol state module {name!r} has an invalid match reason")
+    return state
+
+
+def load_symbol_state(path: Path, script_path: Path) -> dict | None:
+    if not path.exists():
+        return None
+    try:
+        size = path.stat().st_size
+        if not path.is_file() or not 0 < size <= MAX_SYMBOL_STATE:
+            raise SymbolError("symbol state is not a bounded regular file")
+        data = path.read_bytes()
+        if len(data) != size:
+            raise SymbolError("symbol state changed while it was read")
+        value = json.loads(
+            data.decode("utf-8", "strict"), object_pairs_hook=_state_json_object
+        )
+    except SymbolError:
+        raise
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise SymbolError(f"cannot read previous symbol state: {exc}") from exc
+    state = validate_symbol_state(value)
+    if not script_path.is_file():
+        raise SymbolError("previous symbol state exists but its script is missing")
+    try:
+        script_digest = sha256_file(script_path)
+    except OSError as exc:
+        raise SymbolError(f"cannot verify previous symbol script: {exc}") from exc
+    if script_digest != state["script_sha256"]:
+        raise SymbolError("previous symbol script does not match its state file")
+    return state
+
+
+def build_symbol_state(
+    snapshot: TargetSnapshot,
+    main_module: RuntimeModule,
+    main_image: ElfImage,
+    matches: Sequence[ModuleMatch],
+    script: str,
+    identity: build_identity.BuildIdentity | None,
+    installed_verified: bool,
+) -> dict:
+    symbol_map = {
+        match.runtime.name: (sha256_file(match.image.path), match.reason)
+        for match in matches
+    }
+    modules = []
+    for module in snapshot.modules:
+        if module is main_module:
+            symbol_digest, reason = sha256_file(main_image.path), "main executable"
+        else:
+            symbol_digest, reason = symbol_map.get(module.name, (None, None))
+        modules.append(
+            {
+                "name": module.name,
+                "segments": list(module.segments),
+                "symbol_sha256": symbol_digest,
+                "match_reason": reason,
+            }
+        )
+    verification = (
+        "local+installed" if identity is not None and installed_verified
+        else "local" if identity is not None
+        else "unverified"
+    )
+    state = {
+        "format": SYMBOL_STATE_FORMAT,
+        "build": {
+            "verification": verification,
+            "title_id": identity.title_id if identity is not None else None,
+            "vpk_sha256": identity.vpk.sha256 if identity is not None else None,
+            "identity_sha256": (
+                hashlib.sha256(
+                    build_identity.identity_to_json(identity).encode("utf-8")
+                ).hexdigest()
+                if identity is not None else None
+            ),
+        },
+        "main": {
+            "name": main_module.name,
+            "elf_sha256": sha256_file(main_image.path),
+        },
+        "offsets": {
+            "style": snapshot.offsets.style,
+            "text": snapshot.offsets.text,
+            "data": snapshot.offsets.data,
+        },
+        "modules": modules,
+        "script_sha256": hashlib.sha256(script.encode("utf-8")).hexdigest(),
+    }
+    return validate_symbol_state(state)
+
+
+def compare_symbol_states(previous: dict | None, current: dict) -> ModuleChanges:
+    validate_symbol_state(current)
+    if previous is None:
+        return ModuleChanges(
+            tuple(module["name"] for module in current["modules"]),
+            (), (), (), False,
+        )
+    validate_symbol_state(previous)
+    old = {module["name"]: module for module in previous["modules"]}
+    new = {module["name"]: module for module in current["modules"]}
+    common = set(old) & set(new)
+    return ModuleChanges(
+        tuple(sorted(set(new) - set(old))),
+        tuple(sorted(set(old) - set(new))),
+        tuple(sorted(
+            name for name in common
+            if old[name]["segments"] != new[name]["segments"]
+        )),
+        tuple(sorted(
+            name for name in common
+            if (
+                old[name]["symbol_sha256"] != new[name]["symbol_sha256"]
+                or old[name]["match_reason"] != new[name]["match_reason"]
+            )
+        )),
+        previous["build"]["title_id"] != current["build"]["title_id"]
+        or previous["build"]["vpk_sha256"] != current["build"]["vpk_sha256"]
+        or previous["build"]["identity_sha256"] != current["build"]["identity_sha256"]
+        or previous["main"]["elf_sha256"] != current["main"]["elf_sha256"],
+    )
+
+
+def _stage_text(path: Path, text: str) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handle = tempfile.NamedTemporaryFile(
+        mode="w",
+        encoding="utf-8",
+        newline="\n",
+        prefix=f".{path.name}.",
+        suffix=".part",
+        dir=path.parent,
+        delete=False,
+    )
+    try:
+        with handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        return Path(handle.name)
+    except Exception:
+        try:
+            Path(handle.name).unlink()
+        except OSError:
+            pass
+        raise
+
+
+def _stage_bytes(path: Path, data: bytes) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handle = tempfile.NamedTemporaryFile(
+        mode="wb",
+        prefix=f".{path.name}.",
+        suffix=".part",
+        dir=path.parent,
+        delete=False,
+    )
+    try:
+        with handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        return Path(handle.name)
+    except Exception:
+        try:
+            Path(handle.name).unlink()
+        except OSError:
+            pass
+        raise
+
+
+def _restore_file(path: Path, previous: bytes | None) -> None:
+    if previous is None:
+        if path.exists():
+            path.unlink()
+        return
+    staged = _stage_bytes(path, previous)
+    os.replace(staged, path)
+
+
+def publish_symbol_view(
+    script_path: Path,
+    script: str,
+    state_path: Path,
+    state: dict,
+) -> bool:
+    """Atomically stage a script/state pair and roll back partial commits."""
+
+    script_path = script_path.resolve()
+    state_path = state_path.resolve()
+    if script_path == state_path:
+        raise SymbolError("symbol script and state paths must differ")
+    state_text = json.dumps(state, indent=2, sort_keys=True) + "\n"
+    validate_symbol_state(json.loads(state_text))
+    old_script = script_path.read_bytes() if script_path.exists() else None
+    old_state = state_path.read_bytes() if state_path.exists() else None
+    if (
+        old_script == script.encode("utf-8")
+        and old_state == state_text.encode("utf-8")
+    ):
+        return False
+    staged_script: Path | None = None
+    staged_state: Path | None = None
+    script_committed = False
+    state_committed = False
+    try:
+        staged_script = _stage_text(script_path, script)
+        staged_state = _stage_text(state_path, state_text)
+        os.replace(staged_script, script_path)
+        staged_script = None
+        script_committed = True
+        os.replace(staged_state, state_path)
+        staged_state = None
+        state_committed = True
+        return True
+    except (OSError, UnicodeError) as exc:
+        try:
+            if script_committed:
+                _restore_file(script_path, old_script)
+            if state_committed:
+                _restore_file(state_path, old_state)
+        except (OSError, UnicodeError) as rollback_exc:
+            raise SymbolError(
+                "symbol view publication failed and rollback also failed: "
+                f"{rollback_exc}"
+            ) from exc
+        raise SymbolError(f"symbol view publication failed safely: {exc}") from exc
+    finally:
+        for temporary in (staged_script, staged_state):
+            if temporary is not None:
+                try:
+                    temporary.unlink()
+                except OSError:
+                    pass
+
+
+def build_gdb_command(
+    executable: Path,
+    script: Path,
+    arguments: Sequence[str],
+    *,
+    batch: bool,
+) -> list[str]:
+    if len(arguments) > 16:
+        raise SymbolError("at most 16 GDB launch arguments are supported")
+    checked: list[str] = []
+    for argument in arguments:
+        if (
+            not isinstance(argument, str)
+            or not argument
+            or any(ord(char) < 0x20 or ord(char) == 0x7F for char in argument)
+            or (
+                argument not in SAFE_GDB_ARGUMENTS
+                and SAFE_GDB_INTERPRETER.fullmatch(argument) is None
+            )
+        ):
+            raise SymbolError(f"unsafe or unsupported GDB launch argument {argument!r}")
+        checked.append(argument)
+    if batch and "--batch" not in checked and "-batch" not in checked:
+        checked.append("--batch")
+    return [str(executable.resolve()), "-nx", *checked, "-x", str(script.resolve())]
+
+
 def materialize_solib_cache(
     matches: Sequence[ModuleMatch], cache_root: Path
 ) -> Path:
@@ -977,23 +1391,152 @@ def build_argument_parser() -> argparse.ArgumentParser:
         "--solib-cache-root", type=Path,
         help="content-addressed cache root (default: .uvdb-solib beside --output)",
     )
+    identity = parser.add_mutually_exclusive_group(required=True)
+    identity.add_argument(
+        "--build-identity", type=Path,
+        help=(
+            "versioned receipt created by gdb_build_identity.py; local VPK and "
+            "ELF hashes must match before symbols are emitted"
+        ),
+    )
+    identity.add_argument(
+        "--allow-unverified-build", action="store_true",
+        help=(
+            "explicit compatibility mode without a build identity; never "
+            "reported as an identity match"
+        ),
+    )
+    parser.add_argument(
+        "--vpk", type=Path,
+        help="exact local VPK named by --build-identity",
+    )
+    parser.add_argument(
+        "--verify-installed", action="store_true",
+        help=(
+            "read-only hash each recorded ux0:app binary through Vita Companion "
+            "FTP; any unavailable or mismatched file fails closed"
+        ),
+    )
+    parser.add_argument("--ftp-port", type=int, default=1337)
+    parser.add_argument("--ftp-timeout", type=float, default=10.0)
     parser.add_argument("--output", type=Path, default=Path("uvdb-symbols.gdb"))
+    parser.add_argument(
+        "--state-file", type=Path,
+        help=(
+            "machine-readable module refresh state (default: OUTPUT.state.json); "
+            "added, removed, and rebased modules are reported on the next run"
+        ),
+    )
     parser.add_argument(
         "--gdb", type=Path,
         help="launch this GDB with the generated script immediately after the snapshot",
+    )
+    parser.add_argument(
+        "--gdb-arg", action="append", default=[],
+        help=(
+            "allowlisted noninteractive GDB option; use "
+            "--gdb-arg=--interpreter=mi2 for an IDE/MI session"
+        ),
+    )
+    parser.add_argument(
+        "--gdb-batch", action="store_true",
+        help="launch GDB noninteractively with --batch after refreshing symbols",
     )
     return parser
 
 
 def run(args: argparse.Namespace) -> int:
+    output = args.output.resolve()
+    state_path = (
+        args.state_file.resolve()
+        if getattr(args, "state_file", None) is not None
+        else output.with_name(output.name + ".state.json")
+    )
+    previous_state = load_symbol_state(state_path, output)
+    requested_gdb = getattr(args, "gdb", None)
+    requested_gdb_args = getattr(args, "gdb_arg", ())
+    requested_gdb_batch = bool(getattr(args, "gdb_batch", False))
+    if requested_gdb is None and (requested_gdb_args or requested_gdb_batch):
+        raise SymbolError("--gdb-arg/--gdb-batch require --gdb")
+    gdb_command = None
+    if requested_gdb is not None:
+        if not requested_gdb.resolve().is_file():
+            raise SymbolError("--gdb must name an existing regular file")
+        gdb_command = build_gdb_command(
+            requested_gdb,
+            output,
+            requested_gdb_args,
+            batch=requested_gdb_batch,
+        )
     main_image = read_elf(args.main_elf)
+    identity_path = getattr(args, "build_identity", None)
+    allow_unverified = bool(getattr(args, "allow_unverified_build", False))
+    verify_installed = bool(getattr(args, "verify_installed", False))
+    if (
+        (identity_path is None and not allow_unverified)
+        or (identity_path is not None and allow_unverified)
+    ):
+        raise SymbolError(
+            "select exactly one of --build-identity or --allow-unverified-build"
+        )
+    selected_identity = None
+    installed_verified = False
+    if identity_path is not None:
+        vpk_path = getattr(args, "vpk", None)
+        if vpk_path is None:
+            raise SymbolError("--build-identity requires --vpk")
+        try:
+            selected_identity = build_identity.load_build_identity(identity_path)
+            # Check the two core local artifacts before opening a debugger
+            # connection or touching the target's run state.
+            build_identity.require_artifact(vpk_path, selected_identity.vpk, "VPK")
+            build_identity.require_artifact(
+                main_image.path, selected_identity.main_symbols, "main ELF"
+            )
+        except build_identity.BuildIdentityError as exc:
+            raise SymbolError(f"build identity check failed: {exc}") from exc
+    elif verify_installed:
+        raise SymbolError(
+            "--verify-installed requires --build-identity; compatibility mode "
+            "cannot attest the installed build"
+        )
     roots = args.search_root or [main_image.path.parent]
     images = scan_elfs(roots)
     explicit = parse_explicit(args.module)
+    if selected_identity is not None and explicit:
+        try:
+            # Identity-backed mappings may describe a module that has not
+            # loaded yet or has just unloaded. Validate those dormant paths
+            # now; a future refresh can use them without weakening typo/hash
+            # checks merely because the module is temporarily absent.
+            build_identity.verify_local_identity(
+                selected_identity,
+                args.vpk,
+                main_image.path,
+                {name: image.path for name, image in explicit.items()},
+            )
+        except build_identity.BuildIdentityError as exc:
+            raise SymbolError(f"build identity check failed: {exc}") from exc
+    if selected_identity is not None and verify_installed:
+        try:
+            build_identity.verify_installed_identity(
+                selected_identity,
+                args.host,
+                port=getattr(args, "ftp_port", 1337),
+                timeout=getattr(args, "ftp_timeout", 10.0),
+            )
+            installed_verified = True
+        except build_identity.BuildIdentityError as exc:
+            raise SymbolError(f"build identity check failed: {exc}") from exc
     snapshot = query_target(args.host, args.port, args.timeout)
     main_module = reconcile_main(main_image, snapshot, args.main_module)
     matches, unmatched = match_modules(
-        snapshot, main_module, images, explicit, args.allow_stem_match
+        snapshot,
+        main_module,
+        images,
+        explicit,
+        args.allow_stem_match,
+        allow_absent_explicit=selected_identity is not None,
     )
     matched_names = {match.runtime.name for match in matches}
     missing_required = sorted(set(args.require_module) - matched_names)
@@ -1001,8 +1544,16 @@ def run(args: argparse.Namespace) -> int:
         raise SymbolError(
             "required runtime modules were not matched: " + ", ".join(missing_required)
         )
-    output = args.output.resolve()
-    output.parent.mkdir(parents=True, exist_ok=True)
+    if selected_identity is not None:
+        try:
+            build_identity.verify_local_identity(
+                selected_identity,
+                args.vpk,
+                main_image.path,
+                {match.runtime.name: match.image.path for match in matches},
+            )
+        except build_identity.BuildIdentityError as exc:
+            raise SymbolError(f"build identity check failed: {exc}") from exc
     solib_directory = None
     if args.mode == "solib":
         cache_root = (
@@ -1015,16 +1566,45 @@ def run(args: argparse.Namespace) -> int:
         args.host, args.port, snapshot, main_module, main_image, matches, unmatched,
         args.mode, solib_directory,
     )
-    output.write_text(script, encoding="utf-8", newline="\n")
+    if selected_identity is not None:
+        verification = "local+installed" if installed_verified else "local-only"
+        script = (
+            f"# Build identity: {build_identity.IDENTITY_FORMAT}; "
+            f"title={selected_identity.title_id}; verification={verification}\n"
+            f"# VPK SHA-256: {selected_identity.vpk.sha256}\n"
+            + script
+        )
+    else:
+        script = "# Build identity: UNVERIFIED COMPATIBILITY MODE\n" + script
+    state = build_symbol_state(
+        snapshot,
+        main_module,
+        main_image,
+        matches,
+        script,
+        selected_identity,
+        installed_verified,
+    )
+    changes = compare_symbol_states(previous_state, state)
+    changed = publish_symbol_view(output, script, state_path, state)
     print(
         f"Wrote {output}: main={main_module.name!r}, "
-        f"matched={len(matches)}, unmatched={len(unmatched)}, mode={args.mode}"
+        f"matched={len(matches)}, unmatched={len(unmatched)}, mode={args.mode}, "
+        f"identity={state['build']['verification']}, "
+        f"updated={'yes' if changed else 'no'}"
     )
+    print(
+        f"Module refresh: added={','.join(changes.added) or '-'}; "
+        f"removed={','.join(changes.removed) or '-'}; "
+        f"rebased={','.join(changes.rebased) or '-'}; "
+        f"symbol_changes={','.join(changes.symbol_changes) or '-'}; "
+        f"build_changed={'yes' if changes.build_changed else 'no'}"
+    )
+    print(f"State: {state_path}")
     for module in unmatched:
         print(f"  no symbols: {module.name}")
-    if args.gdb:
-        command = [str(args.gdb.resolve()), "-x", str(output)]
-        return subprocess.run(command, check=False).returncode
+    if gdb_command is not None:
+        return subprocess.run(gdb_command, check=False, shell=False).returncode
     return 0
 
 
@@ -1032,6 +1612,8 @@ def main() -> int:
     args = build_argument_parser().parse_args()
     if not 1 <= args.port <= 65535 or args.timeout <= 0:
         raise SymbolError("port and timeout must be positive and in range")
+    if not 1 <= args.ftp_port <= 65535 or args.ftp_timeout <= 0:
+        raise SymbolError("FTP port and timeout must be positive and in range")
     if not SAFE_HOST.fullmatch(args.host):
         raise SymbolError("host must be a plain IPv4 address or DNS hostname")
     return run(args)

@@ -27,6 +27,7 @@ class RspClient:
     timeout: float
     connection: socket.socket = field(init=False)
     buffered: bytearray = field(default_factory=bytearray, init=False)
+    console_output: bytearray = field(default_factory=bytearray, init=False)
     ack_mode: bool = field(default=True, init=False)
 
     def __post_init__(self) -> None:
@@ -87,11 +88,19 @@ class RspClient:
             self.connection.sendall(b"+")
         return bytes(payload)
 
-    def request(self, payload: bytes) -> bytes:
+    def request(self, payload: bytes, *, demux_console: bool = True) -> bytes:
         self.connection.sendall(frame(payload))
         if self.ack_mode:
             self._expect_ack()
-        return self.read_packet()
+        return self.read_response() if demux_console else self.read_packet()
+
+    def read_response(self) -> bytes:
+        """Read one solicited reply while preserving intervening O packets."""
+        response = self.read_packet()
+        while is_console_output_packet(response):
+            self.console_output.extend(decode_hex_output(response[1:]))
+            response = self.read_packet()
+        return response
 
     def negotiate(self) -> bytes:
         supported = self.request(
@@ -120,11 +129,19 @@ def decode_hex_output(payload: bytes) -> bytes:
         raise SmokeFailure(f"monitor output is not valid hexadecimal: {payload[:80]!r}") from exc
 
 
+def is_console_output_packet(payload: bytes) -> bool:
+    """Distinguish an RSP O packet from the terminal success reply ``OK``."""
+    return payload.startswith(b"O") and payload != b"OK"
+
+
 def monitor_request(client: RspClient, command: str) -> str:
     request = b"qRcmd," + command.encode("ascii").hex().encode("ascii")
-    response = client.request(request)
+    # qRcmd deliberately returns its command text through O packets. Read this
+    # request without the normal asynchronous-console demultiplexer so the
+    # monitor output remains associated with the command being validated.
+    response = client.request(request, demux_console=False)
     output = bytearray()
-    while response.startswith(b"O"):
+    while is_console_output_packet(response):
         output.extend(decode_hex_output(response[1:]))
         response = client.read_packet()
     if response == b"OK":
@@ -184,7 +201,87 @@ def require(text: str, *values: str) -> None:
         raise SmokeFailure("monitor output unexpectedly truncated on the live target")
 
 
-def run_once(host: str, port: int, timeout: float) -> None:
+def parse_uint(text: str, pattern: str, label: str) -> int:
+    match = re.search(pattern, text, re.MULTILINE)
+    if not match:
+        raise SmokeFailure(f"monitor output has no valid {label}: {text[:240]!r}")
+    return int(match.group(1), 10)
+
+
+def validate_console(text: str) -> None:
+    require(
+        text,
+        "VitaDebugger console",
+        "session: open",
+        "no-ack=yes",
+        "transport-failed=no",
+        "queued:",
+        "accepted:",
+        "sent:",
+        "dropped-total:",
+        "transport: frames=",
+        "transport-errors:",
+    )
+    dropped = re.search(
+        r"^  dropped-total: (\d+) records / (\d+) bytes$", text, re.MULTILINE
+    )
+    errors = re.search(
+        r"^  transport-errors: partial=(\d+) hard=(\d+) session=(\d+) "
+        r"last-native=(0x[0-9a-fA-F]{8})$",
+        text,
+        re.MULTILINE,
+    )
+    if not dropped or tuple(map(int, dropped.groups())) != (0, 0):
+        raise SmokeFailure("monitor console reports captured-output loss")
+    if not errors or tuple(map(int, errors.groups()[:3])) != (0, 0, 0):
+        raise SmokeFailure("monitor console reports transport errors")
+    if errors.group(4).lower() != "0x00000000":
+        raise SmokeFailure("monitor console reports a native transport error")
+
+
+def validate_framebuffer(text: str, label: str) -> tuple[int, int, int, int]:
+    match = re.search(
+        rf"^  framebuffer-{label}: address=(0x[0-9a-fA-F]{{8}}) "
+        r"size=(\d+)x(\d+) pitch=(\d+) "
+        r"format=A8B8G8R8\(0x00000000\)$",
+        text,
+        re.MULTILINE,
+    )
+    if not match:
+        raise SmokeFailure(f"monitor display has no valid {label} framebuffer")
+    address = int(match.group(1), 16)
+    width, height, pitch = map(int, match.groups()[1:])
+    if not address or (width, height) != (960, 544) or pitch < width:
+        raise SmokeFailure(f"monitor display reports incoherent {label} geometry")
+    return address, width, height, pitch
+
+
+def validate_display(text: str) -> int:
+    require(
+        text,
+        "VitaDebugger display",
+        "primary-head: 0",
+        "maximum-framebuffer: 960x544",
+    )
+    if "unavailable" in text:
+        raise SmokeFailure("monitor display reports an unavailable live query")
+    vcount = parse_uint(text, r"^  vcount: (\d+)$", "vcount")
+    refresh_match = re.search(
+        r"^  refresh-rate: (\d+)\.(\d{3}) Hz$", text, re.MULTILINE
+    )
+    if not refresh_match:
+        raise SmokeFailure("monitor display has no valid refresh rate")
+    refresh_millihz = (
+        int(refresh_match.group(1)) * 1000 + int(refresh_match.group(2))
+    )
+    if not 1_000 <= refresh_millihz <= 240_000:
+        raise SmokeFailure("monitor display refresh rate is implausible")
+    validate_framebuffer(text, "immediate")
+    validate_framebuffer(text, "next")
+    return vcount
+
+
+def run_once(host: str, port: int, timeout: float) -> int:
     client = RspClient(host, port, timeout)
     try:
         supported = client.negotiate()
@@ -199,7 +296,16 @@ def run_once(host: str, port: int, timeout: float) -> None:
             raise SmokeFailure(f"invalid initial PC register reply: {pc_before!r}")
 
         help_text = monitor_request(client, "help")
-        require(help_text, "help", "status", "threads", "modules", "read-only")
+        require(
+            help_text,
+            "help",
+            "status",
+            "threads",
+            "modules",
+            "console",
+            "display",
+            "read-only",
+        )
 
         status_text = monitor_request(client, "status")
         require(
@@ -237,6 +343,12 @@ def run_once(host: str, port: int, timeout: float) -> None:
             )
         require(module_text, "segment[0]: address=", "perms=")
 
+        console_text = monitor_request(client, "console")
+        validate_console(console_text)
+
+        display_text = monitor_request(client, "display")
+        display_vcount = validate_display(display_text)
+
         unknown = monitor_request(client, "not-a-command")
         require(unknown, "unknown monitor command", "monitor help")
         malformed_response = client.request(b"qRcmd,0")
@@ -258,6 +370,9 @@ def run_once(host: str, port: int, timeout: float) -> None:
         print(f"threads: {len(rsp_threads)}; modules: {len(module_names)}")
         print(help_text, end="")
         print(status_text, end="")
+        print(console_text, end="")
+        print(display_text, end="")
+        return display_vcount
     finally:
         client.close()
 
@@ -274,10 +389,12 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    run_once(args.host, args.port, args.timeout)
+    first_vcount = run_once(args.host, args.port, args.timeout)
     if args.reconnect:
         time.sleep(0.5)
-        run_once(args.host, args.port, args.timeout)
+        second_vcount = run_once(args.host, args.port, args.timeout)
+        if first_vcount == second_vcount:
+            raise SmokeFailure("monitor display vcount did not advance across reconnect")
     print("PASS: read-only GDB qRcmd monitor commands")
     return 0
 

@@ -103,7 +103,8 @@ int uvdb_start_server(void);
 
 // Stop and delete the debugger service thread. Any active GDB connection is
 // closed. Returns 0 on success (including when already stopped), or -1 when
-// called from the service thread itself.
+// called from an internal service thread, helper teardown fails, or a pending
+// software-breakpoint restoration must remain protected for a later retry.
 int uvdb_stop_server(void);
 
 // Stop the service thread, close active/listening sockets, and release

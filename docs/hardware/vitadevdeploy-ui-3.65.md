@@ -68,13 +68,47 @@ which vita2d/GXM or SceShell transition call failed. Do not automate another
 graphical launch/close stress gate until that lifecycle is audited and a
 recovery plan is ready.
 
-The leading hypothesis is a display-resource handoff race: the killed target
-owned a debug-screen framebuffer and did not run an orderly display shutdown,
-while the deployer entered vita2d/GXM immediately on launch. This remains an
-inference, not a confirmed root cause. The next gate should preserve the crash
-dump and startup trace, add markers around vita2d initialization/first draw/
-first swap, wait for the old target and transports to quiesce, and A/B the same
-transition with the headless agent.
+## Crash-dump analysis and mitigation
+
+Both preserved dumps were copied without deleting the originals and decoded
+against the matching unstripped `vitadevdeploy_agent` ELF. Their compressed
+metadata is:
+
+| Dump | Timestamp in `GPU_INFO` | Compressed size | Compressed SHA-256 |
+| --- | --- | ---: | --- |
+| `psp2core-1789361544-GPUCRASH.psp2dmp` | 2026-09-14 00:52:24.476615 | 613,472 bytes | `e1791f22a4b1fae29539bd5e4db8d7f0cbea95ab70a41096d68a6fba6ca92aa4` |
+| `psp2core-1789397550-GPUCRASH.psp2dmp` | 2026-09-14 10:52:30.428090 | 86,064 bytes | `4fcdfcaa9da17aad1d907833eed70850aaf83f17b3bb162467306996819ff332` |
+
+The dumps independently captured the same application state despite different
+ASLR bases. No CPU thread had an exception stop reason. The main thread and
+`SceGxmDisplayQueue` thread were both waiting in `SceLibKernel`, and the main
+stack resolved to `main` -> `vdev_ui_status` -> `draw_frame` ->
+`vita2d_swap_buffers` -> `sceGxmDisplayQueueAddEntry`. In both cases the return
+to `main` was offset `+0x10e`, immediately after the 10-percent "Creating secure
+session" status call. This is the third frame submitted in quick succession at
+startup: initialization presents 2 percent, `main` presents 5 percent, and
+then `main` presents 10 percent. `TTY_INFO2` ends with
+`appmgr_aborthandler.c(793) render gpu crash` for both dumps. Their `GPU_INFO`
+headers also agree on version 5, flags `0x3f`, SoC revision `0x42`, and
+111/111/111 clock fields.
+
+The installed libvita2d implementation uses one temporary vertex/font pool,
+resets it in every `vita2d_start_drawing`, and does not itself wait for the
+previous scene before that reset. The rapid, geometry-heavy startup frames can
+therefore overwrite transient data while the GPU still consumes the prior
+frame. This source behavior plus the identical third-frame stacks makes pool
+reuse the leading evidence-backed cause; the retail dump does not identify an
+individual draw primitive, so it is not yet a conclusive GPU-register-level
+root cause.
+
+The graphical path now tracks whether it has presented a frame. The first
+frame remains nonblocking; before every later `vita2d_start_drawing`, it calls
+`vita2d_wait_rendering_done` so the shared pool cannot be reused early. The
+contract test verifies that ordering and reset behavior. Keep the UI opt-in
+until the guarded build passes repeated cold launches, immediate app-to-agent
+transitions, Circle cleanup, SceShell peel closure, and signed-install exits on
+hardware. The host should still quiesce a recently closed target before
+launching the graphical agent.
 
 ## LiveArea presentation follow-up
 

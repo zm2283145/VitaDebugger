@@ -30,9 +30,12 @@ Set CMake's `VDEV_ENABLE_DISPLAY_UI=ON`, or pass
 `-EnableExperimentalDisplayUi` to `tools/build_agent.ps1`, only for a supervised
 display session. Its retail 3.65 lifecycle gate passed six consecutive
 post-refresh launch/exit cycles: three SceShell peel closures and three Circle
-cleanup exits, with no GPU fault or LiveArea hang. One earlier non-repeating GPU
-fault remains recorded. The opt-in build uses a process-owned framebuffer and
-should still exit normally. It uses the
+cleanup exits, with no GPU fault or LiveArea hang. Two intermittent GPU faults
+were later preserved; both dumps resolve to the third rapid startup frame in
+`vita2d_swap_buffers`. The graphical path now waits for prior GPU work before
+libvita2d resets its shared transient vertex/font pool, but that guard still
+needs a hardware stress gate. The opt-in build uses a process-owned framebuffer
+and should still exit normally. It uses the
 installed libvita2d and the Vita's default PGF font to present a native 960x544
 interface with operation cards, stage milestones, status detail, and distinct
 waiting, installation, completion, and error states. Verification stages use

@@ -88,6 +88,78 @@ static int render(
 
 int main(void)
 {
+    struct uvdb_monitor_display_stop display_stop;
+    memset(&display_stop, 0xa5, sizeof(display_stop));
+    uvdb_monitor_display_stop_reset(&display_stop);
+    check(display_stop.phase == UVDB_MONITOR_DISPLAY_STOP_IDLE &&
+          display_stop.generation == 0,
+          "reset initial display stop handoff");
+    check(uvdb_monitor_display_stop_begin(NULL, 1) < 0 &&
+          uvdb_monitor_display_stop_begin(&display_stop, 0) < 0,
+          "reject invalid initial display stop generation");
+    check(uvdb_monitor_display_stop_begin(&display_stop, 7) == 0 &&
+          uvdb_monitor_display_stop_pending_generation(&display_stop) == 7,
+          "begin generation-tagged initial display sample");
+    check(uvdb_monitor_display_stop_begin(&display_stop, 8) < 0 &&
+          uvdb_monitor_display_stop_arm(&display_stop, 8) < 0 &&
+          uvdb_monitor_display_stop_pending_generation(&display_stop) == 7,
+          "reject overlapping begin and stale arm");
+    check(uvdb_monitor_display_stop_arm(&display_stop, 7) == 0 &&
+          uvdb_monitor_display_stop_pending_generation(&display_stop) == 0,
+          "arm matching initial display stop");
+    check(uvdb_monitor_display_stop_on_exception(&display_stop, 1) ==
+              UVDB_MONITOR_DISPLAY_STOP_HANDLE &&
+          display_stop.phase == UVDB_MONITOR_DISPLAY_STOP_IDLE &&
+          display_stop.generation == 0,
+          "matching server trap consumes armed display stop");
+
+    check(uvdb_monitor_display_stop_begin(&display_stop, 9) == 0 &&
+          uvdb_monitor_display_stop_on_exception(&display_stop, 0) ==
+              UVDB_MONITOR_DISPLAY_STOP_NOT_OURS &&
+          display_stop.phase == UVDB_MONITOR_DISPLAY_STOP_IDLE &&
+          uvdb_monitor_display_stop_arm(&display_stop, 9) < 0,
+          "real fault cancels display sampling before arm");
+
+    check(uvdb_monitor_display_stop_begin(&display_stop, 10) == 0 &&
+          uvdb_monitor_display_stop_arm(&display_stop, 10) == 0 &&
+          uvdb_monitor_display_stop_on_exception(&display_stop, 0) ==
+              UVDB_MONITOR_DISPLAY_STOP_NOT_OURS &&
+          display_stop.phase == UVDB_MONITOR_DISPLAY_STOP_CANCELLED,
+          "real fault cancels an armed synthetic display stop");
+    check(uvdb_monitor_display_stop_on_exception(&display_stop, 1) ==
+              UVDB_MONITOR_DISPLAY_STOP_IGNORE &&
+          display_stop.phase == UVDB_MONITOR_DISPLAY_STOP_IDLE,
+          "queued server trap is ignored after competing fault");
+    check(uvdb_monitor_display_stop_on_exception(&display_stop, 0) ==
+              UVDB_MONITOR_DISPLAY_STOP_NOT_OURS &&
+          uvdb_monitor_display_stop_on_exception(&display_stop, 1) ==
+              UVDB_MONITOR_DISPLAY_STOP_NOT_OURS,
+          "unrelated exceptions do not belong to display handoff");
+
+    check(uvdb_monitor_display_generation_is_current(12, 4, 12) &&
+          !uvdb_monitor_display_generation_is_current(0, 4, 12) &&
+          !uvdb_monitor_display_generation_is_current(11, 4, 12) &&
+          !uvdb_monitor_display_generation_is_current(12, -1, 12),
+          "only exact active socket generation exposes display cache");
+
+    uint32_t millihz = 0;
+    check(uvdb_monitor_ieee754_to_millihz(0x42700000u, &millihz) == 0 &&
+          millihz == 60000u,
+          "convert 60 Hz without floating-point execution");
+    check(uvdb_monitor_ieee754_to_millihz(0x426fc28fu, &millihz) == 0 &&
+          millihz == 59940u,
+          "round fractional refresh rate to millihertz");
+    millihz = 123u;
+    check(uvdb_monitor_ieee754_to_millihz(0x7f800000u, &millihz) < 0 &&
+          millihz == 123u,
+          "reject infinite refresh rate without changing output");
+    check(uvdb_monitor_ieee754_to_millihz(0x80000000u, &millihz) < 0,
+          "reject signed refresh rate");
+    check(uvdb_monitor_ieee754_to_millihz(0x44800000u, &millihz) < 0,
+          "reject implausible refresh rate");
+    check(uvdb_monitor_ieee754_to_millihz(0, NULL) < 0,
+          "reject NULL refresh-rate output");
+
     check_parse("qRcmd,68656c70", UVDB_MONITOR_PARSE_OK,
                 UVDB_MONITOR_COMMAND_HELP, "parse help");
     check_parse("qRcmd,737461747573", UVDB_MONITOR_PARSE_OK,
@@ -96,6 +168,10 @@ int main(void)
                 UVDB_MONITOR_COMMAND_THREADS, "parse threads");
     check_parse("qRcmd,6D6F64756C6573", UVDB_MONITOR_PARSE_OK,
                 UVDB_MONITOR_COMMAND_MODULES, "parse uppercase module hex");
+    check_parse("qRcmd,636f6e736f6c65", UVDB_MONITOR_PARSE_OK,
+                UVDB_MONITOR_COMMAND_CONSOLE, "parse console");
+    check_parse("qRcmd,646973706c6179", UVDB_MONITOR_PARSE_OK,
+                UVDB_MONITOR_COMMAND_DISPLAY, "parse display");
     check_parse("qRcmd,092068656c702009", UVDB_MONITOR_PARSE_OK,
                 UVDB_MONITOR_COMMAND_HELP, "trim horizontal whitespace");
     check_parse("qRcmd,", UVDB_MONITOR_PARSE_UNKNOWN,
@@ -135,7 +211,9 @@ int main(void)
     check(contains(output, output_size, "help") &&
           contains(output, output_size, "status") &&
           contains(output, output_size, "threads") &&
-          contains(output, output_size, "modules"),
+          contains(output, output_size, "modules") &&
+          contains(output, output_size, "console") &&
+          contains(output, output_size, "display"),
           "help lists complete registry");
 
     struct uvdb_monitor_snapshot snapshot = sample_snapshot();
@@ -217,6 +295,127 @@ int main(void)
     check(result == UVDB_MONITOR_RENDER_OK &&
           contains(output, output_size, "unavailable: 0xffffffd6"),
           "module query failure is visible");
+
+    snapshot.console = (struct uvdb_monitor_console) {
+        .available = 1,
+        .session_open = 1,
+        .session_generation = 2,
+        .queued_records = 3,
+        .queued_bytes = 200,
+        .sessions_opened = 2,
+        .reconnects = 1,
+        .accepted_records = 8,
+        .accepted_bytes = 500,
+        .sent_records = 5,
+        .sent_bytes = 300,
+        .dropped_disconnected_records = 1,
+        .dropped_disconnected_bytes = 20,
+        .dropped_contention_records = 2,
+        .dropped_contention_bytes = 30,
+        .dropped_full_records = 3,
+        .dropped_full_bytes = 40,
+        .dropped_stale_records = 4,
+        .dropped_stale_bytes = 50,
+        .no_ack_mode = 1,
+        .frames_sent = 5,
+        .frame_bytes_sent = 350,
+        .would_block = 1,
+        .commit_busy = 2,
+        .partial_writes = 1,
+        .hard_errors = 2,
+        .session_errors = 3,
+        .last_native_error = -77,
+    };
+    original = snapshot;
+    result = render(UVDB_MONITOR_COMMAND_CONSOLE, &snapshot, output,
+                    sizeof(output), &output_size);
+    check(result == UVDB_MONITOR_RENDER_OK, "console renders");
+    check(contains(output, output_size,
+                   "session: open, generation=2, no-ack=yes") &&
+          contains(output, output_size, "queued: 3 records / 200 bytes") &&
+          contains(output, output_size,
+                   "dropped-total: 10 records / 140 bytes") &&
+          contains(output, output_size,
+                   "transport: frames=5 frame-bytes=350 would-block=1") &&
+          contains(output, output_size,
+                   "partial=1 hard=2 session=3 last-native=0xffffffb3"),
+          "console exposes queue, loss, and transport counters");
+    check(!memcmp(&snapshot, &original, sizeof(snapshot)),
+          "console rendering is read-only");
+    snapshot.console.available = 0;
+    result = render(UVDB_MONITOR_COMMAND_CONSOLE, &snapshot, output,
+                    sizeof(output), &output_size);
+    check(result == UVDB_MONITOR_RENDER_OK &&
+          contains(output, output_size, "unavailable"),
+          "unavailable console snapshot is explicit");
+
+    snapshot.display = (struct uvdb_monitor_display) {
+        .available = 1,
+        .primary_head = 0,
+        .vcount = 12345,
+        .refresh_query_result = 0,
+        .refresh_millihz = 59940,
+        .maximum_query_result = 0,
+        .maximum_width = 960,
+        .maximum_height = 544,
+        .immediate = {
+            .query_result = 0,
+            .address = 0x81200000u,
+            .pitch = 960,
+            .pixel_format = 0,
+            .width = 960,
+            .height = 544,
+        },
+        .next_frame = {
+            .query_result = -7,
+        },
+    };
+    original = snapshot;
+    result = render(UVDB_MONITOR_COMMAND_DISPLAY, &snapshot, output,
+                    sizeof(output), &output_size);
+    check(result == UVDB_MONITOR_RENDER_OK, "display renders");
+    check(contains(output, output_size, "primary-head: 0") &&
+          contains(output, output_size, "vcount: 12345") &&
+          contains(output, output_size, "refresh-rate: 59.940 Hz") &&
+          contains(output, output_size, "maximum-framebuffer: 960x544") &&
+          contains(output, output_size,
+                   "address=0x81200000 size=960x544 pitch=960 ") &&
+          contains(output, output_size, "format=A8B8G8R8(0x00000000)") &&
+          contains(output, output_size,
+                   "framebuffer-next: unavailable, result=0xfffffff9"),
+          "display reports bounded framebuffer and display metadata");
+    check(!memcmp(&snapshot, &original, sizeof(snapshot)),
+          "display rendering is read-only");
+
+    snapshot.display.available = 0;
+    result = render(UVDB_MONITOR_COMMAND_DISPLAY, &snapshot, output,
+                    sizeof(output), &output_size);
+    check(result == UVDB_MONITOR_RENDER_OK &&
+          contains(output, output_size,
+                   "unavailable: no safe cached server-thread sample"),
+          "display reports a missing safe cache explicitly");
+
+    snapshot.display = (struct uvdb_monitor_display) {
+        .available = 1,
+        .primary_head = -3,
+        .vcount = -4,
+        .refresh_query_result = -5,
+        .maximum_query_result = -6,
+        .immediate = {.query_result = -7},
+        .next_frame = {.query_result = -8},
+    };
+    result = render(UVDB_MONITOR_COMMAND_DISPLAY, &snapshot, output,
+                    sizeof(output), &output_size);
+    check(result == UVDB_MONITOR_RENDER_OK &&
+          contains(output, output_size,
+                   "primary-head: unavailable, result=0xfffffffd") &&
+          contains(output, output_size,
+                   "vcount: unavailable, result=0xfffffffc") &&
+          contains(output, output_size,
+                   "refresh-rate: unavailable, result=0xfffffffb") &&
+          contains(output, output_size,
+                   "maximum-framebuffer: unavailable, result=0xfffffffa"),
+          "negative display query results are explicit failures");
 
     struct uvdb_monitor_thread* maximum_threads = calloc(
         UVDB_MONITOR_MAX_THREADS, sizeof(*maximum_threads));

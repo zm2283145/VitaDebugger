@@ -42,6 +42,20 @@ class AgentUiContractTests(unittest.TestCase):
             frame.index("vita2d_swap_buffers();"),
         )
 
+    def test_transient_pool_is_not_reused_while_gpu_reads_prior_frame(self) -> None:
+        frame = self.ui[
+            self.ui.index("static void draw_frame(") :
+            self.ui.index("int vdev_ui_init(void)")
+        ]
+        wait = "if (ui_frame_presented) {\n        vita2d_wait_rendering_done();\n    }"
+        self.assertIn(wait, frame)
+        self.assertLess(frame.index(wait), frame.index("vita2d_start_drawing();"))
+        self.assertLess(
+            frame.index("vita2d_swap_buffers();"),
+            frame.index("ui_frame_presented = 1;"),
+        )
+        self.assertIn("ui_frame_presented = 0;", self.ui)
+
     def test_normal_exit_releases_font_and_vita2d(self) -> None:
         self.assertIn("vita2d_wait_rendering_done();", self.ui)
         self.assertIn("vita2d_free_pgf(ui_font);", self.ui)
