@@ -128,27 +128,42 @@ int main(void)
     check(uvdb_thread_selection_plan_legacy(&selection, &changed, 0,
                                              &legacy) < 0,
           "legacy continue rejects stale positive Hc");
+    check(uvdb_thread_selection_plan_legacy(&selection, &changed, 1,
+                                             &legacy) < 0,
+          "legacy step rejects stale positive Hc");
     check(uvdb_thread_selection_apply(&selection, 'c', "101", 3,
                                       &changed) == 0 &&
           uvdb_thread_selection_plan_legacy(&selection, &changed, 0,
                                              &legacy) < 0,
           "legacy continue rejects unsupported selective Hc");
     check(uvdb_thread_selection_plan_legacy(&selection, &changed, 1,
+                                             &legacy) == 0 &&
+          legacy.kind == UVDB_RESUME_STEP &&
+          legacy.step_thread == 0x101 &&
+          legacy.scope == UVDB_RESUME_SCOPE_STOPPED_THREAD,
+          "legacy positive Hc isolates the stopped thread for one step");
+    check(uvdb_thread_selection_apply(&selection, 'c', "202", 3,
+                                      &inventory) == 0 &&
+          uvdb_thread_selection_plan_legacy(&selection, &inventory, 1,
+                                             &legacy) < 0 &&
+          uvdb_thread_selection_plan_legacy(&selection, &inventory, 0,
                                              &legacy) < 0,
-          "legacy step rejects unsupported selective Hc");
+          "legacy Hc cannot isolate a different visible thread");
     check(uvdb_thread_selection_apply(&selection, 'c', "0", 1,
                                       &changed) == 0 &&
           uvdb_thread_selection_plan_legacy(&selection, &changed, 1,
                                              &legacy) == 0 &&
           legacy.kind == UVDB_RESUME_STEP &&
-          legacy.step_thread == 0x101,
+          legacy.step_thread == 0x101 &&
+          legacy.scope == UVDB_RESUME_SCOPE_PROCESS,
           "legacy Hc0 steps the stopped thread in all-stop mode");
     check(uvdb_thread_selection_apply(&selection, 'c', "-1", 2,
                                       &changed) == 0 &&
           uvdb_thread_selection_plan_legacy(&selection, &changed, 0,
                                              &legacy) == 0 &&
           legacy.kind == UVDB_RESUME_CONTINUE &&
-          legacy.step_thread == UVDB_RSP_THREAD_ALL,
+          legacy.step_thread == UVDB_RSP_THREAD_ALL &&
+          legacy.scope == UVDB_RESUME_SCOPE_PROCESS,
           "legacy Hc-1 continues the process");
     check(uvdb_thread_selection_apply(&selection, 'c', "-1", 2,
                                       &inventory) == 0 &&
@@ -213,6 +228,35 @@ int main(void)
     check(parse_vcont("vCont;s", &one, &plan) == 0 &&
           plan.kind == UVDB_RESUME_STEP && plan.step_thread == 0x101,
           "accept default step for single thread");
+
+    struct uvdb_resume_plan isolated = {
+        .kind = UVDB_RESUME_STEP,
+        .step_thread = 0x101,
+        .scope = UVDB_RESUME_SCOPE_STOPPED_THREAD,
+    };
+    check(uvdb_resume_plan_validate(
+              &isolated, 0x101, 1, 1, 0, 0) == 0,
+          "selected stopped-thread step requires a healthy stop session");
+    check(uvdb_resume_plan_validate(
+              &isolated, 0x202, 1, 1, 0, 0) < 0 &&
+          uvdb_resume_plan_validate(
+              &isolated, 0x101, 0, 1, 0, 0) < 0 &&
+          uvdb_resume_plan_validate(
+              &isolated, 0x101, 1, 0, 0, 0) < 0 &&
+          uvdb_resume_plan_validate(
+              &isolated, 0x101, 1, 1, 1, 0) < 0 &&
+          uvdb_resume_plan_validate(
+              &isolated, 0x101, 1, 1, 0, 1) < 0,
+          "selected step rejects wrong owner, running target, missing or failed stop, and PC override");
+    isolated.kind = UVDB_RESUME_CONTINUE;
+    check(uvdb_resume_plan_validate(
+              &isolated, 0x101, 1, 1, 0, 0) < 0,
+          "selected-thread continue stays fail-closed");
+    isolated.kind = UVDB_RESUME_STEP;
+    isolated.scope = UVDB_RESUME_SCOPE_PROCESS;
+    check(uvdb_resume_plan_validate(
+              &isolated, -1, 0, 0, 1, 1) == 0,
+          "process-wide resume does not claim selected-thread isolation");
 
     struct uvdb_thread_inventory full;
     uvdb_thread_inventory_reset(&full);
@@ -317,11 +361,16 @@ int main(void)
                       &target, UINT32_C(0x2000), 2,
                       "A32 BX register exchanges to Thumb");
     registers[0] = UINT32_C(0x2002);
+    check(uvdb_arm_plan_direct_step(
+              UINT32_C(0xe12fff30), UINT32_C(0x1000), 0,
+              registers, &target) < 0,
+          "A32 BLX register rejects invalid ARM halfword alignment");
+    registers[0] = UINT32_C(0x2004);
     check_step_target(uvdb_arm_plan_direct_step(
                           UINT32_C(0xe12fff30), UINT32_C(0x1000), 0,
                           registers, &target),
-                      &target, UINT32_C(0x2000), 4,
-                      "A32 BLX register canonicalizes ARM alignment");
+                      &target, UINT32_C(0x2004), 4,
+                      "A32 BLX register accepts word-aligned ARM target");
     check_step_target(uvdb_arm_plan_direct_step(
                           UINT32_C(0x112fff10), UINT32_C(0x1000),
                           UINT32_C(1) << 30, registers, &target),
@@ -332,6 +381,10 @@ int main(void)
                           registers, &target),
                       &target, UINT32_C(0x1008), 4,
                       "A32 BX reads R15 as architectural PC");
+    check(uvdb_arm_plan_direct_step(
+              UINT32_C(0xe12fff3f), UINT32_C(0x1000), 0,
+              registers, &target) < 0,
+          "reject unpredictable A32 BLX PC");
 
     registers[0] = UINT32_C(0x3001);
     check_step_target(uvdb_arm_plan_direct_step(
@@ -340,11 +393,10 @@ int main(void)
                       &target, UINT32_C(0x3000), 2,
                       "A32 MOV PC register interworks to Thumb");
     registers[0] = UINT32_C(0x3002);
-    check_step_target(uvdb_arm_plan_direct_step(
-                          UINT32_C(0xe1a0f000), UINT32_C(0x1000), 0,
-                          registers, &target),
-                      &target, UINT32_C(0x3000), 4,
-                      "A32 MOV PC canonicalizes ARM alignment");
+    check(uvdb_arm_plan_direct_step(
+              UINT32_C(0xe1a0f000), UINT32_C(0x1000), 0,
+              registers, &target) < 0,
+          "A32 MOV PC rejects invalid ARM halfword alignment");
     check_step_target(uvdb_arm_plan_direct_step(
                           UINT32_C(0x01a0f000), UINT32_C(0x1000), 0,
                           registers, &target),
@@ -355,6 +407,92 @@ int main(void)
                           registers, &target),
                       &target, UINT32_C(0x1008), 4,
                       "A32 MOV PC reads R15 as architectural PC");
+
+    registers[0] = UINT32_C(0x2000);
+    registers[1] = UINT32_C(3);
+    check_step_target(uvdb_arm_plan_direct_step(
+                          UINT32_C(0xe280f004), UINT32_C(0x1000), 0,
+                          registers, &target),
+                      &target, UINT32_C(0x2004), 4,
+                      "plan A32 ADD PC immediate");
+    check_step_target(uvdb_arm_plan_direct_step(
+                          UINT32_C(0xe080f101), UINT32_C(0x1000), 0,
+                          registers, &target),
+                      &target, UINT32_C(0x200c), 4,
+                      "plan A32 ADD PC shifted register");
+    check_step_target(uvdb_arm_plan_direct_step(
+                          UINT32_C(0xe2a0f000), UINT32_C(0x1000),
+                          UINT32_C(1) << 29, registers, &target),
+                      &target, UINT32_C(0x2000), 2,
+                      "plan A32 ADC PC with carry and interworking");
+    check_step_target(uvdb_arm_plan_direct_step(
+                          UINT32_C(0xe2c0f000), UINT32_C(0x1000), 0,
+                          registers, &target),
+                      &target, UINT32_C(0x1ffe), 2,
+                      "plan A32 SBC PC with inverted borrow");
+    check_step_target(uvdb_arm_plan_direct_step(
+                          UINT32_C(0x0280f004), UINT32_C(0x1000), 0,
+                          registers, &target),
+                      &target, UINT32_C(0x1004), 4,
+                      "condition-failed A32 ALU PC write falls through");
+    check(uvdb_arm_plan_direct_step(
+              UINT32_C(0xe1a0f110), UINT32_C(0x1000), 0,
+              registers, &target) < 0,
+          "reject unpredictable A32 PC write with register shift");
+    check(uvdb_arm_plan_direct_step(
+              UINT32_C(0xe290f004), UINT32_C(0x1000), 0,
+              registers, &target) == 0 &&
+          uvdb_arm_instruction_may_write_pc(UINT32_C(0xe290f004)),
+          "leave A32 exception-return ALU write at fail-closed gate");
+
+    uint32_t load_address = 0;
+    registers[0] = UINT32_C(0x4000);
+    registers[1] = UINT32_C(3);
+    check(uvdb_arm_plan_load_pc_address(
+              UINT32_C(0xe590f004), UINT32_C(0x1000), 0,
+              registers, &load_address) == 1 &&
+          load_address == UINT32_C(0x4004),
+          "plan A32 immediate LDR PC address");
+    check(uvdb_arm_plan_load_pc_address(
+              UINT32_C(0xe510f004), UINT32_C(0x1000), 0,
+              registers, &load_address) == 1 &&
+          load_address == UINT32_C(0x3ffc),
+          "plan A32 negative immediate LDR PC address");
+    check(uvdb_arm_plan_load_pc_address(
+              UINT32_C(0xe490f004), UINT32_C(0x1000), 0,
+              registers, &load_address) == 1 &&
+          load_address == UINT32_C(0x4000),
+          "plan A32 post-index LDR PC from original base");
+    check(uvdb_arm_plan_load_pc_address(
+              UINT32_C(0xe790f101), UINT32_C(0x1000), 0,
+              registers, &load_address) == 1 &&
+          load_address == UINT32_C(0x400c),
+          "plan A32 register-offset LDR PC address");
+    registers[1] = UINT32_C(0x20);
+    check(uvdb_arm_plan_load_pc_address(
+              UINT32_C(0xe710f1c1), UINT32_C(0x1000), 0,
+              registers, &load_address) == 1 &&
+          load_address == UINT32_C(0x3ffc),
+          "plan A32 negative shifted LDR PC address");
+    check(uvdb_arm_plan_load_pc_address(
+              UINT32_C(0xe59ff004), UINT32_C(0x1000), 0,
+              registers, &load_address) == 1 &&
+          load_address == UINT32_C(0x100c),
+          "plan A32 literal LDR PC address");
+    check(uvdb_arm_plan_load_pc_address(
+              UINT32_C(0x0590f004), UINT32_C(0x1000), 0,
+              registers, &load_address) == 0,
+          "condition-failed A32 LDR PC defers to fallthrough");
+    check(uvdb_arm_plan_load_pc_address(
+              UINT32_C(0xe5d0f000), UINT32_C(0x1000), 0,
+              registers, &load_address) < 0 &&
+          uvdb_arm_plan_load_pc_address(
+              UINT32_C(0xe79ff001), UINT32_C(0x1000), 0,
+              registers, &load_address) < 0 &&
+          uvdb_arm_plan_load_pc_address(
+              UINT32_C(0xe4b0f004), UINT32_C(0x1000), 0,
+              registers, &load_address) < 0,
+          "reject unsafe A32 byte, PC-base register, and LDRT PC forms");
     check(uvdb_arm_plan_direct_step(
               UINT32_C(0xe1a00000), UINT32_C(0x1000), 0,
               registers, &target) == 0,
@@ -384,6 +522,10 @@ int main(void)
           !uvdb_arm_instruction_may_write_pc(UINT32_C(0xe5900000)) &&
           !uvdb_arm_instruction_may_write_pc(UINT32_C(0xf5d0f000)),
           "do not classify ordinary ALU/load or PLD as PC writes");
+    check(uvdb_arm_instruction_may_write_pc(UINT32_C(0xf8b00a00)) &&
+          uvdb_arm_instruction_may_write_pc(UINT32_C(0xf9110a00)) &&
+          uvdb_arm_instruction_may_write_pc(UINT32_C(0xe160006e)),
+          "classify privileged A32 return forms for fail-closed stepping");
 
     check_step_target(uvdb_thumb16_plan_direct_step(
                           UINT16_C(0xd102), UINT32_C(0x1000), 0,
@@ -409,6 +551,37 @@ int main(void)
                           registers, &target),
                       &target, UINT32_C(0x0ffc), 2,
                       "sign extend backward Thumb unconditional branch");
+
+    registers[0] = UINT32_C(4);
+    check_step_target(uvdb_thumb16_plan_direct_step(
+                          UINT16_C(0x4487), UINT32_C(0x1002), 0,
+                          registers, &target),
+                      &target, UINT32_C(0x1008), 2,
+                      "plan Thumb high-register ADD PC");
+    registers[1] = UINT32_C(0x3001);
+    check_step_target(uvdb_thumb16_plan_direct_step(
+                          UINT16_C(0x468f), UINT32_C(0x1000), 0,
+                          registers, &target),
+                      &target, UINT32_C(0x3000), 2,
+                      "plan Thumb high-register MOV PC");
+    registers[2] = UINT32_C(0x3001);
+    check_step_target(uvdb_thumb16_plan_direct_step(
+                          UINT16_C(0x4710), UINT32_C(0x1000), 0,
+                          registers, &target),
+                      &target, UINT32_C(0x3000), 2,
+                      "plan Thumb BX register interworking");
+    check(uvdb_thumb16_plan_direct_step(
+              UINT16_C(0x4701), UINT32_C(0x1000), 0,
+              registers, &target) < 0 &&
+          uvdb_thumb16_plan_direct_step(
+              UINT16_C(0x47f8), UINT32_C(0x1000), 0,
+              registers, &target) < 0,
+          "reject reserved Thumb BX family bits and unpredictable BLX PC");
+    check_step_target(uvdb_thumb16_plan_direct_step(
+                          UINT16_C(0x4778), UINT32_C(0x1000), 0,
+                          registers, &target),
+                      &target, UINT32_C(0x1004), 4,
+                      "plan deprecated Thumb BX PC to ARM");
 
     registers[3] = 0;
     check_step_target(uvdb_thumb16_plan_direct_step(
@@ -445,6 +618,46 @@ int main(void)
           !uvdb_thumb16_instruction_may_write_pc(UINT16_C(0xde00)) &&
           !uvdb_thumb16_instruction_may_write_pc(UINT16_C(0xdf00)),
           "leave ordinary Thumb16 and exception instructions unclassified");
+
+    registers[0] = UINT32_C(0x4000);
+    registers[1] = UINT32_C(3);
+    check(uvdb_thumb32_plan_load_pc_address(
+              UINT16_C(0xf8d0), UINT16_C(0xf004), UINT32_C(0x1000),
+              registers, &load_address) == 1 &&
+          load_address == UINT32_C(0x4004),
+          "plan Thumb-2 positive imm12 LDR PC address");
+    check(uvdb_thumb32_plan_load_pc_address(
+              UINT16_C(0xf850), UINT16_C(0xfc04), UINT32_C(0x1000),
+              registers, &load_address) == 1 &&
+          load_address == UINT32_C(0x3ffc),
+          "plan Thumb-2 negative imm8 LDR PC address");
+    check(uvdb_thumb32_plan_load_pc_address(
+              UINT16_C(0xf850), UINT16_C(0xff04), UINT32_C(0x1000),
+              registers, &load_address) == 1 &&
+          load_address == UINT32_C(0x4004),
+          "plan Thumb-2 pre-index writeback LDR PC address");
+    check(uvdb_thumb32_plan_load_pc_address(
+              UINT16_C(0xf850), UINT16_C(0xfb04), UINT32_C(0x1000),
+              registers, &load_address) == 1 &&
+          load_address == UINT32_C(0x4000),
+          "plan Thumb-2 post-index LDR PC from original base");
+    check(uvdb_thumb32_plan_load_pc_address(
+              UINT16_C(0xf850), UINT16_C(0xf021), UINT32_C(0x1000),
+              registers, &load_address) == 1 &&
+          load_address == UINT32_C(0x400c),
+          "plan Thumb-2 register-offset LDR PC address");
+    check(uvdb_thumb32_plan_load_pc_address(
+              UINT16_C(0xf8df), UINT16_C(0xf004), UINT32_C(0x1000),
+              registers, &load_address) == 1 &&
+          load_address == UINT32_C(0x1008),
+          "plan Thumb-2 literal LDR PC address");
+    check(uvdb_thumb32_plan_load_pc_address(
+              UINT16_C(0xf850), UINT16_C(0xf804), UINT32_C(0x1000),
+              registers, &load_address) < 0 &&
+          uvdb_thumb32_plan_load_pc_address(
+              UINT16_C(0xf850), UINT16_C(0xf02d), UINT32_C(0x1000),
+              registers, &load_address) < 0,
+          "reject reserved and SP-offset Thumb-2 LDR PC forms");
 
     check_step_target(uvdb_thumb32_plan_branch_step(
                           UINT16_C(0xf040), UINT16_C(0x8004),
@@ -507,6 +720,70 @@ int main(void)
           !uvdb_thumb32_instruction_may_write_pc(
                UINT16_C(0xf3de), UINT16_C(0x3f04)),
           "leave non-PC Thumb-2 load/LDM forms unclassified");
+    check(uvdb_thumb32_instruction_may_write_pc(
+              UINT16_C(0xe9b0), UINT16_C(0xc000)) &&
+          uvdb_thumb32_instruction_may_write_pc(
+              UINT16_C(0xe811), UINT16_C(0xc000)) &&
+          uvdb_thumb32_instruction_may_write_pc(
+              UINT16_C(0xea4f), UINT16_C(0x0f00)) &&
+          uvdb_thumb32_instruction_may_write_pc(
+              UINT16_C(0xf3c0), UINT16_C(0x8f00)),
+          "classify Thumb-2 RFE, MOV-PC, and BXJ for fail-closed stepping");
+
+    check(uvdb_thumb_it_step_placement_valid(
+              UINT16_C(0x4487), 0, 2, 0x08) &&
+          !uvdb_thumb_it_step_placement_valid(
+              UINT16_C(0x4487), 0, 2, 0x04) &&
+          !uvdb_thumb_it_step_placement_valid(
+              UINT16_C(0xd100), 0, 2, 0x04) &&
+          !uvdb_thumb_it_step_placement_valid(
+              UINT16_C(0xf8d0), UINT16_C(0xf004), 4, 0x04) &&
+          uvdb_thumb_it_step_placement_valid(
+              UINT16_C(0x2000), 0, 2, 0x04),
+          "allow PC writes only in the final IT slot");
+    check(!uvdb_thumb_it_step_placement_valid(
+              UINT16_C(0xb100), 0, 2, 0x08) &&
+          uvdb_thumb_it_step_placement_valid(
+              UINT16_C(0xb100), 0, 2, 0) &&
+          !uvdb_thumb_it_step_placement_valid(
+              UINT16_C(0x2000), 0, 3, 0),
+          "reject CBZ in IT and malformed placement inputs");
+
+    check(uvdb_step_instruction_may_block(UINT32_C(0x0000df7f), 1) &&
+          uvdb_step_instruction_may_block(UINT32_C(0x0000bf20), 1) &&
+          uvdb_step_instruction_may_block(UINT32_C(0x0000bf30), 1) &&
+          uvdb_step_instruction_may_block(UINT32_C(0xef123456), 0) &&
+          uvdb_step_instruction_may_block(UINT32_C(0x1320f002), 0) &&
+          uvdb_step_instruction_may_block(UINT32_C(0xe320f003), 0),
+          "selected-thread stepping identifies syscall and wait instructions");
+    check(!uvdb_step_instruction_may_block(UINT32_C(0x0000bf00), 1) &&
+          !uvdb_step_instruction_may_block(UINT32_C(0x0000be00), 1) &&
+          !uvdb_step_instruction_may_block(UINT32_C(0xe1a00000), 0),
+          "ordinary and breakpoint encodings do not block");
+    check(uvdb_arm_instruction_starts_exclusive(
+              UINT32_C(0xe1910f9f)) &&
+          uvdb_arm_instruction_starts_exclusive(
+              UINT32_C(0x01910f9f)) &&
+          !uvdb_arm_instruction_starts_exclusive(
+              UINT32_C(0xe1810f90)) &&
+          uvdb_thumb32_instruction_starts_exclusive(
+              UINT16_C(0xe851), UINT16_C(0x0f00)) &&
+          uvdb_thumb32_instruction_starts_exclusive(
+              UINT16_C(0xe8d1), UINT16_C(0x0f4f)) &&
+          !uvdb_thumb32_instruction_starts_exclusive(
+              UINT16_C(0xe8d0), UINT16_C(0xf000)),
+          "recognize LDREX families without confusing table branches");
+    check(uvdb_step_cpsr_state_supported(0) &&
+          uvdb_step_cpsr_state_supported(UINT32_C(1) << 5) &&
+          !uvdb_step_cpsr_state_supported(UINT32_C(1) << 24) &&
+          !uvdb_step_cpsr_state_supported(UINT32_C(1) << 9) &&
+          !uvdb_step_cpsr_state_supported((UINT32_C(1) << 24) |
+                                           (UINT32_C(1) << 5)),
+          "support little-endian ARM/Thumb but reject Jazelle, ThumbEE, and big-endian data state");
+    check(uvdb_step_word_address_valid(UINT32_C(0x4000)) &&
+          !uvdb_step_word_address_valid(UINT32_C(0x4001)) &&
+          !uvdb_step_word_address_valid(UINT32_C(0x4002)),
+          "protected step-target reads require word alignment");
 
     uint32_t split_itstate = (UINT32_C(0x8c) << 8) |
                              (UINT32_C(1) << 25);

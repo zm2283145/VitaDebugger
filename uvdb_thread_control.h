@@ -23,9 +23,15 @@ enum uvdb_resume_kind {
     UVDB_RESUME_STEP = 2,
 };
 
+enum uvdb_resume_scope {
+    UVDB_RESUME_SCOPE_PROCESS = 1,
+    UVDB_RESUME_SCOPE_STOPPED_THREAD = 2,
+};
+
 struct uvdb_resume_plan {
     enum uvdb_resume_kind kind;
     int32_t step_thread;
+    enum uvdb_resume_scope scope;
 };
 
 struct uvdb_step_target {
@@ -77,11 +83,12 @@ int32_t uvdb_thread_selection_step(
     const struct uvdb_thread_inventory* inventory);
 
 /*
- * Reduce a legacy c/s request after Hc selection. A positive Hc requests a
- * selective resume that the current all-stop backend cannot provide, so that
- * combination is rejected instead of being widened to process-wide execution.
- * Hc-1 cannot request a multi-thread legacy step. Thread-specific all-stop
- * stepping remains expressible as vCont;s:T;c.
+ * Reduce a legacy c/s request after Hc selection. In all-stop mode GDB uses a
+ * positive Hc followed by `s` for automatic software-breakpoint step-over.
+ * The stopped exception thread can execute one instruction while the active
+ * kernel stop token keeps every peer suspended. A positive-Hc continue stays
+ * unsupported because it requests an unbounded selective execution. Hc-1
+ * cannot request a multi-thread legacy step.
  */
 int uvdb_thread_selection_plan_legacy(
     const struct uvdb_thread_selection* selection,
@@ -101,6 +108,17 @@ int uvdb_rsp_parse_vcont(
     const struct uvdb_thread_inventory* inventory,
     struct uvdb_resume_plan* plan);
 
+/* Validate the runtime facts required before a resume plan may mutate code.
+ * Selected-thread scope is only safe for the current stopped exception thread
+ * while a healthy kernel stop session owns every peer. */
+int uvdb_resume_plan_validate(
+    const struct uvdb_resume_plan* plan,
+    int32_t exception_thread,
+    int target_stopped,
+    int stop_session_active,
+    int stop_session_failed,
+    int has_pc_override);
+
 /* Evaluate an A32 condition code against one saved CPSR. Reserved condition
  * 0xf is deliberately false here; the unconditional BLX-immediate encoding is
  * handled explicitly by uvdb_arm_plan_direct_step(). */
@@ -116,6 +134,16 @@ int uvdb_arm_plan_direct_step(
     uint32_t cpsr,
     const uint32_t registers[16],
     struct uvdb_step_target* target);
+
+/* Resolve the word address read by a taken A32 LDR whose destination is PC.
+ * Returns 1 for a decoded taken load, 0 for another instruction or a failed
+ * condition, and -1 for a recognized but unsafe/reserved form. */
+int uvdb_arm_plan_load_pc_address(
+    uint32_t instruction,
+    uint32_t pc,
+    uint32_t cpsr,
+    const uint32_t registers[16],
+    uint32_t* load_address);
 
 /* Conservatively identify A32 instructions whose sequential PC+4 trap could
  * be bypassed. Callers can reject any such form they have not decoded. */
@@ -138,11 +166,46 @@ int uvdb_thumb32_plan_branch_step(
     uint32_t cpsr,
     struct uvdb_step_target* target);
 
+/* Resolve the word address read by a Thumb-2 LDR.W whose destination is PC.
+ * The return convention matches uvdb_arm_plan_load_pc_address(). */
+int uvdb_thumb32_plan_load_pc_address(
+    uint16_t first,
+    uint16_t second,
+    uint32_t pc,
+    const uint32_t registers[16],
+    uint32_t* load_address);
+
 /* Identify Thumb control transfers that must not use a sequential fallback. */
 int uvdb_thumb16_instruction_may_write_pc(uint16_t instruction);
 int uvdb_thumb32_instruction_may_write_pc(
     uint16_t first,
     uint16_t second);
+
+/* Identify instructions that can sleep indefinitely while the debugger keeps
+ * every peer suspended. The selected-thread step path rejects these until it
+ * has a separate bounded cancellation mechanism. */
+int uvdb_step_instruction_may_block(uint32_t instruction, int thumb);
+
+/* Software traps immediately after LDREX clear the exclusive monitor and can
+ * change the following STREX result. These helpers keep such sequences stopped
+ * until a bounded LDREX..STREX planner is available. */
+int uvdb_arm_instruction_starts_exclusive(uint32_t instruction);
+int uvdb_thumb32_instruction_starts_exclusive(
+    uint16_t first,
+    uint16_t second);
+
+/* Validate architectural IT placement before condition-based shortcuts. */
+int uvdb_thumb_it_step_placement_valid(
+    uint16_t first,
+    uint16_t second,
+    size_t instruction_size,
+    unsigned int itstate);
+
+/* LDR/LDM/POP PC resolution reads one architectural word. */
+int uvdb_step_word_address_valid(uint32_t address);
+
+/* Jazelle/ThumbEE and big-endian data execution are outside this decoder. */
+int uvdb_step_cpsr_state_supported(uint32_t cpsr);
 
 /* Extract and advance the split Thumb ITSTATE field stored in CPSR. */
 unsigned int uvdb_thumb_itstate_from_cpsr(uint32_t cpsr);

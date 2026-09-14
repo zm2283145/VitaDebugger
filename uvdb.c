@@ -1413,15 +1413,17 @@ static int breakpoint_insert(uintptr_t address, size_t size)
     return breakpoint_insert_internal(address, size, 0);
 }
 
-/* BXWritePC/LoadWritePC clear the state-selection bit and, for A32, the low
- * alignment bit as well. Canonicalize computed destinations before applying
- * breakpoint_insert_internal's stricter public-address validation. */
+/* BXWritePC/LoadWritePC clear the Thumb state-selection bit. ARM targets must
+ * already be word aligned; a ...10 destination is architecturally invalid and
+ * must not be rounded to a different instruction. */
 static int breakpoint_insert_step_target_sized(
     uintptr_t address,
     size_t size,
     uintptr_t current_pc)
 {
     if(size != 2u && size != 4u)
+        return -1;
+    if(size == 4u && (address & 3u))
         return -1;
     address &= size == 2u ? ~(uintptr_t)1 : ~(uintptr_t)3;
     if(address == (current_pc & ~(uintptr_t)1))
@@ -1497,9 +1499,13 @@ static int breakpoint_insert_after_thumb_it(
     return breakpoint_insert_internal(next, 2, 1);
 }
 
-static int breakpoint_insert_step(const struct uvdb_rsp_core_registers* core)
+static int breakpoint_insert_step(
+    const struct uvdb_rsp_core_registers* core,
+    int hold_peers)
 {
     if(!core)
+        return -1;
+    if(!uvdb_step_cpsr_state_supported(core->cpsr))
         return -1;
     uintptr_t pc = core->r[15];
     if(core->cpsr & 32)
@@ -1507,10 +1513,27 @@ static int breakpoint_insert_step(const struct uvdb_rsp_core_registers* core)
         uint16_t instruction;
         if(safe_memcpy((char*)&instruction, (const char*)pc, sizeof(instruction)) != sizeof(instruction))
             return -1;
+        if(hold_peers && uvdb_step_instruction_may_block(instruction, 1))
+            return -1;
         unsigned int prefix = instruction >> 11;
         size_t instruction_size = (prefix == 0x1d || prefix == 0x1e || prefix == 0x1f) ? 4 : 2;
         unsigned int current_itstate =
             uvdb_thumb_itstate_from_cpsr(core->cpsr);
+
+        uint16_t second = 0;
+        if(instruction_size == 4 &&
+           safe_memcpy((char*)&second, (const char*)(pc + 2),
+                       sizeof(second)) != sizeof(second))
+            return -1;
+        if(instruction_size == 4 &&
+           uvdb_thumb32_instruction_starts_exclusive(instruction, second))
+            return -1;
+
+        /* Enforce placement before the condition-failed shortcut so malformed
+         * control flow cannot bypass architectural IT restrictions. */
+        if(!uvdb_thumb_it_step_placement_valid(
+               instruction, second, instruction_size, current_itstate))
+            return -1;
 
         /* A condition-failed instruction inside an existing IT block has no
          * control-flow or register effects. Advance past subsequent skipped
@@ -1527,9 +1550,14 @@ static int breakpoint_insert_step(const struct uvdb_rsp_core_registers* core)
         if(direct_result < 0)
             return -1;
         if(direct_result > 0)
+        {
+            if(current_itstate &&
+               uvdb_thumb_itstate_advance(current_itstate) != 0)
+                return -1;
             return breakpoint_insert_internal(direct_target.address,
                                                direct_target.breakpoint_size,
                                                1);
+        }
 
         // IT blocks conditionally execute up to four following instructions.
         // Decode the saved flags and stop at the first instruction that will
@@ -1560,38 +1588,21 @@ static int breakpoint_insert_step(const struct uvdb_rsp_core_registers* core)
             return breakpoint_insert_internal(next, 2, 1);
         }
 
-        // BX/BLX register.
-        if((instruction & 0xff00) == 0x4700)
-        {
-            unsigned int rm = (instruction >> 3) & 0xf;
-            const uint32_t* registers = core->r;
-            uintptr_t target = rm == 15 ? pc + 4 : registers[rm];
-            return breakpoint_insert_step_target(target, pc);
-        }
-
-        // MOV PC, Rm (high-register form). This remains in Thumb state.
-        if((instruction & 0xff00) == 0x4600)
-        {
-            unsigned int rd = (instruction & 7) |
-                              ((instruction >> 4) & 8);
-            if(rd == 15)
-            {
-                unsigned int rm = (instruction >> 3) & 0xf;
-                const uint32_t* registers = core->r;
-                uintptr_t target = rm == 15 ? pc + 4 : registers[rm];
-                return breakpoint_insert_step_target_sized(target, 2, pc);
-            }
-        }
-
         // POP {..., PC}. The saved PC follows each selected low register on
         // the current stack; read it without directly dereferencing user RAM.
         if((instruction & 0xff00) == 0xbd00)
         {
+            if(current_itstate &&
+               uvdb_thumb_itstate_advance(current_itstate) != 0)
+                return -1;
             unsigned int register_count =
                 (unsigned int)__builtin_popcount(instruction & 0xff);
             uintptr_t target;
-            const char* saved_pc = (const char*)(uintptr_t)
-                (core->r[13] + register_count * sizeof(uint32_t));
+            uintptr_t saved_pc_address =
+                core->r[13] + register_count * sizeof(uint32_t);
+            if(!uvdb_step_word_address_valid((uint32_t)saved_pc_address))
+                return -1;
+            const char* saved_pc = (const char*)saved_pc_address;
             if(safe_memcpy((char*)&target, saved_pc, sizeof(target)) !=
                sizeof(target))
                 return -1;
@@ -1600,32 +1611,35 @@ static int breakpoint_insert_step(const struct uvdb_rsp_core_registers* core)
 
         if(instruction_size == 4)
         {
-            uint16_t second;
-            if(safe_memcpy((char*)&second, (const char*)(pc + 2), sizeof(second)) != sizeof(second))
-                return -1;
-
             direct_result = uvdb_thumb32_plan_branch_step(
                 instruction, second, (uint32_t)pc, core->cpsr,
                 &direct_target);
             if(direct_result < 0)
                 return -1;
             if(direct_result > 0)
+            {
+                if(current_itstate &&
+                   uvdb_thumb_itstate_advance(current_itstate) != 0)
+                    return -1;
                 return breakpoint_insert_internal(
                     direct_target.address, direct_target.breakpoint_size, 1);
+            }
 
             // Thumb-2 table branch byte/halfword. Read the selected table
-            // entry through safe_memcpy and branch relative to Align(PC, 4).
+            // entry through safe_memcpy and branch relative to PC+4.
             if((instruction & 0xfff0) == 0xe8d0 &&
                (second & 0xffe0) == 0xf000)
             {
                 unsigned int rn = instruction & 0xf;
                 unsigned int rm = second & 0xf;
                 unsigned int halfword = (second >> 4) & 1;
-                if(rm == 15)
+                if((current_itstate &&
+                    uvdb_thumb_itstate_advance(current_itstate) != 0) ||
+                   rn == 13 || rm == 13 || rm == 15)
                     return -1;
                 const uint32_t* registers = core->r;
                 uintptr_t base = rn == 15
-                    ? (pc + 4) & ~(uintptr_t)3
+                    ? pc + 4
                     : registers[rn];
                 uintptr_t table_address = base +
                     ((uintptr_t)registers[rm] << halfword);
@@ -1635,7 +1649,7 @@ static int breakpoint_insert_step(const struct uvdb_rsp_core_registers* core)
                                (const char*)table_address, entry_size) !=
                    entry_size)
                     return -1;
-                uintptr_t target = ((pc + 4) & ~(uintptr_t)3) +
+                uintptr_t target = (pc + 4) +
                                    (uintptr_t)table_offset * 2;
                 return breakpoint_insert_step_target_sized(target, 2, pc);
             }
@@ -1644,14 +1658,25 @@ static int breakpoint_insert_step(const struct uvdb_rsp_core_registers* core)
             // lower-numbered register selected by the register list.
             if((instruction & 0xffd0) == 0xe890 && (second & 0x8000))
             {
+                if(current_itstate &&
+                   uvdb_thumb_itstate_advance(current_itstate) != 0)
+                    return -1;
                 unsigned int rn = instruction & 0xf;
-                if(rn == 15)
+                unsigned int register_count =
+                    (unsigned int)__builtin_popcount(second);
+                int writeback = (instruction & 0x20) != 0;
+                if(rn == 15 || register_count < 2 ||
+                   (second & 0xc000) == 0xc000 ||
+                   (writeback && (second & (1u << rn))))
                     return -1;
                 const uint32_t* registers = core->r;
                 unsigned int lower_count =
                     (unsigned int)__builtin_popcount(second & 0x7fff);
                 uintptr_t saved_pc_address = registers[rn] +
                     lower_count * sizeof(uint32_t);
+                if(!uvdb_step_word_address_valid(
+                       (uint32_t)saved_pc_address))
+                    return -1;
                 uintptr_t target;
                 if(safe_memcpy((char*)&target,
                                (const char*)saved_pc_address,
@@ -1664,12 +1689,23 @@ static int breakpoint_insert_step(const struct uvdb_rsp_core_registers* core)
             // its saved word is immediately below the original base address.
             if((instruction & 0xffd0) == 0xe910 && (second & 0x8000))
             {
+                if(current_itstate &&
+                   uvdb_thumb_itstate_advance(current_itstate) != 0)
+                    return -1;
                 unsigned int rn = instruction & 0xf;
-                if(rn == 15)
+                unsigned int register_count =
+                    (unsigned int)__builtin_popcount(second);
+                int writeback = (instruction & 0x20) != 0;
+                if(rn == 15 || register_count < 2 ||
+                   (second & 0xc000) == 0xc000 ||
+                   (writeback && (second & (1u << rn))))
                     return -1;
                 const uint32_t* registers = core->r;
                 uintptr_t target;
                 uintptr_t saved_pc_address = registers[rn] - sizeof(uint32_t);
+                if(!uvdb_step_word_address_valid(
+                       (uint32_t)saved_pc_address))
+                    return -1;
                 if(safe_memcpy((char*)&target,
                                (const char*)saved_pc_address,
                                sizeof(target)) != sizeof(target))
@@ -1677,28 +1713,26 @@ static int breakpoint_insert_step(const struct uvdb_rsp_core_registers* core)
                 return breakpoint_insert_step_target(target, pc);
             }
 
-            // Thumb-2 LDR.W PC, [Rn, #imm12]. Loads to PC can interwork, so
-            // choose the destination breakpoint size from the loaded bit 0.
-            if((instruction & 0xfff0) == 0xf8d0 &&
-               (second & 0xf000) == 0xf000)
+            uint32_t load_address = 0;
+            int load_result = uvdb_thumb32_plan_load_pc_address(
+                instruction, second, (uint32_t)pc, core->r,
+                &load_address);
+            if(load_result < 0)
+                return -1;
+            if(load_result > 0)
             {
-                unsigned int rn = instruction & 0xf;
-                const uint32_t* registers = core->r;
-                uintptr_t base = rn == 15
-                    ? (pc + 4) & ~(uintptr_t)3
-                    : registers[rn];
+                if(current_itstate &&
+                   uvdb_thumb_itstate_advance(current_itstate) != 0)
+                    return -1;
                 uintptr_t target;
-                uintptr_t load_address = base + (second & 0x0fff);
-                if(safe_memcpy((char*)&target, (const char*)load_address,
+                if(!uvdb_step_word_address_valid(load_address))
+                    return -1;
+                if(safe_memcpy((char*)&target,
+                               (const char*)(uintptr_t)load_address,
                                sizeof(target)) != sizeof(target))
                     return -1;
                 return breakpoint_insert_step_target(target, pc);
             }
-
-            // SUBS PC, LR, #imm8 exception return form.
-            if(instruction == 0xf3de && (second & 0xff00) == 0x8f00)
-                return breakpoint_insert_step_target(
-                    core->r[14] - (second & 0xff), pc);
 
             if(uvdb_thumb32_instruction_may_write_pc(instruction, second))
                 return -1;
@@ -1715,6 +1749,10 @@ static int breakpoint_insert_step(const struct uvdb_rsp_core_registers* core)
 
     uint32_t instruction;
     if(safe_memcpy((char*)&instruction, (const char*)pc, sizeof(instruction)) != sizeof(instruction))
+        return -1;
+    if(hold_peers && uvdb_step_instruction_may_block(instruction, 0))
+        return -1;
+    if(uvdb_arm_instruction_starts_exclusive(instruction))
         return -1;
 
     struct uvdb_step_target direct_target;
@@ -1733,8 +1771,16 @@ static int breakpoint_insert_step(const struct uvdb_rsp_core_registers* core)
         unsigned int condition = instruction >> 28;
         if(!uvdb_arm_condition_passed(condition, core->cpsr))
             return breakpoint_insert_internal(pc + 4, 4, 1);
+        /* LDM with S=1 and PC restores CPSR from SPSR (exception return),
+         * which has no valid user-mode stepping interpretation. */
+        if(instruction & (1u << 22))
+            return -1;
         unsigned int rn = (instruction >> 16) & 0xf;
-        if(rn == 15)
+        unsigned int register_count =
+            (unsigned int)__builtin_popcount(instruction & 0xffff);
+        int writeback = (instruction & (1u << 21)) != 0;
+        if(rn == 15 || register_count < 2 ||
+           (writeback && (instruction & (1u << rn))))
             return -1;
         const uint32_t* registers = core->r;
         unsigned int lower_count =
@@ -1748,6 +1794,8 @@ static int breakpoint_insert_step(const struct uvdb_rsp_core_registers* core)
         else
             saved_pc_address = registers[rn] -
                 (before ? sizeof(uint32_t) : 0);
+        if(!uvdb_step_word_address_valid((uint32_t)saved_pc_address))
+            return -1;
         uintptr_t target;
         if(safe_memcpy((char*)&target, (const char*)saved_pc_address,
                        sizeof(target)) != sizeof(target))
@@ -1755,23 +1803,18 @@ static int breakpoint_insert_step(const struct uvdb_rsp_core_registers* core)
         return breakpoint_insert_step_target(target, pc);
     }
 
-    // ARM LDR PC, [Rn, +/-imm12] including pre- and post-index forms.
-    if((instruction & 0x0e50f000) == 0x0410f000)
+    uint32_t load_address = 0;
+    int load_result = uvdb_arm_plan_load_pc_address(
+        instruction, (uint32_t)pc, core->cpsr, core->r, &load_address);
+    if(load_result < 0)
+        return -1;
+    if(load_result > 0)
     {
-        unsigned int condition = instruction >> 28;
-        if(!uvdb_arm_condition_passed(condition, core->cpsr))
-            return breakpoint_insert_internal(pc + 4, 4, 1);
-        unsigned int rn = (instruction >> 16) & 0xf;
-        const uint32_t* registers = core->r;
-        uintptr_t load_address = rn == 15 ? pc + 8 : registers[rn];
-        if(instruction & (1u << 24))
-        {
-            uintptr_t offset = instruction & 0x0fff;
-            load_address = instruction & (1u << 23)
-                ? load_address + offset : load_address - offset;
-        }
         uintptr_t target;
-        if(safe_memcpy((char*)&target, (const char*)load_address,
+        if(!uvdb_step_word_address_valid(load_address))
+            return -1;
+        if(safe_memcpy((char*)&target,
+                       (const char*)(uintptr_t)load_address,
                        sizeof(target)) != sizeof(target))
             return -1;
         return breakpoint_insert_step_target(target, pc);
@@ -1797,7 +1840,8 @@ static int breakpoint_insert_step_thread(
     SceUID thread_id,
     KuKernelExceptionContext* exception_context,
     int has_pc_override,
-    uint32_t pc_override)
+    uint32_t pc_override,
+    int hold_peers)
 {
     struct uvdb_rsp_core_registers core;
     if(thread_id == uvdb_exception_thread)
@@ -1811,7 +1855,7 @@ static int breakpoint_insert_step_thread(
 #endif
     if(has_pc_override)
         core.r[15] = pc_override;
-    return breakpoint_insert_step(&core);
+    return breakpoint_insert_step(&core, hold_peers);
 }
 
 static size_t safe_memcpy(char* dst, const char* src, size_t sz)
@@ -2095,15 +2139,34 @@ static int uvdb_apply_resume_plan(
     int has_pc_override,
     uint32_t pc_override)
 {
-    if(!plan)
+#ifdef UVDB_KERNEL_THREAD_CONTROL
+    int stop_session_active =
+        __atomic_load_n(&uvdb_stop_token, __ATOMIC_SEQ_CST) != 0;
+    int stop_session_failed =
+        __atomic_load_n(&uvdb_stop_failed, __ATOMIC_SEQ_CST) != 0;
+#else
+    int stop_session_active = 0;
+    int stop_session_failed = 0;
+#endif
+    if(uvdb_resume_plan_validate(
+           plan, uvdb_exception_thread,
+           __atomic_load_n(&uvdb_target_stopped, __ATOMIC_SEQ_CST),
+           stop_session_active, stop_session_failed,
+           has_pc_override) < 0)
         return -1;
+    int hold_peers = plan->scope == UVDB_RESUME_SCOPE_STOPPED_THREAD;
     if(plan->kind == UVDB_RESUME_STEP &&
        breakpoint_insert_step_thread(plan->step_thread, ctx,
-                                     has_pc_override, pc_override) < 0)
+                                     has_pc_override, pc_override,
+                                     hold_peers) < 0)
         return -1;
-    if(plan->kind != UVDB_RESUME_CONTINUE &&
-       plan->kind != UVDB_RESUME_STEP)
-        return -1;
+
+    /* The active kernel stop session excludes its original exception
+     * controller. Returning from that handler executes exactly the selected
+     * stopped thread while the lease keeper renews suspension of every peer.
+     * The temporary UDF exception reuses the same token and restores code. */
+    if(hold_peers)
+        return 0;
     if(uvdb_kernel_end_stop() < 0)
         return -2;
     if(has_pc_override)
