@@ -752,12 +752,15 @@ int main(void)
     check(uvdb_step_instruction_may_block(UINT32_C(0x0000df7f), 1) &&
           uvdb_step_instruction_may_block(UINT32_C(0x0000bf20), 1) &&
           uvdb_step_instruction_may_block(UINT32_C(0x0000bf30), 1) &&
+          uvdb_step_instruction_may_block(UINT32_C(0x8002f3af), 1) &&
+          uvdb_step_instruction_may_block(UINT32_C(0x8003f3af), 1) &&
           uvdb_step_instruction_may_block(UINT32_C(0xef123456), 0) &&
           uvdb_step_instruction_may_block(UINT32_C(0x1320f002), 0) &&
           uvdb_step_instruction_may_block(UINT32_C(0xe320f003), 0),
           "selected-thread stepping identifies syscall and wait instructions");
     check(!uvdb_step_instruction_may_block(UINT32_C(0x0000bf00), 1) &&
           !uvdb_step_instruction_may_block(UINT32_C(0x0000be00), 1) &&
+          !uvdb_step_instruction_may_block(UINT32_C(0x8000f3af), 1) &&
           !uvdb_step_instruction_may_block(UINT32_C(0xe1a00000), 0),
           "ordinary and breakpoint encodings do not block");
     check(uvdb_arm_instruction_starts_exclusive(

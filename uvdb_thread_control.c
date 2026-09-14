@@ -722,8 +722,8 @@ int uvdb_arm_instruction_may_write_pc(uint32_t instruction)
        (instruction & UINT32_C(0x00008000)))
         return 1;
 
-    /* LDR PC, including the register-offset forms the live decoder cannot yet
-     * safely evaluate. cond=0xf encodes memory hints rather than LDR PC. */
+    /* LDR PC, including immediate and register-offset forms. cond=0xf encodes
+     * memory hints rather than LDR PC. */
     if(condition != 0xfu &&
        (instruction & UINT32_C(0x0c10f000)) == UINT32_C(0x0410f000))
         return 1;
@@ -998,10 +998,14 @@ int uvdb_step_instruction_may_block(uint32_t instruction, int thumb)
 {
     if(thumb)
     {
-        uint16_t halfword = (uint16_t)instruction;
-        return (halfword & UINT16_C(0xff00)) == UINT16_C(0xdf00) ||
-               halfword == UINT16_C(0xbf20) ||
-               halfword == UINT16_C(0xbf30);
+        uint16_t first = (uint16_t)instruction;
+        uint16_t second = (uint16_t)(instruction >> 16);
+        return (first & UINT16_C(0xff00)) == UINT16_C(0xdf00) ||
+               first == UINT16_C(0xbf20) ||
+               first == UINT16_C(0xbf30) ||
+               (first == UINT16_C(0xf3af) &&
+                (second == UINT16_C(0x8002) ||
+                 second == UINT16_C(0x8003)));
     }
 
     /* A32 SVC plus WFE/WFI. Conditions are deliberately ignored: refusing a

@@ -183,7 +183,8 @@ int uvdb_thumb32_instruction_may_write_pc(
 
 /* Identify instructions that can sleep indefinitely while the debugger keeps
  * every peer suspended. The selected-thread step path rejects these until it
- * has a separate bounded cancellation mechanism. */
+ * has a separate bounded cancellation mechanism. For Thumb-2, pack the first
+ * halfword in bits 15:0 and the second halfword in bits 31:16. */
 int uvdb_step_instruction_may_block(uint32_t instruction, int thumb);
 
 /* Software traps immediately after LDREX clear the exclusive monitor and can

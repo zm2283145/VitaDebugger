@@ -1513,8 +1513,6 @@ static int breakpoint_insert_step(
         uint16_t instruction;
         if(safe_memcpy((char*)&instruction, (const char*)pc, sizeof(instruction)) != sizeof(instruction))
             return -1;
-        if(hold_peers && uvdb_step_instruction_may_block(instruction, 1))
-            return -1;
         unsigned int prefix = instruction >> 11;
         size_t instruction_size = (prefix == 0x1d || prefix == 0x1e || prefix == 0x1f) ? 4 : 2;
         unsigned int current_itstate =
@@ -1524,6 +1522,9 @@ static int breakpoint_insert_step(
         if(instruction_size == 4 &&
            safe_memcpy((char*)&second, (const char*)(pc + 2),
                        sizeof(second)) != sizeof(second))
+            return -1;
+        if(hold_peers && uvdb_step_instruction_may_block(
+               (uint32_t)instruction | ((uint32_t)second << 16), 1))
             return -1;
         if(instruction_size == 4 &&
            uvdb_thumb32_instruction_starts_exclusive(instruction, second))
@@ -1821,9 +1822,9 @@ static int breakpoint_insert_step(
     }
 
     /* Do not let an unsupported PC-writing form escape the sequential trap.
-     * A failed condition is known to fall through; a taken shifted ALU write,
-     * register-offset LDR PC, BXJ, or other undecoded transfer stays stopped
-     * and is reported to GDB as an unsupported software-step request. */
+     * A failed condition is known to fall through; a taken BXJ, privileged
+     * exception return, register-controlled-shift PC write, or other undecoded
+     * transfer stays stopped and is reported as an unsupported step request. */
     if(uvdb_arm_instruction_may_write_pc(instruction))
     {
         unsigned int condition = instruction >> 28;
