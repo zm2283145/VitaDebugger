@@ -14,6 +14,7 @@
 #include <kubridge.h>
 #include "uvdb.h"
 #include "uvdb_console_transport.h"
+#include "uvdb_monitor.h"
 #include "uvdb_registers.h"
 #include "uvdb_rsp.h"
 #include "uvdb_vfp_policy.h"
@@ -224,6 +225,13 @@ static int uvdb_lease_thread_ended;
 static struct uvdb_fault_info uvdb_last_fault = {
     .exception_type = UVDB_EXCEPTION_NONE,
 };
+
+#define UVDB_MONITOR_OUTPUT_CAPACITY (16u * 1024u)
+static char uvdb_monitor_output[UVDB_MONITOR_OUTPUT_CAPACITY];
+static struct uvdb_monitor_thread
+    uvdb_monitor_threads[UVDB_MONITOR_MAX_THREADS];
+static struct uvdb_monitor_module
+    uvdb_monitor_modules[UVDB_MONITOR_MAX_MODULES];
 
 static void breakpoint_remove_all(void);
 static int uvdb_kernel_end_stop(void);
@@ -1101,7 +1109,7 @@ static void stream_write_libraries(struct stream* st)
     stream_close(st);
 }
 
-static void write_hex(char* start, size_t sz)
+static void write_hex(const char* start, size_t sz)
 {
     while(sz--)
     {
@@ -1457,13 +1465,19 @@ static void breakpoint_remove_all(void)
             breakpoint_remove(uvdb_breakpoints[i].address);
 }
 
+static size_t breakpoint_active_count(void)
+{
+    size_t count = 0;
+    for(size_t i = 0; i < UVDB_MAX_BREAKPOINTS; ++i)
+        if(uvdb_breakpoints[i].active)
+            count++;
+    return count;
+}
+
 #ifdef UVDB_KERNEL_THREAD_CONTROL
 static int breakpoint_any_active(void)
 {
-    for(size_t i = 0; i < UVDB_MAX_BREAKPOINTS; ++i)
-        if(uvdb_breakpoints[i].active)
-            return 1;
-    return 0;
+    return breakpoint_active_count() != 0;
 }
 #endif
 
@@ -2134,6 +2148,211 @@ static void uvdb_end_stopped_operation(void)
 #endif
 }
 
+static void uvdb_monitor_copy_name(
+    char* destination,
+    size_t capacity,
+    const char* source,
+    size_t source_capacity)
+{
+    if(!destination || !capacity)
+        return;
+    size_t count = 0;
+    if(source)
+        while(count + 1u < capacity && count < source_capacity &&
+              source[count])
+        {
+            destination[count] = source[count];
+            count++;
+        }
+    destination[count] = 0;
+}
+
+static void uvdb_monitor_fill_status(
+    struct uvdb_monitor_snapshot* snapshot,
+    int stop_signal)
+{
+    struct uvdb_monitor_status* status = &snapshot->status;
+    status->state = (enum uvdb_monitor_state)uvdb_state;
+    status->port = uvdb_port;
+    status->packet_size = (uint32_t)(uvdb_max_buffer - 4u);
+    status->thread_count = (uint32_t)uvdb_inventory.count;
+    status->software_breakpoint_count =
+        (uint32_t)breakpoint_active_count();
+    status->stopped_thread = uvdb_selection.stopped;
+    status->general_thread = uvdb_selection.general;
+    status->resume_thread = uvdb_selection.resume;
+    status->exception_thread = uvdb_exception_thread;
+    status->stop_signal = stop_signal;
+    status->target_stopped =
+        __atomic_load_n(&uvdb_target_stopped, __ATOMIC_SEQ_CST) != 0;
+    status->no_ack_mode =
+        uvdb_console_transport_no_ack(&uvdb_console_transport);
+
+#ifdef UVDB_KERNEL_THREAD_CONTROL
+    status->kernel_compiled = 1;
+    struct vd_kernel_status kernel_status = {0};
+    status->kernel_status_available =
+        vdKernelGetStatus(&kernel_status) >= 0;
+    if(status->kernel_status_available)
+    {
+        status->kernel_abi = kernel_status.abi_version;
+        status->kernel_capabilities = kernel_status.capabilities;
+        status->kernel_max_threads = kernel_status.max_threads;
+        status->kernel_compatible =
+            kernel_status.abi_version == VD_KERNEL_ABI_VERSION &&
+            (kernel_status.capabilities &
+                 VD_KERNEL_REQUIRED_THREAD_CONTROL_CAPABILITIES) ==
+                VD_KERNEL_REQUIRED_THREAD_CONTROL_CAPABILITIES &&
+            kernel_status.max_threads == VD_KERNEL_MAX_THREADS;
+    }
+    status->stop_session_active =
+        __atomic_load_n(&uvdb_stop_token, __ATOMIC_SEQ_CST) != 0;
+    status->stop_session_failed =
+        __atomic_load_n(&uvdb_stop_failed, __ATOMIC_SEQ_CST) != 0;
+#endif
+#ifdef UVDB_KERNEL_VFP_READS
+    status->vfp_reads_enabled = uvdb_rsp_vfp_enabled;
+#endif
+
+    status->last_fault_available =
+        uvdb_last_fault.exception_type != UVDB_EXCEPTION_NONE;
+    if(status->last_fault_available)
+    {
+        status->last_fault_type = uvdb_last_fault.exception_type;
+        status->last_fault_status = uvdb_last_fault.fault_status;
+        status->last_fault_address = uvdb_last_fault.fault_address;
+        status->last_fault_pc = uvdb_last_fault.pc;
+    }
+}
+
+static void uvdb_monitor_fill_threads(
+    struct uvdb_monitor_snapshot* snapshot)
+{
+    snapshot->threads = uvdb_monitor_threads;
+    snapshot->thread_count = uvdb_inventory.count;
+    int32_t general = uvdb_thread_selection_general(
+        &uvdb_selection, &uvdb_inventory);
+    int32_t resume = uvdb_thread_selection_step(
+        &uvdb_selection, &uvdb_inventory);
+    for(size_t i = 0; i < snapshot->thread_count; ++i)
+    {
+        struct uvdb_monitor_thread* output = &uvdb_monitor_threads[i];
+        memset(output, 0, sizeof(*output));
+        output->id = uvdb_inventory.ids[i];
+        if(output->id == uvdb_selection.stopped)
+            output->flags |= UVDB_MONITOR_THREAD_STOPPED;
+        if(output->id == general)
+            output->flags |= UVDB_MONITOR_THREAD_GENERAL;
+        if(output->id == resume)
+            output->flags |= UVDB_MONITOR_THREAD_RESUME;
+        if(output->id == uvdb_exception_thread)
+            output->flags |= UVDB_MONITOR_THREAD_EXCEPTION;
+
+        struct uvdb_thread_entry* registered =
+            uvdb_find_thread(output->id);
+        if(registered && registered->name[0])
+            uvdb_monitor_copy_name(output->name, sizeof(output->name),
+                                   registered->name,
+                                   sizeof(registered->name));
+        else if(output->flags & UVDB_MONITOR_THREAD_STOPPED)
+            uvdb_monitor_copy_name(output->name, sizeof(output->name),
+                                   "stopped thread",
+                                   sizeof("stopped thread") - 1u);
+        else
+            uvdb_monitor_copy_name(output->name, sizeof(output->name),
+                                   "process thread",
+                                   sizeof("process thread") - 1u);
+    }
+}
+
+static void uvdb_monitor_fill_modules(
+    struct uvdb_monitor_snapshot* snapshot)
+{
+    SceUID module_ids[UVDB_MONITOR_MAX_MODULES];
+    SceSize count = UVDB_MONITOR_MAX_MODULES;
+    int result = sceKernelGetModuleList(0xff, module_ids, &count);
+    snapshot->module_query_result = result;
+    if(result < 0)
+        return;
+
+    snapshot->module_reported_count = count;
+    size_t scanned = count;
+    if(scanned > UVDB_MONITOR_MAX_MODULES)
+        scanned = UVDB_MONITOR_MAX_MODULES;
+    snapshot->module_scanned_count = scanned;
+    snapshot->modules = uvdb_monitor_modules;
+
+    for(size_t i = 0; i < scanned; ++i)
+    {
+        SceKernelModuleInfo info = {.size = sizeof(info)};
+        if(sceKernelGetModuleInfo(module_ids[i], &info) < 0)
+        {
+            snapshot->module_skipped_count++;
+            continue;
+        }
+
+        struct uvdb_monitor_module* output =
+            &uvdb_monitor_modules[snapshot->module_count];
+        memset(output, 0, sizeof(*output));
+        output->id = (uint32_t)module_ids[i];
+        uvdb_monitor_copy_name(output->name, sizeof(output->name),
+                               info.module_name,
+                               sizeof(info.module_name));
+        for(size_t segment = 0;
+            segment < UVDB_MONITOR_MAX_SEGMENTS; ++segment)
+        {
+            if(!info.segments[segment].vaddr ||
+               !info.segments[segment].memsz)
+                continue;
+            struct uvdb_monitor_segment* segment_output =
+                &output->segments[output->segment_count++];
+            segment_output->address =
+                (uint32_t)(uintptr_t)info.segments[segment].vaddr;
+            segment_output->memory_size = info.segments[segment].memsz;
+            segment_output->permissions = info.segments[segment].perms;
+            segment_output->index = (uint32_t)segment;
+        }
+        snapshot->module_count++;
+    }
+}
+
+static int uvdb_write_monitor_result(
+    enum uvdb_monitor_command command,
+    int stop_signal)
+{
+    struct uvdb_monitor_snapshot snapshot;
+    memset(&snapshot, 0, sizeof(snapshot));
+
+    if(command == UVDB_MONITOR_COMMAND_STATUS ||
+       command == UVDB_MONITOR_COMMAND_THREADS)
+    {
+        if(uvdb_refresh_stopped_inventory() < 0)
+            return -1;
+    }
+    if(command == UVDB_MONITOR_COMMAND_STATUS)
+        uvdb_monitor_fill_status(&snapshot, stop_signal);
+    else if(command == UVDB_MONITOR_COMMAND_THREADS)
+        uvdb_monitor_fill_threads(&snapshot);
+    else if(command == UVDB_MONITOR_COMMAND_MODULES)
+        uvdb_monitor_fill_modules(&snapshot);
+
+    size_t raw_capacity = (uvdb_max_buffer - 4u) / 2u;
+    if(raw_capacity > sizeof(uvdb_monitor_output))
+        raw_capacity = sizeof(uvdb_monitor_output);
+    size_t output_size = 0;
+    int render_result = uvdb_monitor_render(
+        command, &snapshot, uvdb_monitor_output, raw_capacity, &output_size);
+    if(render_result < 0)
+    {
+        static const char failure[] =
+            "error: monitor response could not be rendered\n";
+        write_hex(failure, sizeof(failure) - 1u);
+        return 0;
+    }
+    write_hex(uvdb_monitor_output, output_size);
+    return 0;
+}
+
 static int uvdb_apply_resume_plan(
     const struct uvdb_resume_plan* plan,
     KuKernelExceptionContext* ctx,
@@ -2221,6 +2440,26 @@ static void uvdb_main_loop(KuKernelExceptionContext* ctx, int stop_signal)
             buffer_write(&out_buf, STRING("OK"));
             enable_no_ack =
                 !uvdb_console_transport_no_ack(&uvdb_console_transport);
+        }
+        else if(STARTSWITH("qRcmd,"))
+        {
+            enum uvdb_monitor_command command = UVDB_MONITOR_COMMAND_NONE;
+            int parse_result = uvdb_monitor_parse_qrcmd(
+                pkt, sz, &command);
+            if(parse_result == UVDB_MONITOR_PARSE_MALFORMED)
+            {
+                static const char malformed[] =
+                    "error: malformed monitor command; use 'monitor help'\n";
+                write_hex(malformed, sizeof(malformed) - 1u);
+            }
+            else if(parse_result == UVDB_MONITOR_PARSE_UNKNOWN)
+            {
+                static const char unknown[] =
+                    "error: unknown monitor command; use 'monitor help'\n";
+                write_hex(unknown, sizeof(unknown) - 1u);
+            }
+            else if(uvdb_write_monitor_result(command, stop_signal) < 0)
+                return;
         }
         else if(STARTSWITH("qXfer:features:read:target.xml:"))
         {

@@ -132,6 +132,10 @@ status includes:
   mode, received an initial `T05`, decoded six `O` packets carrying both
   streams, stopped with `T02` on Ctrl-C, remained quiet while stopped, and
   detached cleanly before the fresh reconnect.
+- A fixed read-only GDB `qRcmd` registry for `monitor help`, `status`,
+  `threads`, and `modules`. Exact command parsing, bounded snapshots, safe name
+  rendering, and line-safe response truncation pass native host tests. The
+  automated live Vita detach/reconnect validation gate is still pending.
 - Hardware-tested DebugNet-compatible UDP logging with bounded messages,
   concurrent producers, stop/restart under load, and GDB attach/detach
   coexistence.
@@ -923,6 +927,27 @@ continue
 detach
 ```
 
+VitaDebugger also exposes a small read-only diagnostic registry:
+
+```gdb
+monitor help
+monitor status
+monitor threads
+monitor modules
+```
+
+The commands report debugger/stop/fault state, the stopped thread inventory,
+and loaded-module segments. They do not execute arbitrary command text. Output
+is returned as one bounded final hex-encoded `qRcmd` reply and ends with an
+explicit truncation marker if the full report cannot fit. See the
+[GDB monitor-command guide](docs/gdb-monitor-commands.md) for the exact
+read-only boundary, report fields, host tests, and pending live-hardware gate.
+The automated two-session gate is:
+
+```powershell
+py -3 tools/gdb_monitor_smoke.py --host VITA_IP --reconnect
+```
+
 The stub implements executable offsets for Vita runtime placement. Symbols will
 still be incorrect if the ELF and installed VPK came from different builds.
 
@@ -1036,6 +1061,12 @@ exact matching unstripped ELF on the development computer.
   or `EAGAIN` cannot be included in the queue counters. Stop the debugger server
   before calling `uvdb_restore_stdio()`; `uvdb_shutdown()` does this
   automatically. Use DebugNet for sustained logging.
+- GDB monitor commands are limited to the exact read-only `help`, `status`,
+  `threads`, and `modules` registry. Arguments and unregistered commands are
+  rejected; decoded command text is never executed or forwarded. Reports use
+  fixed snapshot and packet bounds and visibly truncate at a complete line when
+  possible. Host validation passes, but the live Vita state-preservation,
+  detach, and reconnect gate remains pending.
 - The optional stdio bridge uses Vita newlib's private descriptor map because
   Vita newlib does not export `dup2`. Its current close/retry behavior was
   audited against newlib commit
@@ -1092,8 +1123,11 @@ exact matching unstripped ELF on the development computer.
    tests, fuzzing, and long reconnect/shutdown/multithread hardware soaks.
 4. Extend the completed single-owner, no-ack GDB `O`-packet console bridge with
    longer on-device pressure, abrupt-disconnect, restore/retry, and shutdown
-   soaks. Decide whether queue/transport loss counters need a stable public API;
-   retain DebugNet as the sustained-log and profiler path.
+   soaks. Run the host-tested read-only `qRcmd` registry's pending live
+   `help`/`status`/`threads`/`modules`, state-preservation, detach, and reconnect
+   gate before extending its command set. Decide whether console
+   queue/transport loss counters need a stable public API; retain DebugNet as
+   the sustained-log and profiler path.
 5. Keep the completed strict `p` and selected exception-thread core/CPSR `P`
    retail 3.65 transactional gate reproducible. Keep the expanded practical
    ARM/Thumb-2 PC-writer decoder and its live ARM fixtures reproducible; add
@@ -1153,16 +1187,22 @@ exact matching unstripped ELF on the development computer.
   GDB console queue and loss accounting.
 - `uvdb_console_transport.c` / `uvdb_console_transport.h`: single-owner no-ack
   session state, `O`-packet framing, bounded pumping, and transport statistics.
+- `uvdb_monitor.c` / `uvdb_monitor.h`: host-testable exact `qRcmd` registry and
+  bounded read-only status, thread, and module report renderer.
 - `uvdb.h`: public application API.
 - `protocol/arm_vfp_target_xml.inc`: exact opt-in GDB D32 target description.
 - `docs/gdb-register-access.md`: `p`/`P` numbering, thread-scope, mutation
   policy, transactional validation gate, and retail 3.65 evidence.
+- `docs/gdb-monitor-commands.md`: monitor command reference, security boundary,
+  response limits, native tests, and pending live-GDB validation gate.
 - `stdio_redirect.c` / `stdio_redirect.h`: restorable nonblocking Vita newlib
   `stdout`/`stderr` capture and internal-helper inventory filtering.
 - `uvdb_debugnet.c`: bounded asynchronous UDP logs for DebugNet-style receivers.
 - `test.c`: Vita hardware test program.
 - `tools/gdb_console_smoke.py`: raw-RSP no-ack, stream, stop, detach, and
   reconnect validation for the Vita console fixture.
+- `tools/gdb_monitor_smoke.py`: automated two-session live-RSP validation for
+  the fixed read-only monitor registry, bounded errors, and state preservation.
 - `tools/gdb_symbols.py`: bounded live module reconciliation and ASLR-aware GDB
   symbol-script generation.
 - `tools/gdb_aslr_lifecycle.py`: automated five-session main/user-SUPRX source-
