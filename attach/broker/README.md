@@ -1,8 +1,15 @@
-# Read-only Vita attach broker core
+# Vita attach broker cores
 
-This directory contains the allocation-free protocol-v1 broker state machine.
-It cross-compiles into `libvitadebug_attach_broker.a`, but it is **not** a
-resident Vita plugin, listener, VPK, or external debugger injector.
+This directory contains two allocation-free state machines. The compile-only
+target packages them into `libvitadebug_attach_broker.a`; the current control
+contract passes its serialized VitaSDK rebuild. That archive is **not** a
+resident Vita plugin, listener, VPK, crypto implementation, privileged loader,
+or external debugger injector.
+
+`vitadebug_attach_broker.c` remains the protocol-v1 read-only discovery core.
+`vitadebug_attach_control.c` is a host-tested lifecycle and authorization model
+for a future, separate mutating protocol. Protocol v1 has not gained a mutation
+record.
 
 The core implements only:
 
@@ -17,6 +24,44 @@ The core implements only:
 
 There is no PID request, memory/register access, process stop/resume, module
 path, module load, injection, or kernel call in this component.
+
+## Authenticated control model
+
+The control core adds the state that a future shell-resident listener and
+privileged fixed-module backend need, without implementing either component:
+
+- a fresh service generation and monotonic per-generation session ID, plus a
+  per-connection challenge that exposes its opaque transport binding and
+  broker time/expiry basis to the signing host;
+- a mandatory paired-host verifier, bounded authentication window, three
+  attempts per challenge, and a 64-operation replay table per connection;
+- a second mandatory verifier for every attach, detach, or recovery operation;
+- separate domain-separated canonical peer/operation signing encoders with
+  fixed-width, network-byte-order fields and signatures excluded;
+- exact title plus expected launch-generation input, with PID and the rest of
+  the identity supplied only by the trusted target provider;
+- full title/PID/main-module/fingerprint/generation binding in the signed
+  authorization forwarded to the future privileged boundary;
+- revalidation after authorization, before start, and before each reverse-order
+  stop/unload action;
+- one globally owned, short-lived module lease with disconnect and watchdog
+  cleanup, allocated and journaled by the privileged load boundary rather than
+  synthesized by the shell core;
+- signed host cleanup forwarding plus exact-journal, release-only capabilities
+  for rollback, expiry, disconnect, shutdown, and recovery retries; and
+- durable in-memory recovery state when stop/unload cannot be verified, plus a
+  read-only privileged probe that may clear it only after proving the exact
+  leased module resource is gone.
+
+No public request or backend callback contains a module path. The core fills
+`VD_ATTACH_CONTROL_FIXED_DEBUGGER_SLOT`; a future kernel adapter must map that
+slot to exactly one compiled-in, preinstalled, identity-checked debugger module
+and independently verify the forwarded host authorization and replay state.
+
+The host test backend only records modeled load/start/stop/unload calls. No Vita
+adapter for those callbacks exists, so compiling this archive cannot inject a
+module. See [the control model](../docs/control-model.md) for the boundary and
+state transitions.
 
 ## Integration boundary
 
@@ -59,10 +104,23 @@ make host-test
 make vita-lib
 ```
 
-The host test covers normal discovery/release, identity change, expiration,
-one-use behavior, request replay, wrong peer/session, partial transport I/O,
-oversized frame rejection without draining the advertised payload, one
-absolute exchange deadline, fail-closed Vita inventory, and shutdown.
+The read-only host test covers normal discovery/release, identity change,
+expiration, one-use behavior, request replay, wrong peer/session, partial
+transport I/O, oversized frame rejection without draining the advertised
+payload, one absolute exchange deadline, fail-closed Vita inventory, and
+shutdown.
+
+The control host test covers mandatory peer and operation authentication,
+C/Python `ATTACH`/`DETACH`/`RECOVER` golden signing vectors, min/max leases,
+invalid SceUID boundaries, every signed-field mutation, host-visible
+peer/time challenge binding, explicit connection-scoped replay rollover,
+stale-generation rejection at every revalidation point, the fixed module slot,
+callback-deadline expiry rollback, late cleanup callback resampling,
+partial-start rollback, reverse-order
+stop/unload, disconnect cleanup, watchdog expiry, resumable unload failure,
+PID-reuse refusal and verified-gone reconciliation, privileged lease-grant and
+journal-capability enforcement, reinitialization refusal, and idempotent
+shutdown recovery retries.
 
 `make vita-lib` is a compile gate only. It creates a static ARM library; it
 does not install, enable, or run anything on a Vita.

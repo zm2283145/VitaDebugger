@@ -71,11 +71,22 @@ revalidates the full target identity during one-use release. Its host tests
 cover wrong-peer/session requests, expiration, replay, partial I/O, oversized
 frames, identity changes, and shutdown.
 
-The ARM static-library cross-build passes. This is not yet a running Vita
-service: no socket listener or shell-resident module is built, and the current
-Vita inventory adapter returns unavailable because public user APIs cannot
-provide the trusted foreign main-module identity required to issue a ticket.
-See [the broker boundary](broker/README.md).
+The broker directory also contains a separate authenticated control-plane
+model for the next protocol version. It owns challenge/authentication state,
+operation replay protection, exact target-generation binding, one fixed
+debugger-module slot, privileged-allocated lease grants, independently
+authorized cleanup capabilities, and reverse-order leased rollback. It has no wire command,
+TCP listener, crypto implementation, Vita lifecycle adapter, or module path.
+Its lifecycle callbacks are exercised only by host fakes. Protocol v1 remains
+read-only. See [the control model](docs/control-model.md).
+
+The ARM static-library target remains a compile-only gate. The current
+privileged-lease contract revision is host-tested and passes its serialized
+VitaSDK rebuild. This is still not a running Vita service: no
+socket listener or shell-resident module is built, and the current Vita
+inventory adapter returns unavailable because public user APIs cannot provide
+the trusted foreign main-module identity required to issue a ticket. See
+[the broker boundary](broker/README.md).
 
 Run all broker and host-client tests from the repository root:
 
@@ -110,6 +121,8 @@ prints the ticket, accepts a raw PID, or sends a module path.
 - `broker/` contains the read-only C broker core, fail-closed Vita adapter, and
   native tests.
 - `host/vdattach/` contains the strict codec and bounded stateful client.
+- `host/vdattach/control_signing.py` mirrors the canonical peer and operation
+  signing transcripts for cross-language golden-vector verification.
 - `tools/vdattach.py` runs the package without installation.
 - `tests/` covers canonical encoding, frame limits, capability/ABI gates,
   session binding, exact-title discovery, and ticket release.
@@ -125,12 +138,14 @@ prints the ticket, accepts a raw PID, or sends a module path.
 | Exact-title request and identity-ticket model | Implemented and host-tested |
 | Capability/kernel-ABI handshake | Implemented and host-tested |
 | Ticket release and connection state machine | Implemented and host-tested |
-| Allocation-free Vita broker state machine | Implemented, host-tested, ARM cross-build passes |
-| Resident Vita listener/lifecycle wrapper | Not implemented |
+| Allocation-free Vita broker state machine | Implemented and host-tested; current control contract passes its ARM rebuild |
+| Authenticated listener-facing control state | Host-tested model; no TCP/crypto adapter |
+| Resident Vita listener/lifecycle wrapper | Not implemented or installed |
 | Trusted Vita foreign-target identity adapter | Fail-closed stub; provider required |
 | Read-only kernel target-identity/ticket export | Not implemented |
-| Broker authentication/pairing | Required before a Vita broker ships |
-| Foreign-process `.suprx` loader export | Not implemented |
+| Broker authentication/pairing crypto | Callback boundary only; implementation required before shipping |
+| Fixed debugger-module loader request model | Implemented and host-tested; privileged backend owns lease grant, no path input or Vita backend |
+| Foreign-process `.suprx` loader export | Not implemented or hardware-tested |
 | Injected debugger `.suprx` | Not implemented |
-| Loader rollback, unload, and hardware validation | Not started |
+| Loader rollback/unload lease model | Implemented and host-tested with signed host cleanup and release-only journal capabilities; hardware validation not started |
 | Live GDB attach to an unmodified application | Not available yet |
