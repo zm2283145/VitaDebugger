@@ -69,6 +69,52 @@ int main(void)
                          hw_debug.watchpoint_count,
                          hw_debug.context_breakpoint_count);
 
+    struct vd_kernel_pmu_info pmu_before = {0};
+    struct vd_kernel_pmu_info pmu_after = {0};
+    int pmu_before_result = vdKernelGetPmuInfo(&pmu_before);
+    int pmu_after_result = -1;
+    for(int attempt = 0; attempt < 16; ++attempt)
+    {
+        pmu_after_result = vdKernelGetPmuInfo(&pmu_after);
+        if(pmu_after_result < 0 || pmu_after.cpu_id == pmu_before.cpu_id)
+            break;
+    }
+    report_check("PMU discovery capability",
+                 (status.capabilities & VD_KERNEL_CAP_PMU_DISCOVERY) != 0);
+    report_check("read-only PMU snapshots",
+                 pmu_before_result >= 0 && pmu_after_result >= 0);
+    report_check("PMU inventory ABI",
+                 pmu_before.struct_size == sizeof(pmu_before) &&
+                 pmu_before.abi_version == VD_KERNEL_PMU_ABI_VERSION);
+    report_check("Cortex-A9 PMU identity",
+                 pmu_before.cpu_id < VD_KERNEL_PMU_PHYSICAL_CORE_COUNT &&
+                 (pmu_before.raw_mpidr & 0xffu) == pmu_before.cpu_id &&
+                 (pmu_before.raw_midr & 0xff0ffff0u) == 0x410fc090u &&
+                 pmu_before.event_counter_count == 6u);
+    report_check("same-core PMU comparison",
+                 pmu_before_result >= 0 && pmu_after_result >= 0 &&
+                 pmu_before.cpu_id == pmu_after.cpu_id);
+    report_check("PMU discovery leaves controls unchanged",
+                 pmu_before_result >= 0 && pmu_after_result >= 0 &&
+                 pmu_before.cpu_id == pmu_after.cpu_id &&
+                 pmu_before.raw_pmcr == pmu_after.raw_pmcr &&
+                 pmu_before.raw_pmcntenset ==
+                     pmu_after.raw_pmcntenset &&
+                 pmu_before.raw_pmselr == pmu_after.raw_pmselr &&
+                 pmu_before.raw_pmuserenr ==
+                     pmu_after.raw_pmuserenr &&
+                 pmu_before.raw_pmintenset ==
+                     pmu_after.raw_pmintenset);
+    psvDebugScreenPrintf(
+        "  pmu cpu=%u counters=%u pmcr=%08X enable=%08X user=%08X\n",
+        pmu_before.cpu_id, pmu_before.event_counter_count,
+        pmu_before.raw_pmcr, pmu_before.raw_pmcntenset,
+        pmu_before.raw_pmuserenr);
+    psvDebugScreenPrintf(
+        "  overflow=%08X select=%08X cycle=%08X irq=%08X\n",
+        pmu_before.raw_pmovsr, pmu_before.raw_pmselr,
+        pmu_before.raw_pmccntr, pmu_before.raw_pmintenset);
+
     int copied = -1;
     int total = -1;
     result = vdKernelGetThreadList(NULL, 0, &copied, &total);

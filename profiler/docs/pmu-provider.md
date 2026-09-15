@@ -17,7 +17,7 @@ provider can run.
 
 ## Public Vita ScePerf adapter
 
-`vitaprofiler_pmu_vita.h` supplies an opt-in user-mode adapter backed only by
+`vitaprofiler_pmu_vita.h` supplies an injectable user-mode adapter which models
 the public VitaSDK `psp2/perf.h` functions:
 
 - `scePerfArmPmonReset`
@@ -32,6 +32,13 @@ start/stop state. Consequently, this adapter deliberately advertises
 `VP_PMU_PROVIDER_FLAG_OWNED_RESET`, not `EXACT_RESTORE`. It never touches CP15,
 does not call undocumented kernel PMU functions, and needs no VitaDebugger
 kernel companion.
+
+The direct Vita entry point currently returns `VP_ERROR_UNSUPPORTED`. Retail
+3.65 hardware proved that linking `ScePerf_stub` does not bind the imports,
+`SCE_SYSMODULE_PERF` cannot be loaded through the documented sysmodule call,
+and direct user loading of `libperf.suprx` fails. Calling an unresolved stub
+branches to address zero. The injectable form remains for native tests and a
+future resolver which can prove all callback targets and retain their module.
 
 The ownership acknowledgement means all of the following are true:
 
@@ -58,39 +65,14 @@ VitaProfiler's 64-bit record fields without guessing how many wraps occurred
 between reads. Consumers which calculate deltas must use modulo-2^32 arithmetic
 and choose a sampling interval suitable for the selected event.
 
-### Example
+### Integration status
 
-```c
-#include <psp2/perf.h>
-#include <vitaprofiler_pmu.h>
-#include <vitaprofiler_pmu_vita.h>
-
-static struct vp_vita_pmu_owned vita_pmu;
-static struct vp_pmu_session pmu_session;
-
-static int start_pmu(void)
-{
-    struct vp_pmu_config config = {
-        .counter_mask = VP_PMU_COUNTER_CYCLES | VP_PMU_COUNTER_EVENT0,
-        .event_count = 1,
-        .event_codes = { SCE_PERF_ARM_PMON_DCACHE_MISS, 0, 0, 0 },
-        .flags = VP_PMU_CONFIG_FLAG_ALLOW_OWNED_RESET,
-    };
-    int result;
-
-    /* Thread ID 0 is resolved to this concrete thread now. */
-    result = vp_vita_pmu_owned_init(
-        &vita_pmu, 0, VP_VITA_PMU_APPLICATION_OWNERSHIP_ACK);
-    if (result != VP_RESULT_OK)
-        return result;
-    return vp_pmu_session_begin(
-        &pmu_session, vp_vita_pmu_owned_get_provider(&vita_pmu), &config);
-}
-```
-
-Read with `vp_pmu_session_read()`. End with `vp_pmu_session_end()` and retry the
-same call if it returns `VP_ERROR_RESTORE_REQUIRED`. A failed acquire can leave
-no `vp_pmu_session` to own cleanup; in that narrow case inspect
+There is intentionally no copy-and-paste Vita example for this backend yet.
+`vp_vita_pmu_owned_init_with_ops()` may be used only after a platform resolver
+has supplied verified callable targets and a retained module lifetime. Read
+with `vp_pmu_session_read()`. End with `vp_pmu_session_end()` and retry the same
+call if it returns `VP_ERROR_RESTORE_REQUIRED`. A failed acquire can leave no
+`vp_pmu_session` to own cleanup; in that narrow case inspect
 `vp_vita_pmu_owned_get_status()` and call
 `vp_vita_pmu_owned_retry_orphan_cleanup()` until it succeeds before discarding
 the provider state or exiting the thread.
@@ -100,10 +82,13 @@ deliberately conservative conflict guard, not system-wide exclusivity. If
 separate user modules each statically link their own adapter copy, the
 application must coordinate one shared PMU owner across those modules.
 
-Link applications which use this adapter with `ScePerf_stub` in addition to the
-ordinary VitaProfiler dependencies. The adapter resolves the special SELF ID to
-a stable concrete thread ID during initialization so begin/read/end cannot
-silently act on different calling threads.
+The normal Vita cross-build proves the fail-closed adapter and portable
+provider compile for Vita. The separate zero-call discovery target includes
+VitaSDK's `psp2/perf.h` and links the six adapter-used stubs solely to inspect
+their runtime loader state. The exact hardware evidence is in
+[PMU hardware gate](pmu-hardware-gate.md). The practical next backend is a
+separate exact-restore provider mediated by the optional VitaDebugger kernel
+companion.
 
 ## Generic provider contract
 
@@ -156,6 +141,7 @@ viewer resolves and displays the application-supplied names.
 The native suite uses injected providers to verify exact-restore selection,
 explicit owned-reset opt-in, physical counter mapping, process-local conflict
 handling, raw error reporting, failed-acquire cleanup, retained release
-obligations, and successful retry. The Vita cross-build proves the ScePerf
-adapter matches current VitaSDK headers. Real counter behavior still requires a
-separate, disposable hardware probe and is not yet claimed as hardware-tested.
+obligations, and successful retry. The Vita cross-build proves the fail-closed
+adapter compiles for the target. Retail 3.65 read-only discovery rejected the
+direct ScePerf route; kernel PMU inventory is hardware-tested, but real counter
+mutation and sampling still require the separate exact-restoration gate.

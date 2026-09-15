@@ -325,6 +325,7 @@ int vdKernelGetStatus(struct vd_kernel_status* status)
                                 VD_KERNEL_CAP_STOP_RECONCILE |
                                 VD_KERNEL_CAP_HW_DEBUG_DISCOVERY |
                                 VD_KERNEL_CAP_THREAD_MUTATION_LIFECYCLE |
+                                VD_KERNEL_CAP_PMU_DISCOVERY |
                                 VD_KERNEL_CAP_PROBE_SUSPEND;
     unsigned int mutation_banks = vdThreadMutationSupportedBanks(
         &thread_mutation_backend);
@@ -760,6 +761,51 @@ static SceUID find_session_thread_locked(SceUID target_user_thread)
         }
     }
     return match;
+}
+
+int vdKernelGetPmuInfo(struct vd_kernel_pmu_info* info)
+{
+    uint32_t syscall_state;
+    ENTER_SYSCALL(syscall_state);
+    if(!info)
+    {
+        EXIT_SYSCALL(syscall_state);
+        return -1;
+    }
+
+    struct vd_kernel_pmu_info kernel_info = {
+        .struct_size = sizeof(kernel_info),
+        .abi_version = VD_KERNEL_PMU_ABI_VERSION,
+        .reserved = 0,
+    };
+    SceKernelIntrStatus intr_state = ksceKernelCpuSuspendIntr();
+    kernel_info.cpu_id = (unsigned int)ksceKernelCpuId();
+    __asm__ volatile("mrc p15, 0, %0, c0, c0, 5"
+                     : "=r"(kernel_info.raw_mpidr));
+    __asm__ volatile("mrc p15, 0, %0, c0, c0, 0"
+                     : "=r"(kernel_info.raw_midr));
+    __asm__ volatile("mrc p15, 0, %0, c9, c12, 0"
+                     : "=r"(kernel_info.raw_pmcr));
+    __asm__ volatile("mrc p15, 0, %0, c9, c12, 1"
+                     : "=r"(kernel_info.raw_pmcntenset));
+    __asm__ volatile("mrc p15, 0, %0, c9, c12, 3"
+                     : "=r"(kernel_info.raw_pmovsr));
+    __asm__ volatile("mrc p15, 0, %0, c9, c12, 5"
+                     : "=r"(kernel_info.raw_pmselr));
+    __asm__ volatile("mrc p15, 0, %0, c9, c13, 0"
+                     : "=r"(kernel_info.raw_pmccntr));
+    __asm__ volatile("mrc p15, 0, %0, c9, c14, 0"
+                     : "=r"(kernel_info.raw_pmuserenr));
+    __asm__ volatile("mrc p15, 0, %0, c9, c14, 1"
+                     : "=r"(kernel_info.raw_pmintenset));
+    kernel_info.event_counter_count =
+        (kernel_info.raw_pmcr >> 11) & 0x1fu;
+    ksceKernelCpuResumeIntr(intr_state);
+
+    int result = ksceKernelMemcpyKernelToUser(info, &kernel_info,
+                                               sizeof(kernel_info));
+    EXIT_SYSCALL(syscall_state);
+    return result;
 }
 
 int vdKernelGetThreadRegisters(unsigned int token, SceUID target_user_thread,

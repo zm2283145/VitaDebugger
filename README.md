@@ -185,10 +185,13 @@ status includes:
 - A host-tested profiler capture pipeline: an allocation-free callback drain,
   bounded TCP receiver, named text summaries, complete decoded JSON, and Chrome
   Trace/Perfetto export. Cooperative CPU-side VitaGL/SceGxm hook points and a
-  fail-closed PMU provider/lease boundary are implemented. A public-ScePerf,
-  application-owned PMU adapter is host-tested, Vita-cross-built, and linked,
-  but not yet hardware-validated. The Vita-side network owner, automatic
-  graphics interposition, and a dedicated desktop GUI are not implemented.
+  fail-closed PMU provider/lease boundary are implemented. Retail 3.65 hardware
+  rejected both user-mode `ScePerf` loading paths, so the direct adapter now
+  returns unsupported instead of calling an unresolved stub. Optional kernel
+  ABI v1.13 safely reads a same-core Cortex-A9 PMU inventory, reports six event
+  counters, and leaves all observed control state unchanged. Counter mutation,
+  the Vita-side network owner, automatic graphics interposition, and a dedicated
+  desktop GUI are not implemented.
 - A read-only external-attach protocol and allocation-free broker core with
   exact-title discovery, kernel-ABI/capability negotiation, short-lived identity
   tickets, bounded host tooling, native tests, and a passing Vita cross-build.
@@ -1207,14 +1210,18 @@ exact matching unstripped ELF on the development computer.
   its 13-check retail 3.65 probe resolved every captured custom and built-in
   event ID. A callback binary drain and PC-side bounded TCP receiver/viewer now
   pass host tests and can emit text, decoded JSON, and Chrome Trace/Perfetto
-  output. The Vita-side socket/file owner, live hardware capture gate, arbitrary
-  thread PC/call-stack sampling, ScePerf PMU hardware gate, automatic
-  VitaGL/SceGxm interposition, true GPU timestamps, and a bespoke desktop GUI
-  remain pending. The PMU adapter requires explicit ownership because the
-  public API cannot read and restore a thread's previous selector/run state.
+  output. A read-only kernel PMU inventory passes on retail 3.65, but no PMU
+  counter is enabled yet. The Vita-side socket/file owner, lease-protected exact
+  PMU snapshot/configure/restore session, arbitrary thread PC/call-stack
+  sampling, automatic VitaGL/SceGxm interposition, true GPU timestamps, and a
+  bespoke desktop GUI remain pending. The public ScePerf imports are unresolved
+  in the tested retail runtime and the direct adapter fails closed.
 - VitaDevDeploy currently depends on Vita Companion's unauthenticated FTP and
   command transport. Signed one-use jobs protect the install decision, but do
   not authenticate or encrypt Companion itself; use it only on a private LAN.
+  An authenticated, size-bounded direct TCP package-ingress port is planned so
+  the agent can receive a signed VPK without Companion FTP; the complete package
+  must still be staged to a local Vita path before the system installer call.
 - Deployment is serialized and one-shot, starts from LiveArea, does not provide
   general target-app rollback, and still needs full bootstrap recovery and
   interrupted-install fault-injection testing before it is production-ready.
@@ -1265,17 +1272,19 @@ exact matching unstripped ELF on the development computer.
    same-process hot module load/unload churn and add automatic in-session symbol
    refresh. This is dynamic-module and IDE convenience work; the ASLR,
    verified-build, and initial VS Code hardware milestones are complete.
-7. Add the Vita-side profiler TCP/file drain owner and hardware capture gate,
-   hardware-validate the opt-in public-ScePerf PMU adapter, integrate the
-   cooperative VitaGL/SceGxm hook points into real applications, and build a
-   dedicated desktop GUI on top of the working receiver, analyzer, and Perfetto
-   export.
+7. Build the lease-protected kernel PMU session on top of the completed
+   read-only retail 3.65 gate: exact snapshot, allowlisted configuration,
+   read-back, sampling, timeout/error cleanup, and exact restoration. Then add
+   the Vita-side profiler TCP/file drain owner, integrate the cooperative
+   VitaGL/SceGxm hook points into real applications, and build a dedicated
+   desktop GUI on top of the working receiver, analyzer, and Perfetto export.
 8. Complete protocol authentication/pairing and peer allowlists, isolated build
    directories, exported VitaSDK/CMake packages, CI and firmware coverage, and
    the project-wide licensing/release work.
-9. Hardware-stress the VitaDevDeploy GPU synchronization fix and startup/
-   teardown lifecycle, then finish interrupted-install and bootstrap-recovery
-   fault injection.
+9. Give VitaDevDeploy an authenticated, bounded direct TCP package-ingress
+   service, hardware-stress its GPU synchronization and startup/teardown
+   lifecycle, then finish interrupted-install and bootstrap-recovery fault
+   injection.
 10. Extend the read-only external-attach scaffold with authenticated pairing,
     a shell-resident listener around the broker core, a trusted Vita target-
     identity provider, a fixed identity-checked per-process debugger-module

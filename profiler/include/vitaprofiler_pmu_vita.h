@@ -76,8 +76,12 @@ int vp_vita_pmu_owned_init_with_ops(
     int32_t thread_id, uint32_t ownership_ack);
 
 #if defined(__vita__)
-/* Uses psp2/perf.h and resolves thread_id == 0 to the current thread once at
- * initialization so later callbacks cannot silently target another thread. */
+/* Reserved convenience entry point for a future loader-verified ScePerf
+ * binding. It currently fails closed with VP_ERROR_UNSUPPORTED on Vita:
+ * retail 3.65 hardware proved that a nonzero import stub can still branch to
+ * address zero. Use vp_vita_pmu_owned_init_with_ops() only with function
+ * targets obtained from a resolver whose result and module lifetime the
+ * application can verify. */
 int vp_vita_pmu_owned_init(struct vp_vita_pmu_owned* owned,
                            int32_t thread_id, uint32_t ownership_ack);
 #endif

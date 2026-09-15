@@ -6,7 +6,7 @@
 extern "C" {
 #endif
 
-#define VD_KERNEL_ABI_VERSION 0x0001000Cu
+#define VD_KERNEL_ABI_VERSION 0x0001000Du
 #define VD_KERNEL_MAX_THREADS 64
 #define VD_KERNEL_HW_CORE_COUNT 3
 #define VD_KERNEL_HW_BREAKPOINT_COUNT 6
@@ -51,6 +51,7 @@ enum vd_kernel_capability {
     VD_KERNEL_CAP_THREAD_MUTATION_LIFECYCLE = 1u << 8,
     VD_KERNEL_CAP_THREAD_CORE_WRITE = 1u << 9,
     VD_KERNEL_CAP_THREAD_VFP_WRITE = 1u << 10,
+    VD_KERNEL_CAP_PMU_DISCOVERY = 1u << 11,
     VD_KERNEL_CAP_PROBE_SUSPEND = 1u << 31,
 };
 
@@ -118,6 +119,33 @@ struct vd_kernel_hw_debug_info {
     unsigned int watchpoint_count;
     unsigned int context_breakpoint_count;
 };
+
+#define VD_KERNEL_PMU_ABI_VERSION 1u
+#define VD_KERNEL_PMU_PHYSICAL_CORE_COUNT 4u
+
+/* Read-only inventory of the calling CPU's architected ARMv7 PMU state.
+ * This structure deliberately exposes no write request and no arbitrary CPU
+ * selector. A later lease-protected PMU session ABI will be negotiated
+ * separately after this inventory passes on hardware. */
+struct vd_kernel_pmu_info {
+    unsigned int struct_size;
+    unsigned int abi_version;
+    unsigned int cpu_id;
+    unsigned int event_counter_count;
+    unsigned int raw_mpidr;
+    unsigned int raw_midr;
+    unsigned int raw_pmcr;
+    unsigned int raw_pmcntenset;
+    unsigned int raw_pmovsr;
+    unsigned int raw_pmselr;
+    unsigned int raw_pmccntr;
+    unsigned int raw_pmuserenr;
+    unsigned int raw_pmintenset;
+    unsigned int reserved;
+};
+
+typedef char vd_kernel_pmu_info_size_must_be_56[
+    sizeof(struct vd_kernel_pmu_info) == 56 ? 1 : -1];
 
 #define VD_KERNEL_THREAD_MUTATION_ABI_VERSION 1u
 #define VD_KERNEL_THREAD_MUTATION_MAX_TRANSACTIONS 1u
@@ -261,6 +289,11 @@ int vdKernelGetStatus(struct vd_kernel_status* status);
 // Read the current CPU's architected debug identification register. This does
 // not enable monitor mode or alter any breakpoint/watchpoint comparator.
 int vdKernelGetHardwareDebugInfo(struct vd_kernel_hw_debug_info* info);
+
+// Read the calling CPU's PMU identity/control snapshot without selecting a
+// counter, changing an enable bit, or touching another CPU. The caller cannot
+// request a target thread or core through this discovery-only API.
+int vdKernelGetPmuInfo(struct vd_kernel_pmu_info* info);
 
 // Enumerate only threads owned by the calling process. Kernel-global thread
 // IDs are translated to process-visible user IDs before being returned.

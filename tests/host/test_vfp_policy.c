@@ -16,7 +16,7 @@ static void check(int condition, const char* message)
 
 int main(void)
 {
-    check(VD_KERNEL_ABI_VERSION == 0x0001000Cu, "ABI v1.12");
+    check(VD_KERNEL_ABI_VERSION == 0x0001000Du, "ABI v1.13");
     check(VD_KERNEL_ERROR_VFP_CONTEXT_UNAVAILABLE ==
               (int)UINT32_C(0x80028031),
           "normalized result uses stable Vita error encoding");

@@ -1,0 +1,32 @@
+VITAPROFILER-PMU-DISCOVERY-1
+mode=read-only-loader-and-export-discovery
+pmu_calls=0
+sequence=1 stage=check code=0 result=pass name=synced discovery journal opened
+sequence=2 stage=firmware code=0 version=3.74 value=0x03740000
+sequence=3 stage=stub code=0 phase=initial name=sceKernelGetThreadId address=0x81011710 words=E304CFA7,E34EC000,E12FFF1C,00000000
+sequence=4 stage=stub code=0 phase=initial name=scePerfArmPmonGetCounterValue address=0x81011510 words=E24FC008,E3A0F000,E1A00000,00000000
+sequence=5 stage=stub code=0 phase=initial name=scePerfArmPmonReset address=0x81011520 words=E24FC008,E3A0F000,E1A00000,00000000
+sequence=6 stage=stub code=0 phase=initial name=scePerfArmPmonSelectEvent address=0x81011530 words=E24FC008,E3A0F000,E1A00000,00000000
+sequence=7 stage=stub code=0 phase=initial name=scePerfArmPmonSetCounterValue address=0x81011540 words=E24FC008,E3A0F000,E1A00000,00000000
+sequence=8 stage=stub code=0 phase=initial name=scePerfArmPmonStart address=0x81011550 words=E24FC008,E3A0F000,E1A00000,00000000
+sequence=9 stage=stub code=0 phase=initial name=scePerfArmPmonStop address=0x81011560 words=E24FC008,E3A0F000,E1A00000,00000000
+sequence=10 stage=sysmodule_load code=-2141581312 module=0x00000005
+sequence=11 stage=stub code=0 phase=after_sysmodule name=sceKernelGetThreadId address=0x81011710 words=E304CFA7,E34EC000,E12FFF1C,00000000
+sequence=12 stage=stub code=0 phase=after_sysmodule name=scePerfArmPmonGetCounterValue address=0x81011510 words=E24FC008,E3A0F000,E1A00000,00000000
+sequence=13 stage=stub code=0 phase=after_sysmodule name=scePerfArmPmonReset address=0x81011520 words=E24FC008,E3A0F000,E1A00000,00000000
+sequence=14 stage=stub code=0 phase=after_sysmodule name=scePerfArmPmonSelectEvent address=0x81011530 words=E24FC008,E3A0F000,E1A00000,00000000
+sequence=15 stage=stub code=0 phase=after_sysmodule name=scePerfArmPmonSetCounterValue address=0x81011540 words=E24FC008,E3A0F000,E1A00000,00000000
+sequence=16 stage=stub code=0 phase=after_sysmodule name=scePerfArmPmonStart address=0x81011550 words=E24FC008,E3A0F000,E1A00000,00000000
+sequence=17 stage=stub code=0 phase=after_sysmodule name=scePerfArmPmonStop address=0x81011560 words=E24FC008,E3A0F000,E1A00000,00000000
+sequence=18 stage=direct_load code=-2147299325 path=vs0:sys/external/libperf.suprx module_id=0x8002D003 start_status=0x00000000
+sequence=19 stage=stub code=0 phase=after_direct name=sceKernelGetThreadId address=0x81011710 words=E304CFA7,E34EC000,E12FFF1C,00000000
+sequence=20 stage=stub code=0 phase=after_direct name=scePerfArmPmonGetCounterValue address=0x81011510 words=E24FC008,E3A0F000,E1A00000,00000000
+sequence=21 stage=stub code=0 phase=after_direct name=scePerfArmPmonReset address=0x81011520 words=E24FC008,E3A0F000,E1A00000,00000000
+sequence=22 stage=stub code=0 phase=after_direct name=scePerfArmPmonSelectEvent address=0x81011530 words=E24FC008,E3A0F000,E1A00000,00000000
+sequence=23 stage=stub code=0 phase=after_direct name=scePerfArmPmonSetCounterValue address=0x81011540 words=E24FC008,E3A0F000,E1A00000,00000000
+sequence=24 stage=stub code=0 phase=after_direct name=scePerfArmPmonStart address=0x81011550 words=E24FC008,E3A0F000,E1A00000,00000000
+sequence=25 stage=stub code=0 phase=after_direct name=scePerfArmPmonStop address=0x81011560 words=E24FC008,E3A0F000,E1A00000,00000000
+sequence=26 stage=check code=-2147299325 result=fail name=direct libperf module loads and starts
+sequence=27 stage=check code=-1 result=fail name=loaded module identity is readable
+sequence=28 stage=check code=0 result=fail name=all six ScePerf exports resolve without calling them
+sequence=29 stage=summary code=1 result=fail checks=4 failures=3 sysmodule=-2141581312 direct_module=0x8002D003 module_info=-1 exports=0 unload=-1 journal_error=0 pmu_calls=0

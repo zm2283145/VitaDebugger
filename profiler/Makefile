@@ -20,8 +20,10 @@ VITA_PROBE_LDFLAGS ?= -Wl,--defsym=__sce_headroom=0x1000
 HOST_BUILD := build/host
 VITA_BUILD := build/vita
 VITA_PROBE_BUILD := build/vita-probe
+VITA_PMU_DISCOVERY_BUILD := build/vita-pmu-discovery
 VITA_COMMON_DIR ?= $(VITASDK)/share/gcc-arm-vita-eabi/samples/common
 VITA_PROBE_TITLE_ID ?= VDPR00001
+VITA_PMU_DISCOVERY_TITLE_ID ?= VDPD00001
 VITA_PROBE_OBJECTS := \
 	$(VITA_PROBE_BUILD)/vita_probe.o \
 	$(VITA_PROBE_BUILD)/debugScreen.o
@@ -31,8 +33,23 @@ VITA_PROBE_LDLIBS := \
 	-lSceProcessmgr_stub \
 	-lSceSysmem_stub \
 	-lSceLibKernel_stub
+VITA_PMU_DISCOVERY_OBJECTS := \
+	$(VITA_PMU_DISCOVERY_BUILD)/vita_pmu_discovery.o \
+	$(VITA_PMU_DISCOVERY_BUILD)/debugScreen.o
+VITA_PMU_DISCOVERY_LDLIBS := \
+	-lScePerf_stub \
+	-lSceSysmodule_stub \
+	-lSceKernelModulemgr_stub \
+	-lSceIofilemgr_stub \
+	-lSceDisplay_stub \
+	-lSceCtrl_stub \
+	-lSceKernelThreadMgr_stub \
+	-lSceProcessmgr_stub \
+	-lSceSysmem_stub \
+	-ltaihen_stub \
+	-lSceLibKernel_stub
 
-.PHONY: all vita vita-check vita-probe host-test check clean
+.PHONY: all vita vita-check vita-probe vita-pmu-discovery host-test check clean
 
 all: vita
 
@@ -41,6 +58,8 @@ vita: $(VITA_BUILD)/libvitaprofiler.a
 vita-check: vita $(VITA_BUILD)/vitaprofiler-pmu-link-check.elf
 
 vita-probe: $(VITA_PROBE_BUILD)/vitaprofiler-probe.vpk
+
+vita-pmu-discovery: $(VITA_PMU_DISCOVERY_BUILD)/vitaprofiler-pmu-discovery.vpk
 
 $(VITA_BUILD)/vitaprofiler.o: src/vitaprofiler.c include/vitaprofiler.h
 	mkdir -p $(VITA_BUILD)
@@ -74,7 +93,7 @@ $(VITA_BUILD)/libvitaprofiler.a: $(VITA_BUILD)/vitaprofiler.o $(VITA_BUILD)/vita
 	$(VITA_AR) rcs $@ $^
 
 $(VITA_BUILD)/vitaprofiler-pmu-link-check.elf: tests/vita_pmu_link_check.c $(VITA_BUILD)/libvitaprofiler.a include/vitaprofiler_pmu_vita.h
-	$(VITA_CC) $(CPPFLAGS) $(VITA_CFLAGS) $< $(VITA_BUILD)/libvitaprofiler.a -lScePerf_stub -lSceKernelThreadMgr_stub -lSceLibKernel_stub -o $@
+	$(VITA_CC) $(CPPFLAGS) $(VITA_CFLAGS) $< $(VITA_BUILD)/libvitaprofiler.a -lSceKernelThreadMgr_stub -lSceLibKernel_stub -o $@
 
 $(VITA_PROBE_BUILD)/vita_probe.o: tests/vita_probe.c include/vitaprofiler.h
 	mkdir -p $(VITA_PROBE_BUILD)
@@ -99,6 +118,30 @@ $(VITA_PROBE_BUILD)/param.sfo:
 
 $(VITA_PROBE_BUILD)/vitaprofiler-probe.vpk: $(VITA_PROBE_BUILD)/eboot.bin $(VITA_PROBE_BUILD)/param.sfo
 	$(VITA_PACK_VPK) -s $(VITA_PROBE_BUILD)/param.sfo -b $(VITA_PROBE_BUILD)/eboot.bin $@
+
+$(VITA_PMU_DISCOVERY_BUILD)/vita_pmu_discovery.o: tests/vita_pmu_discovery.c
+	mkdir -p $(VITA_PMU_DISCOVERY_BUILD)
+	$(VITA_CC) $(CPPFLAGS) -I$(VITA_COMMON_DIR) $(VITA_PROBE_CFLAGS) -c $< -o $@
+
+$(VITA_PMU_DISCOVERY_BUILD)/debugScreen.o: $(VITA_COMMON_DIR)/debugScreen.c
+	mkdir -p $(VITA_PMU_DISCOVERY_BUILD)
+	$(VITA_CC) -I$(VITA_COMMON_DIR) $(VITA_CFLAGS) -c $< -o $@
+
+$(VITA_PMU_DISCOVERY_BUILD)/vitaprofiler-pmu-discovery.elf: $(VITA_PMU_DISCOVERY_OBJECTS)
+	$(VITA_CC) -Wl,-q -Wl,-z,nocopyreloc $(VITA_PROBE_LDFLAGS) $^ $(VITA_PMU_DISCOVERY_LDLIBS) -o $@
+
+$(VITA_PMU_DISCOVERY_BUILD)/vitaprofiler-pmu-discovery.velf: $(VITA_PMU_DISCOVERY_BUILD)/vitaprofiler-pmu-discovery.elf
+	$(VITA_ELF_CREATE) $< $@
+
+$(VITA_PMU_DISCOVERY_BUILD)/eboot.bin: $(VITA_PMU_DISCOVERY_BUILD)/vitaprofiler-pmu-discovery.velf
+	$(VITA_MAKE_FSELF) $< $@
+
+$(VITA_PMU_DISCOVERY_BUILD)/param.sfo:
+	mkdir -p $(VITA_PMU_DISCOVERY_BUILD)
+	$(VITA_MKSFOEX) -s TITLE_ID=$(VITA_PMU_DISCOVERY_TITLE_ID) 'VitaProfiler PMU discovery' $@
+
+$(VITA_PMU_DISCOVERY_BUILD)/vitaprofiler-pmu-discovery.vpk: $(VITA_PMU_DISCOVERY_BUILD)/eboot.bin $(VITA_PMU_DISCOVERY_BUILD)/param.sfo
+	$(VITA_PACK_VPK) -s $(VITA_PMU_DISCOVERY_BUILD)/param.sfo -b $(VITA_PMU_DISCOVERY_BUILD)/eboot.bin $@
 
 $(HOST_BUILD)/test_vitaprofiler: src/vitaprofiler.c tests/test_vitaprofiler.c include/vitaprofiler.h
 	mkdir -p $(HOST_BUILD)

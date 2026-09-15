@@ -28,14 +28,19 @@ The current increment provides:
   viewer output with named zone, counter, frame, and built-in metric handling.
 - Cooperative, header-independent CPU wall-time hook interfaces for VitaGL and
   SceGxm call sites.
-- A guarded PMU provider/lease abstraction plus an explicit application-owned
-  Vita user-mode adapter built on public ScePerf APIs. The adapter retains
-  failed cleanup obligations and is cross-built, but is not hardware-validated.
+- A guarded PMU provider/lease abstraction plus an injectable owned-reset
+  adapter for the public ScePerf semantics. The adapter retains failed cleanup
+  obligations. Its direct Vita convenience initializer now fails closed
+  because retail 3.65 hardware proved that the ScePerf imports remain unbound.
+- A hardware-tested, read-only Cortex-A9 PMU inventory in optional
+  VitaDebugger kernel ABI v1.13. Live counter configuration remains disabled
+  until a separate exact-snapshot/restore lease passes its hardware gates.
 
 The Vita library does not start threads, allocate memory, open files, use the
-network, stop an application, or call the VitaDebugger kernel companion. The
-separate development-computer tool owns its TCP listener and output files. No
-kernel plugin change is part of this foundation.
+network, stop an application, or currently call the VitaDebugger kernel
+companion. The separate development-computer tool owns its TCP listener and
+output files. PMU discovery is an optional companion capability, not a hidden
+dependency of the portable profiler core.
 
 ## Quick start
 
@@ -203,7 +208,7 @@ built-in Vita sample names.
 | Renderer/audio/allocator metrics | Generic counters and zones are ready | Integration hooks in each subsystem |
 | All-process thread enumeration | Cooperative/known IDs only | Narrow process-owned enumeration |
 | Statistical PC/call-stack sampling | Not safely available | Tokenized, read-only sampler boundary |
-| PMU hardware counters | Exact-restore/owned-reset provider boundary, named raw samples, and an opt-in public ScePerf adapter | Disposable hardware validation; exact coexistence remains unavailable because ScePerf cannot read prior selector/run state |
+| PMU hardware counters | Provider boundary, named raw samples, and injected owned-reset adapter tests; direct ScePerf initialization fails closed on tested retail 3.65 | Read-only Cortex-A9 inventory is hardware-tested; a separate lease-protected exact-snapshot/restore session is required before enabling counters |
 | GPU workload timing | Explicit CPU-side VitaGL/SceGxm call-site hooks | GPU timestamps or automatic interposition are not implemented |
 
 `SceKernelThreadInfo.runClocks` is exported as a cumulative **raw** value because
@@ -234,8 +239,14 @@ This compiles both the portable core and the user-mode Vita adapter with
 `-Wall -Wextra -Werror`, then creates `build/vita/libvitaprofiler.a`. Link that
 archive into an application together with the VitaSDK stubs for KernelThreadMgr,
 LibKernel, Processmgr, and Sysmem (ordinary VitaSDK application links normally
-already include LibKernel). Applications which opt into the ScePerf PMU adapter
-must additionally link `ScePerf_stub`.
+already include LibKernel). `vita-check` cross-builds the fail-closed adapter;
+the separate zero-call `vita-pmu-discovery` target includes VitaSDK's
+`psp2/perf.h` and links the six adapter-used imports as a loader diagnostic.
+Neither build proves that those functions are bound at runtime: both documented
+sysmodule loading and the normal `libperf.suprx` user-module path failed on the
+tested retail 3.65 setup. `vp_vita_pmu_owned_init()` therefore returns
+`VP_ERROR_UNSUPPORTED` instead of calling those unresolved stubs. See the
+[PMU hardware gate](docs/pmu-hardware-gate.md).
 
 On a Unix-like development host with a native C compiler:
 

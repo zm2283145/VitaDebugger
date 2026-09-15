@@ -8,6 +8,13 @@ VitaSDK headers, ARM's Cortex-A9 errata, and upstream Linux's ARM hardware-
 breakpoint implementation. It records hypotheses and safe next gates; it does
 not authorize a kernel or CP14 hardware experiment.
 
+> **Later PMU result:** retail 3.65 discovery rejected both user-mode
+> `ScePerf` loading paths and proved that the unresolved import stubs branch to
+> zero. Direct ScePerf initialization now fails closed. A separately reviewed,
+> read-only kernel PMU inventory subsequently passed with six Cortex-A9 event
+> counters and unchanged control state. See
+> [the hardware record](profiler-pmu-retail-3.65.md).
+
 ## Findings retained
 
 - Debug-power, monitor-mode, authorization, and Vita-specific exception policy
@@ -20,13 +27,13 @@ not authorize a kernel or CP14 hardware experiment.
   (`0x22C9595E`) and `sceKernelSetThreadContextForVM` (`0x27E6DEDE`). This is the
   best current lead for a firmware-exported foreign-thread general-register
   mutation backend, but its signature and contract are not documented.
-- VitaSDK exposes supported user-mode performance-monitor functions in
+- VitaSDK declares user-mode performance-monitor functions in
   `psp2/perf.h`: reset, event selection, start, stop, counter read/write, and
   software increment. Most operations name a thread ID; software increment
-  takes only a counter mask. An explicitly application-owned ScePerf backend is
-  the preferred first PMU implementation; raw CP15 access is unnecessary. A
-  thread-ID parameter does not prove that the underlying counters are fully
-  virtualized or isolated per thread, so that behavior remains a hardware gate.
+  takes only a counter mask. Later retail discovery found these imports
+  unavailable in the tested runtime, so declaration and link success must not
+  be treated as runtime support. The practical path is now a narrow, leased
+  kernel provider built on the completed read-only CP15 gate.
 - Mismatch breakpoints would be useful for stepping instructions that change
   `PC`, if hardware debug eventually becomes available. They do not make the
   current hardware path safe or usable.
@@ -137,11 +144,11 @@ supported object reference/release handling first.
 
 ## Gated next work
 
-1. Hardware-gate the implemented, host-tested, opt-in ScePerf PMU backend in a
-   disposable application. Its documentation must continue to say that
-   beginning a session resets the selected thread's PMU state; it must never
-   claim to restore an unknown previous configuration. Most ScePerf operations
-   take a thread ID, but `scePerfArmPmonSoftwareIncrement` takes only a mask.
+1. Build a separately versioned kernel PMU session on top of the completed
+   read-only inventory. It must snapshot every field it changes, bind operations
+   to one CPU, verify writes, and restore the exact prior state across normal
+   release, failure, timeout, disconnect, and process exit before counters are
+   advertised to VitaProfiler.
 2. Determine the exact 3.65 `SetThreadContextForVM` prototype, context size,
    attribute requirement, process boundary, suspension rule, and VFP coverage
    through lawful static analysis before importing or calling the NID.

@@ -32,7 +32,7 @@ stacks remain unvalidated unless an individual result says otherwise.
 | stdout to GDB console (`O` packets) | Completed bounded queue, single-owner no-ack transport, restorable nonblocking stdout/stderr capture, and read-only `monitor console` queue/transport/loss statistics; the two-session retail 3.65 gates passed output, Ctrl-C, stopped-state silence, detach, reconnect, and counter inspection, with the monitor result archived in the [console/display record](hardware/gdb-monitor-console-display-3.65.json) | Add longer pressure, abrupt-disconnect, restore/retry, and shutdown hardware soaks; keep DebugNet for sustained logging |
 | Debugger monitor commands | Hardware-tested fixed read-only `qRcmd` registry for `help`, `status`, `threads`, `modules`, `console`, and `display`; bounded host tests, two raw-RSP sessions, and GDB 15.2 passed on retail 3.65 with state preservation, clean detach, and reconnect in the [console/display record](hardware/gdb-monitor-console-display-3.65.json) | Keep every future command explicit, bounded, and read-only by default |
 | Framebuffer/display diagnostics | Read-only `monitor display` metadata is host- and hardware-tested without a client-selected address or pixel read; the retail 3.65 gate reported coherent current/next 960x544 A8B8G8R8 buffers, 59.940 Hz, and advancing vcount | Keep pixel capture outside the monitor registry; add lifecycle stress and consume these diagnostics in the VitaDevDeploy display investigation |
-| Cortex-A9 PMU counters | The user-mode profiler foundation and its bounded name dictionary pass all 13 retail 3.65 checks. An explicit dual-opt-in ScePerf adapter is native-tested and Vita-linked without CP15 access; it documents that starting a session resets application-owned selected-thread PMU state and does not claim restoration of an unknown prior configuration | Hardware-gate event selection, thread scope, reset effects, cleanup retries, unsupported events, and concurrent use in a disposable profiler application before calling the adapter supported |
+| Cortex-A9 PMU counters | The user-mode profiler foundation and bounded name dictionary pass all 13 retail 3.65 checks. Both retail user-mode ScePerf loading paths failed and unresolved imports branch to zero, so direct initialization now fails closed. Kernel ABI v1.13 read-only inventory passes on retail 3.65 with the correct six-counter Cortex-A9 identity, same-core snapshots, and unchanged controls | Add a separate lease-protected kernel session which snapshots every touched register, configures only allowlisted events, verifies writes, samples, and restores exactly across normal release, timeout, error, disconnect, and process exit before advertising live PMU counters |
 | UART or named-pipe transport | Not a core requirement because VitaDebugger has direct TCP and separate DebugNet UDP | Consider optional UART only if it materially helps recovery or kernel-plugin debugging |
 
 ## Implementation order
@@ -56,11 +56,11 @@ stacks remain unvalidated unless an individual result says otherwise.
 6. Stress same-process hot module load/unload churn and automate the existing
    command-driven refresh in IDE tasks. This is dynamic-module/IDE convenience
    work; ASLR and verified-build correctness are complete.
-7. Add the Vita-side profiler TCP/file drain owner and hardware capture gate;
-   hardware-validate the opt-in ScePerf adapter and integrate the existing named
-   instrumentation and VitaGL/SceGxm hook points into real applications. Build
-   a dedicated desktop GUI on the working bounded receiver/analyzer/Perfetto
-   export pipeline.
+7. Build and hardware-gate an exact-restoring kernel PMU lease on top of the
+   completed read-only inventory, then add the Vita-side profiler TCP/file drain
+   owner and integrate the existing named instrumentation and VitaGL/SceGxm hook
+   points into real applications. Build a dedicated desktop GUI on the working
+   bounded receiver/analyzer/Perfetto export pipeline.
 8. Complete authentication/pairing, peer allowlists, packaging, CI/firmware
    coverage, licensing, and release hardening.
 9. Hardware-stress the VitaDevDeploy GPU lifecycle fix and finish interrupted-

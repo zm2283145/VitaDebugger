@@ -3,11 +3,6 @@
 #include <limits.h>
 #include <string.h>
 
-#if defined(__vita__)
-#include <psp2/kernel/threadmgr.h>
-#include <psp2/perf.h>
-#endif
-
 #define VP_VITA_PMU_OWNED_MAGIC UINT32_C(0x56504f4d)
 #define VP_VITA_PMU_COUNTER_UNUSED UINT32_MAX
 
@@ -77,6 +72,72 @@ static int vp_vita_pmu_cleanup(struct vp_vita_pmu_owned* owned)
     return reset_result;
 }
 
+static int vp_vita_pmu_event_supported(uint32_t event_code)
+{
+    /*
+     * Keep this list in lockstep with the public ScePerf event constants in
+     * psp2/perf.h.  Do not pass reserved byte values to the platform API.
+     */
+    switch (event_code) {
+    case 0x00u:
+    case 0x01u:
+    case 0x02u:
+    case 0x03u:
+    case 0x04u:
+    case 0x05u:
+    case 0x06u:
+    case 0x07u:
+    case 0x09u:
+    case 0x0au:
+    case 0x0bu:
+    case 0x0cu:
+    case 0x0du:
+    case 0x0fu:
+    case 0x10u:
+    case 0x11u:
+    case 0x12u:
+    case 0x50u:
+    case 0x51u:
+    case 0x60u:
+    case 0x61u:
+    case 0x62u:
+    case 0x63u:
+    case 0x64u:
+    case 0x65u:
+    case 0x66u:
+    case 0x67u:
+    case 0x68u:
+    case 0x6eu:
+    case 0x70u:
+    case 0x71u:
+    case 0x72u:
+    case 0x73u:
+    case 0x74u:
+    case 0x80u:
+    case 0x81u:
+    case 0x82u:
+    case 0x83u:
+    case 0x84u:
+    case 0x85u:
+    case 0x86u:
+    case 0x8au:
+    case 0x8bu:
+    case 0x90u:
+    case 0x91u:
+    case 0x92u:
+    case 0x93u:
+    case 0xa0u:
+    case 0xa1u:
+    case 0xa2u:
+    case 0xa3u:
+    case 0xa4u:
+    case 0xa5u:
+        return 1;
+    default:
+        return 0;
+    }
+}
+
 static int vp_vita_pmu_config_supported(const struct vp_pmu_config* config)
 {
     uint32_t expected_events;
@@ -93,7 +154,7 @@ static int vp_vita_pmu_config_supported(const struct vp_pmu_config* config)
     if ((config->counter_mask & ~VP_PMU_COUNTER_CYCLES) != expected_events)
         return 0;
     for (i = 0u; i < config->event_count; ++i) {
-        if (config->event_codes[i] > UINT8_MAX)
+        if (!vp_vita_pmu_event_supported(config->event_codes[i]))
             return 0;
     }
     for (; i < VP_PMU_MAX_EVENT_COUNTERS; ++i) {
@@ -136,8 +197,15 @@ static int vp_vita_pmu_acquire(void* user,
         return VP_ERROR_RESTORE_REQUIRED;
     if (owned->active != 0u)
         return VP_ERROR_BUSY;
+    physical = config->event_count;
+    if ((config->counter_mask & VP_PMU_COUNTER_CYCLES) != 0u)
+        ++physical;
+    if (physical > VP_VITA_PMU_PHYSICAL_COUNTERS_USED)
+        return VP_ERROR_INVALID_ARGUMENT;
     if (!vp_vita_pmu_claim_process_lease())
         return VP_ERROR_BUSY;
+
+    physical = 0u;
 
     owned->cycles_physical = VP_VITA_PMU_COUNTER_UNUSED;
     for (i = 0u; i < VP_PMU_MAX_EVENT_COUNTERS; ++i)
@@ -161,11 +229,6 @@ static int vp_vita_pmu_acquire(void* user,
         if (result != VP_RESULT_OK)
             goto acquire_failed;
     }
-    if (physical > VP_VITA_PMU_PHYSICAL_COUNTERS_USED) {
-        result = VP_ERROR_INVALID_ARGUMENT;
-        goto acquire_failed;
-    }
-
     result = owned->ops.start(owned->ops.user, owned->thread_id);
     if (vp_vita_pmu_record_platform_result(
             owned, VP_VITA_PMU_OPERATION_START, result) != VP_RESULT_OK) {
@@ -347,66 +410,20 @@ int vp_vita_pmu_owned_retry_orphan_cleanup(
 }
 
 #if defined(__vita__)
-static int32_t vp_vita_sceperf_get_thread_id(void* user)
-{
-    (void)user;
-    return sceKernelGetThreadId();
-}
-
-static int vp_vita_sceperf_reset(void* user, int32_t thread_id)
-{
-    (void)user;
-    return scePerfArmPmonReset(thread_id);
-}
-
-static int vp_vita_sceperf_select_event(void* user, int32_t thread_id,
-                                        uint32_t counter,
-                                        uint8_t event_code)
-{
-    (void)user;
-    return scePerfArmPmonSelectEvent(thread_id, counter, event_code);
-}
-
-static int vp_vita_sceperf_start(void* user, int32_t thread_id)
-{
-    (void)user;
-    return scePerfArmPmonStart(thread_id);
-}
-
-static int vp_vita_sceperf_stop(void* user, int32_t thread_id)
-{
-    (void)user;
-    return scePerfArmPmonStop(thread_id);
-}
-
-static int vp_vita_sceperf_get_counter(void* user, int32_t thread_id,
-                                       uint32_t counter, uint32_t* value)
-{
-    (void)user;
-    return scePerfArmPmonGetCounterValue(thread_id, counter, value);
-}
-
-static int vp_vita_sceperf_set_counter(void* user, int32_t thread_id,
-                                       uint32_t counter, uint32_t value)
-{
-    (void)user;
-    return scePerfArmPmonSetCounterValue(thread_id, counter, value);
-}
-
 int vp_vita_pmu_owned_init(struct vp_vita_pmu_owned* owned,
                            int32_t thread_id, uint32_t ownership_ack)
 {
-    const struct vp_vita_pmu_ops ops = {
-        vp_vita_sceperf_get_thread_id,
-        vp_vita_sceperf_reset,
-        vp_vita_sceperf_select_event,
-        vp_vita_sceperf_start,
-        vp_vita_sceperf_stop,
-        vp_vita_sceperf_get_counter,
-        vp_vita_sceperf_set_counter,
-        NULL,
-    };
-    return vp_vita_pmu_owned_init_with_ops(owned, &ops, thread_id,
-                                            ownership_ack);
+    (void)owned;
+    (void)thread_id;
+    (void)ownership_ack;
+
+    /*
+     * A nonzero Vita import stub is not proof that its target is callable.
+     * Retail 3.65 can leave an unresolved ScePerf stub in a nonzero loader
+     * state which still branches to address zero.  Keep this convenience path
+     * disabled until a loader-supported binding proof exists.  Applications
+     * with a verified resolver may use vp_vita_pmu_owned_init_with_ops().
+     */
+    return VP_ERROR_UNSUPPORTED;
 }
 #endif

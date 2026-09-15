@@ -28,3 +28,4 @@ vitadebug_kernel:
         - vdKernelStageThreadMutation: 0x76A3D010
         - vdKernelCommitThreadMutation: 0x76A3D011
         - vdKernelRestoreThreadMutation: 0x76A3D012
+        - vdKernelGetPmuInfo: 0x76A3D013

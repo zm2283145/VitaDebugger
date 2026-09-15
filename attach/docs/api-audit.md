@@ -1,6 +1,6 @@
 # External-attach API and architecture audit
 
-This audit covers the repository at kernel ABI `0x0001000C` and the VitaSDK
+This audit covers the repository at kernel ABI `0x0001000D` and the VitaSDK
 headers installed for the Windows development environment. It records declared
 APIs, not a hardware-safety claim.
 
@@ -21,7 +21,8 @@ Consequently, calling the existing exports from a separate broker cannot stop
 or inspect another application. The host protocol must not advertise external
 attach merely because `vdKernelGetStatus()` succeeds.
 
-This milestone does not change that implementation or ABI.
+The ABI has advanced for other companion capabilities, but this milestone does
+not change the external-attach boundary described here.
 
 ## VitaSDK declarations relevant to a safe design
 

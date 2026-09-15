@@ -326,6 +326,16 @@ static void test_release_retry_and_validation(void)
               &session, vp_vita_pmu_owned_get_provider(&owned), &config) ==
               VP_ERROR_INVALID_ARGUMENT && fake.call_count == 0u,
           "event codes outside ScePerf's uint8 range fail before mutation");
+    config.event_codes[0] = 0x08u;
+    CHECK(vp_pmu_session_begin(
+              &session, vp_vita_pmu_owned_get_provider(&owned), &config) ==
+              VP_ERROR_INVALID_ARGUMENT && fake.call_count == 0u,
+          "reserved ScePerf event codes fail before mutation");
+    config.event_codes[0] = 0xffu;
+    CHECK(vp_pmu_session_begin(
+              &session, vp_vita_pmu_owned_get_provider(&owned), &config) ==
+              VP_ERROR_INVALID_ARGUMENT && fake.call_count == 0u,
+          "undocumented ScePerf event codes fail before mutation");
     config.event_codes[0] = 0x04u;
     CHECK(vp_pmu_session_begin(
               &session, vp_vita_pmu_owned_get_provider(&owned), &config) ==
