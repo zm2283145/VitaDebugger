@@ -48,26 +48,109 @@ control registers to match exactly. Cortex-A9 `PMCR.N` must decode to exactly
 six programmable event counters. This gate establishes only that bounded PMU
 reads are available; it does not enable or configure a counter.
 
-## Promotion gates for live counters
+## Isolated mutation gate and host bridge
 
-The next implementation must be a separate lease-protected session ABI, not an
-extension which silently mutates the discovery call. Before VitaProfiler can
-advertise PMU samples, that session must prove all of the following on hardware:
+The disposable session probe has now passed a fixed lane-5, event-`0x00`
+software-increment transaction on application cores 0–2 with `17/17` read-back,
+exact gate-snapshot restoration, and no retained obligation. See the
+[per-core evidence](../../docs/hardware/profiler-pmu-session-gate-3.65.md).
 
-1. snapshot every selector, event type, count, overflow, enable, interrupt,
-   user-access, and global-control field it may change;
+A reviewed bridge adapts that session to VitaProfiler's exact-restore provider
+ABI. It retains a global lease through verification and tests normal release,
+watchdog timeout, late restoration, failed-acquire orphan cleanup, and competing
+owners.
+
+A separate versioned user/kernel transport is now implemented and build-tested
+behind default-off CMake options. Its four narrow exports negotiate an exact
+ABI, open one owner-bound lease, read one fixed-lane sample, and close with
+verified exact restoration. Every request is bound to the calling process and
+controller thread through a complete kernel-generated handle. The transport
+has no raw-register, core, lane, cycle-counter, or arbitrary-event selector.
+The ordinary experimental transport admits only the already-proved software
+increment event `0x00`.
+
+A second build switch admits only three additional Cortex-A9 event selections
+(`0x01`, `0x03`, and `0x10`) when both that switch and a per-request
+acknowledgement are present. An explicit compile value of `0` remains disabled.
+The host matrix verifies exact structure/version validation, fixed-lane
+configuration, owner isolation, stale-handle rejection, normal restoration,
+watchdog expiry, late restoration, failed-acquire orphan cleanup, real-event
+allowlisting, and the one-real-attempt-per-boot latch against the fake PMU. The
+kernel refuses unload after a real-event attempt so unload/reload cannot reset
+that latch. The fake-PMU result alone did not establish hardware behavior;
+event `0x01` subsequently passed the separate gate below.
+
+## Bounded real-event hardware gate
+
+The separately built disposable `VDCP00010` probe and matching default-off
+kernel candidate are used for this gate, never a normal production build.
+Review its generated imports and ARM code before deployment, retain physical
+recovery access, and do not run another profiler. The complete build and retail
+3.65 runbook is in the
+[PMU profiler transport gate](../../kernel/pmu-profiler-gate/README.md). The
+gate is intentionally bounded as follows:
+
+1. Use only application core 0 and fixed programmable lane 5. Test one event
+   per reboot in this order: `0x01`, `0x03`, then `0x10`. All three
+   normal-close events passed separately on 2026-09-15.
+2. Require the same completely idle baseline and complete pre-mutation
+   snapshot used by the passed software-increment gate. Write and verify a
+   checksummed durable `attempted` record before entering the kernel mutation.
+3. Use a 250 ms lease. Select the event, zero lane 5, leave PMU interrupts and
+   user-mode PMU access disabled, enable only lane 5, and read back every
+   selector, type, enable, and control field before running a short fixed
+   workload.
+4. Record the bounded count and exact transport results. A nonzero delta is
+   characterization evidence, not proof of a universal semantic or unit.
+5. Restore immediately, then require a zero close result, which the backend
+   emits only after its complete saved state passes exact restore verification.
+   Archive both durable journal slots before advancing to the next event.
+6. After all three normal releases pass, repeat `0x10` once with no explicit
+   release and require the bounded watchdog to restore at lease expiry. The
+   outer provider must acknowledge the already-restored token before another
+   lease is accepted.
+7. Any timeout, read-back mismatch, foreign PMU activity, overflow, clock
+   regression, journal ambiguity, or restore mismatch is a hard stop. Retain
+   the resident recovery path and do not clear or unload an unresolved record.
+
+The present real-event latch is intentionally boot-scoped. A future production
+re-arm must not merely clear that latch after a successful return code. It must
+require no active lease, independently verified exact restoration, a matching
+owner token and generation, and either an explicit close from that owner or
+proof that its process/thread no longer exists. That re-arm is not implemented.
+
+The three owner-attended retail-3.65 runs passed events `0x01`, `0x03`, and
+`0x10`: all transport calls succeeded, sample values were 56, 23, and 97 on
+core 0/lane 5, and every durable completion record proved exact restoration.
+The reviewed artifacts, journal slots, and screenshots are in the
+[event-0x01](../../kernel/pmu-profiler-gate/hardware-results/2026-09-15-event-01/README.md),
+[event-0x03](../../kernel/pmu-profiler-gate/hardware-results/2026-09-15-event-03/README.md),
+and [event-0x10](../../kernel/pmu-profiler-gate/hardware-results/2026-09-15-event-10/README.md)
+records. These are bounded samples, not approval for continuous sampling;
+disconnect and process-exit cleanup still require their own gates. This plan
+does not use or claim support for the unavailable public `ScePerf` route.
+
+## Remaining promotion gates for live counters
+
+The transport remains separate from the read-only discovery call. Event `0x01`
+now has both one durable immediate-close sample and a 75-read Render96EX lease.
+Before unrestricted production PMU sampling, the complete stack must still
+prove all of the following on hardware:
+
+1. retain the already-proved exact snapshot/restore scope for every field the
+   selected lane changes;
 2. bind each operation to a known CPU and prevent migration during the critical
    section;
-3. configure only a bounded allowlist of documented Cortex-A9 events;
+3. configure only the current `0x01`, `0x03`, and `0x10` Cortex-A9 allowlist;
 4. read back every write and fail closed on disagreement;
 5. restore the exact prior state on normal release, error, disconnect, process
    exit, and lease timeout;
 6. retain restoration obligations until cleanup succeeds; and
 7. refuse coexistence when ownership cannot be established safely.
 
-After that session passes, its samples can enter the existing named event ring
-and VitaProfiler TCP/file transport. Sony's unavailable `usbhostfs`/trace-host
-pipeline is not required and is not a project target.
+The Render96EX gate proves that bounded samples can enter the existing named
+event ring and VitaProfiler TCP transport. Sony's unavailable
+`usbhostfs`/trace-host pipeline is not required and is not a project target.
 
 ## Firmware scope
 

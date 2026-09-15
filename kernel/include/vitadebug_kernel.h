@@ -2,11 +2,13 @@
 
 #include <psp2/types.h>
 
+#include "vitadebug_pmu_profiler.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-#define VD_KERNEL_ABI_VERSION 0x0001000Du
+#define VD_KERNEL_ABI_VERSION 0x0001000Eu
 #define VD_KERNEL_MAX_THREADS 64
 #define VD_KERNEL_HW_CORE_COUNT 3
 #define VD_KERNEL_HW_BREAKPOINT_COUNT 6
@@ -52,6 +54,7 @@ enum vd_kernel_capability {
     VD_KERNEL_CAP_THREAD_CORE_WRITE = 1u << 9,
     VD_KERNEL_CAP_THREAD_VFP_WRITE = 1u << 10,
     VD_KERNEL_CAP_PMU_DISCOVERY = 1u << 11,
+    VD_KERNEL_CAP_PMU_PROFILER_SESSION = 1u << 12,
     VD_KERNEL_CAP_PROBE_SUSPEND = 1u << 31,
 };
 

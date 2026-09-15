@@ -11,6 +11,10 @@
 #ifdef VD_KERNEL_ENABLE_EXPERIMENTAL_HW_DEBUG
 #include "hw_debug.h"
 #endif
+#ifdef VD_KERNEL_ENABLE_EXPERIMENTAL_PMU_PROFILER_TRANSPORT
+#include "pmu_backend.h"
+#include "pmu_profiler_transport.h"
+#endif
 
 #define VD_SUSPEND_STATUS 0x1002
 #define VD_MIN_LEASE_MS 250u
@@ -56,8 +60,16 @@ static struct vd_thread_mutation_session thread_mutation_session;
 static const struct vd_thread_mutation_backend thread_mutation_backend = {0};
 static volatile int session_lock;
 static volatile int watchdog_stop;
+static volatile int watchdog_ready;
 static SceUID watchdog_thread = -1;
 static unsigned int next_token = 1;
+#ifdef VD_KERNEL_ENABLE_EXPERIMENTAL_PMU_PROFILER_TRANSPORT
+static struct vd_pmu_profiler_transport pmu_profiler_transport;
+static volatile int pmu_profiler_lock;
+static volatile int pmu_profiler_stopping = 1;
+static volatile int pmu_profiler_backend_present;
+static volatile int pmu_profiler_transport_ready;
+#endif
 
 static void lock_sessions(void)
 {
@@ -83,6 +95,34 @@ static void unlock_sessions(void)
 {
     __atomic_store_n(&session_lock, 0, __ATOMIC_SEQ_CST);
 }
+
+#ifdef VD_KERNEL_ENABLE_EXPERIMENTAL_PMU_PROFILER_TRANSPORT
+static void lock_pmu_profiler(void)
+{
+    for(;;)
+    {
+        int expected = 0;
+        if(__atomic_compare_exchange_n(&pmu_profiler_lock, &expected, 1, 0,
+                                       __ATOMIC_SEQ_CST,
+                                       __ATOMIC_SEQ_CST))
+            return;
+        ksceKernelDelayThread(VD_SESSION_LOCK_RETRY_US);
+    }
+}
+
+static int try_lock_pmu_profiler(void)
+{
+    int expected = 0;
+    return __atomic_compare_exchange_n(&pmu_profiler_lock, &expected, 1, 0,
+                                        __ATOMIC_SEQ_CST,
+                                        __ATOMIC_SEQ_CST);
+}
+
+static void unlock_pmu_profiler(void)
+{
+    __atomic_store_n(&pmu_profiler_lock, 0, __ATOMIC_SEQ_CST);
+}
+#endif
 
 static int thread_list_contains(const SceUID* threads, int count,
                                 SceUID thread)
@@ -229,6 +269,19 @@ static int watchdog_main(SceSize args, void* argp)
                 resume_session_locked();
             unlock_sessions();
         }
+#ifdef VD_KERNEL_ENABLE_EXPERIMENTAL_PMU_PROFILER_TRANSPORT
+        if(__atomic_load_n(&pmu_profiler_transport_ready,
+                           __ATOMIC_SEQ_CST) &&
+           !__atomic_load_n(&pmu_profiler_stopping, __ATOMIC_SEQ_CST) &&
+           try_lock_pmu_profiler())
+        {
+            /* This also services an ownerless backend obligation left by a
+             * failed initial snapshot while the transport itself is IDLE. */
+            (void)vdPmuProfilerTransportWatchdog(
+                &pmu_profiler_transport);
+            unlock_pmu_profiler();
+        }
+#endif
         ksceKernelDelayThread(20000);
     }
     return 0;
@@ -241,10 +294,56 @@ int module_start(SceSize args, void* argp)
 {
     (void)args;
     (void)argp;
+    __atomic_store_n(&watchdog_ready, 0, __ATOMIC_SEQ_CST);
     vdThreadMutationInit(&thread_mutation_session);
+#ifdef VD_KERNEL_ENABLE_EXPERIMENTAL_PMU_PROFILER_TRANSPORT
+    pmu_profiler_lock = 0;
+    __atomic_store_n(&pmu_profiler_backend_present, 0,
+                     __ATOMIC_SEQ_CST);
+    __atomic_store_n(&pmu_profiler_transport_ready, 0,
+                     __ATOMIC_SEQ_CST);
+    __atomic_store_n(&pmu_profiler_stopping, 1, __ATOMIC_SEQ_CST);
+    int pmu_start_result = vdPmuBackendStart();
+    if(pmu_start_result != 0)
+    {
+        /* A positive result means teardown was not proved.  Stay resident so
+         * a later module_stop can retry the backend cleanup. */
+        if(pmu_start_result > 0)
+        {
+            __atomic_store_n(&pmu_profiler_backend_present, 1,
+                             __ATOMIC_SEQ_CST);
+            return SCE_KERNEL_START_SUCCESS;
+        }
+        return SCE_KERNEL_START_FAILED;
+    }
+    __atomic_store_n(&pmu_profiler_backend_present, 1,
+                     __ATOMIC_SEQ_CST);
+    if(vdPmuProfilerTransportInit(&pmu_profiler_transport) != 0)
+    {
+        if(vdPmuBackendStop() < 0)
+            return SCE_KERNEL_START_SUCCESS;
+        __atomic_store_n(&pmu_profiler_backend_present, 0,
+                         __ATOMIC_SEQ_CST);
+        return SCE_KERNEL_START_FAILED;
+    }
+    __atomic_store_n(&pmu_profiler_transport_ready, 1,
+                     __ATOMIC_SEQ_CST);
+    __atomic_store_n(&pmu_profiler_stopping, 0, __ATOMIC_SEQ_CST);
+#endif
 #ifdef VD_KERNEL_ENABLE_EXPERIMENTAL_HW_DEBUG
     if(vdHwDebugStart() < 0)
+    {
+#ifdef VD_KERNEL_ENABLE_EXPERIMENTAL_PMU_PROFILER_TRANSPORT
+        __atomic_store_n(&pmu_profiler_stopping, 1, __ATOMIC_SEQ_CST);
+        if(vdPmuBackendStop() < 0)
+            return SCE_KERNEL_START_SUCCESS;
+        __atomic_store_n(&pmu_profiler_backend_present, 0,
+                         __ATOMIC_SEQ_CST);
+        __atomic_store_n(&pmu_profiler_transport_ready, 0,
+                         __ATOMIC_SEQ_CST);
+#endif
         return SCE_KERNEL_START_FAILED;
+    }
 #endif
     watchdog_stop = 0;
     watchdog_thread = ksceKernelCreateThread("vitadebug watchdog",
@@ -260,11 +359,33 @@ int module_start(SceSize args, void* argp)
         if(vdHwDebugStop() < 0)
         {
             /* Keep code resident if a worker could not be proven stopped. */
+#ifdef VD_KERNEL_ENABLE_EXPERIMENTAL_PMU_PROFILER_TRANSPORT
+            __atomic_store_n(&pmu_profiler_stopping, 1,
+                             __ATOMIC_SEQ_CST);
+#endif
             return SCE_KERNEL_START_SUCCESS;
         }
 #endif
+#ifdef VD_KERNEL_ENABLE_EXPERIMENTAL_PMU_PROFILER_TRANSPORT
+        __atomic_store_n(&pmu_profiler_stopping, 1, __ATOMIC_SEQ_CST);
+        lock_pmu_profiler();
+        int pmu_transport_result = vdPmuProfilerTransportShutdown(
+            &pmu_profiler_transport);
+        unlock_pmu_profiler();
+        if(pmu_transport_result < 0 || vdPmuBackendStop() < 0)
+        {
+            /* Keep code resident if exact restoration/worker teardown was not
+             * proved. */
+            return SCE_KERNEL_START_SUCCESS;
+        }
+        __atomic_store_n(&pmu_profiler_backend_present, 0,
+                         __ATOMIC_SEQ_CST);
+        __atomic_store_n(&pmu_profiler_transport_ready, 0,
+                         __ATOMIC_SEQ_CST);
+#endif
         return SCE_KERNEL_START_FAILED;
     }
+    __atomic_store_n(&watchdog_ready, 1, __ATOMIC_SEQ_CST);
     return SCE_KERNEL_START_SUCCESS;
 }
 
@@ -272,6 +393,33 @@ int module_stop(SceSize args, void* argp)
 {
     (void)args;
     (void)argp;
+#ifdef VD_KERNEL_ENABLE_EXPERIMENTAL_PMU_PROFILER_TRANSPORT
+    __atomic_store_n(&pmu_profiler_stopping, 1, __ATOMIC_SEQ_CST);
+    if(__atomic_load_n(&pmu_profiler_transport_ready,
+                       __ATOMIC_SEQ_CST))
+    {
+        lock_pmu_profiler();
+        int pmu_transport_result = vdPmuProfilerTransportShutdown(
+            &pmu_profiler_transport);
+        unlock_pmu_profiler();
+        if(pmu_transport_result < 0)
+        {
+            __atomic_store_n(&pmu_profiler_stopping, 0,
+                             __ATOMIC_SEQ_CST);
+            return SCE_KERNEL_STOP_FAIL;
+        }
+        __atomic_store_n(&pmu_profiler_transport_ready, 0,
+                         __ATOMIC_SEQ_CST);
+    }
+    if(__atomic_load_n(&pmu_profiler_backend_present,
+                       __ATOMIC_SEQ_CST))
+    {
+        if(vdPmuBackendStop() < 0)
+            return SCE_KERNEL_STOP_FAIL;
+        __atomic_store_n(&pmu_profiler_backend_present, 0,
+                         __ATOMIC_SEQ_CST);
+    }
+#endif
 #ifdef VD_KERNEL_ENABLE_EXPERIMENTAL_HW_DEBUG
     /* Keep the watchdog alive if exact hardware-state restoration fails. */
     if(vdHwDebugStop() < 0)
@@ -297,6 +445,7 @@ int module_stop(SceSize args, void* argp)
      * unload attempt fail with HW_BUSY; in that case the resident plugin must
      * retain its recovery thread for the caller's next cleanup attempt.
      */
+    __atomic_store_n(&watchdog_ready, 0, __ATOMIC_SEQ_CST);
     __atomic_store_n(&watchdog_stop, 1, __ATOMIC_SEQ_CST);
     if(watchdog_thread >= 0)
     {
@@ -319,27 +468,41 @@ int vdKernelGetStatus(struct vd_kernel_status* status)
     uint32_t syscall_state;
     ENTER_SYSCALL(syscall_state);
 
+    const int lease_watchdog_ready =
+        __atomic_load_n(&watchdog_ready, __ATOMIC_SEQ_CST);
     unsigned int capabilities = VD_KERNEL_CAP_THREAD_LIST |
-                                VD_KERNEL_CAP_THREAD_CONTROL |
-                                VD_KERNEL_CAP_THREAD_REGISTERS |
-                                VD_KERNEL_CAP_STOP_RECONCILE |
                                 VD_KERNEL_CAP_HW_DEBUG_DISCOVERY |
-                                VD_KERNEL_CAP_THREAD_MUTATION_LIFECYCLE |
-                                VD_KERNEL_CAP_PMU_DISCOVERY |
-                                VD_KERNEL_CAP_PROBE_SUSPEND;
-    unsigned int mutation_banks = vdThreadMutationSupportedBanks(
-        &thread_mutation_backend);
-    if((mutation_banks & VD_KERNEL_THREAD_MUTATION_CORE) != 0)
-        capabilities |= VD_KERNEL_CAP_THREAD_CORE_WRITE;
-    if((mutation_banks & VD_KERNEL_THREAD_MUTATION_VFP) != 0)
-        capabilities |= VD_KERNEL_CAP_THREAD_VFP_WRITE;
+                                VD_KERNEL_CAP_PMU_DISCOVERY;
+    if(lease_watchdog_ready)
+    {
+        capabilities |= VD_KERNEL_CAP_THREAD_CONTROL |
+                        VD_KERNEL_CAP_THREAD_REGISTERS |
+                        VD_KERNEL_CAP_STOP_RECONCILE |
+                        VD_KERNEL_CAP_THREAD_MUTATION_LIFECYCLE |
+                        VD_KERNEL_CAP_PROBE_SUSPEND;
+        unsigned int mutation_banks = vdThreadMutationSupportedBanks(
+            &thread_mutation_backend);
+        if((mutation_banks & VD_KERNEL_THREAD_MUTATION_CORE) != 0)
+            capabilities |= VD_KERNEL_CAP_THREAD_CORE_WRITE;
+        if((mutation_banks & VD_KERNEL_THREAD_MUTATION_VFP) != 0)
+            capabilities |= VD_KERNEL_CAP_THREAD_VFP_WRITE;
+    }
 #ifdef VD_KERNEL_ENABLE_EXPERIMENTAL_VFP_SNAPSHOT
-    capabilities |= VD_KERNEL_CAP_THREAD_VFP_REGISTERS;
+    if(lease_watchdog_ready)
+        capabilities |= VD_KERNEL_CAP_THREAD_VFP_REGISTERS;
 #endif
 #ifdef VD_KERNEL_ENABLE_EXPERIMENTAL_HW_DEBUG
-    if(vdHwDebugReady())
+    if(lease_watchdog_ready && vdHwDebugReady())
         capabilities |= VD_KERNEL_CAP_HW_BREAKPOINT |
                         VD_KERNEL_CAP_HW_WATCHPOINT;
+#endif
+#ifdef VD_KERNEL_ENABLE_EXPERIMENTAL_PMU_PROFILER_TRANSPORT
+    if(lease_watchdog_ready &&
+       __atomic_load_n(&pmu_profiler_transport_ready,
+                       __ATOMIC_SEQ_CST) &&
+       !__atomic_load_n(&pmu_profiler_stopping, __ATOMIC_SEQ_CST) &&
+       vdPmuBackendReady())
+        capabilities |= VD_KERNEL_CAP_PMU_PROFILER_SESSION;
 #endif
     const struct vd_kernel_status kernel_status = {
         .abi_version = VD_KERNEL_ABI_VERSION,
@@ -806,6 +969,196 @@ int vdKernelGetPmuInfo(struct vd_kernel_pmu_info* info)
                                                sizeof(kernel_info));
     EXIT_SYSCALL(syscall_state);
     return result;
+}
+
+int vdKernelPmuProfilerGetInfo(struct vd_kernel_pmu_profiler_info* info)
+{
+    uint32_t syscall_state;
+    ENTER_SYSCALL(syscall_state);
+#ifdef VD_KERNEL_ENABLE_EXPERIMENTAL_PMU_PROFILER_TRANSPORT
+    if(!__atomic_load_n(&pmu_profiler_transport_ready,
+                        __ATOMIC_SEQ_CST) ||
+       __atomic_load_n(&pmu_profiler_stopping, __ATOMIC_SEQ_CST))
+    {
+        EXIT_SYSCALL(syscall_state);
+        return VD_KERNEL_ERROR_PMU_PROFILER_DISABLED;
+    }
+    if(!info)
+    {
+        EXIT_SYSCALL(syscall_state);
+        return VD_KERNEL_ERROR_PMU_PROFILER_INVALID;
+    }
+    struct vd_kernel_pmu_profiler_info kernel_info;
+    int result = ksceKernelMemcpyUserToKernel(&kernel_info, info,
+                                               sizeof(kernel_info));
+    if(result >= 0)
+    {
+        lock_pmu_profiler();
+        if(__atomic_load_n(&pmu_profiler_stopping, __ATOMIC_SEQ_CST))
+            result = VD_KERNEL_ERROR_PMU_PROFILER_DISABLED;
+        else
+            result = vdPmuProfilerTransportGetInfo(
+                &pmu_profiler_transport, &kernel_info);
+        unlock_pmu_profiler();
+    }
+    if(result >= 0)
+        result = ksceKernelMemcpyKernelToUser(info, &kernel_info,
+                                               sizeof(kernel_info));
+    EXIT_SYSCALL(syscall_state);
+    return result;
+#else
+    (void)info;
+    EXIT_SYSCALL(syscall_state);
+    return VD_KERNEL_ERROR_PMU_PROFILER_DISABLED;
+#endif
+}
+
+int vdKernelPmuProfilerOpen(
+    const struct vd_kernel_pmu_profiler_open_request* request,
+    struct vd_kernel_pmu_profiler_handle* handle)
+{
+    uint32_t syscall_state;
+    ENTER_SYSCALL(syscall_state);
+#ifdef VD_KERNEL_ENABLE_EXPERIMENTAL_PMU_PROFILER_TRANSPORT
+    if(!__atomic_load_n(&pmu_profiler_transport_ready,
+                        __ATOMIC_SEQ_CST) ||
+       __atomic_load_n(&pmu_profiler_stopping, __ATOMIC_SEQ_CST))
+    {
+        EXIT_SYSCALL(syscall_state);
+        return VD_KERNEL_ERROR_PMU_PROFILER_DISABLED;
+    }
+    if(!request || !handle)
+    {
+        EXIT_SYSCALL(syscall_state);
+        return VD_KERNEL_ERROR_PMU_PROFILER_INVALID;
+    }
+    struct vd_kernel_pmu_profiler_open_request kernel_request;
+    struct vd_kernel_pmu_profiler_handle kernel_handle;
+    int result = ksceKernelMemcpyUserToKernel(
+        &kernel_request, request, sizeof(kernel_request));
+    const SceUID caller_pid = ksceKernelGetProcessId();
+    const SceUID caller_thread = ksceKernelGetThreadId();
+    if(result >= 0)
+    {
+        lock_pmu_profiler();
+        if(__atomic_load_n(&pmu_profiler_stopping, __ATOMIC_SEQ_CST))
+            result = VD_KERNEL_ERROR_PMU_PROFILER_DISABLED;
+        else
+            result = vdPmuProfilerTransportOpen(
+                &pmu_profiler_transport, caller_pid, caller_thread,
+                &kernel_request, &kernel_handle);
+        if(result >= 0)
+        {
+            const int copy_result = ksceKernelMemcpyKernelToUser(
+                handle, &kernel_handle, sizeof(kernel_handle));
+            if(copy_result < 0)
+            {
+                /* The caller never received its handle.  Restore immediately;
+                 * a failed restore remains owned by the watchdog. */
+                (void)vdPmuProfilerTransportClose(
+                    &pmu_profiler_transport, caller_pid, caller_thread,
+                    &kernel_handle);
+                result = copy_result;
+            }
+        }
+        unlock_pmu_profiler();
+    }
+    EXIT_SYSCALL(syscall_state);
+    return result;
+#else
+    (void)request;
+    (void)handle;
+    EXIT_SYSCALL(syscall_state);
+    return VD_KERNEL_ERROR_PMU_PROFILER_DISABLED;
+#endif
+}
+
+int vdKernelPmuProfilerRead(
+    const struct vd_kernel_pmu_profiler_handle* handle,
+    struct vd_kernel_pmu_profiler_sample* sample)
+{
+    uint32_t syscall_state;
+    ENTER_SYSCALL(syscall_state);
+#ifdef VD_KERNEL_ENABLE_EXPERIMENTAL_PMU_PROFILER_TRANSPORT
+    if(!__atomic_load_n(&pmu_profiler_transport_ready,
+                        __ATOMIC_SEQ_CST) ||
+       __atomic_load_n(&pmu_profiler_stopping, __ATOMIC_SEQ_CST))
+    {
+        EXIT_SYSCALL(syscall_state);
+        return VD_KERNEL_ERROR_PMU_PROFILER_DISABLED;
+    }
+    if(!handle || !sample)
+    {
+        EXIT_SYSCALL(syscall_state);
+        return VD_KERNEL_ERROR_PMU_PROFILER_INVALID;
+    }
+    struct vd_kernel_pmu_profiler_handle kernel_handle;
+    struct vd_kernel_pmu_profiler_sample kernel_sample;
+    int result = ksceKernelMemcpyUserToKernel(
+        &kernel_handle, handle, sizeof(kernel_handle));
+    if(result >= 0)
+    {
+        lock_pmu_profiler();
+        if(__atomic_load_n(&pmu_profiler_stopping, __ATOMIC_SEQ_CST))
+            result = VD_KERNEL_ERROR_PMU_PROFILER_DISABLED;
+        else
+            result = vdPmuProfilerTransportRead(
+                &pmu_profiler_transport, ksceKernelGetProcessId(),
+                ksceKernelGetThreadId(), &kernel_handle, &kernel_sample);
+        unlock_pmu_profiler();
+    }
+    if(result >= 0)
+        result = ksceKernelMemcpyKernelToUser(sample, &kernel_sample,
+                                               sizeof(kernel_sample));
+    EXIT_SYSCALL(syscall_state);
+    return result;
+#else
+    (void)handle;
+    (void)sample;
+    EXIT_SYSCALL(syscall_state);
+    return VD_KERNEL_ERROR_PMU_PROFILER_DISABLED;
+#endif
+}
+
+int vdKernelPmuProfilerClose(
+    const struct vd_kernel_pmu_profiler_handle* handle)
+{
+    uint32_t syscall_state;
+    ENTER_SYSCALL(syscall_state);
+#ifdef VD_KERNEL_ENABLE_EXPERIMENTAL_PMU_PROFILER_TRANSPORT
+    if(!__atomic_load_n(&pmu_profiler_transport_ready,
+                        __ATOMIC_SEQ_CST) ||
+       __atomic_load_n(&pmu_profiler_stopping, __ATOMIC_SEQ_CST))
+    {
+        EXIT_SYSCALL(syscall_state);
+        return VD_KERNEL_ERROR_PMU_PROFILER_DISABLED;
+    }
+    if(!handle)
+    {
+        EXIT_SYSCALL(syscall_state);
+        return VD_KERNEL_ERROR_PMU_PROFILER_INVALID;
+    }
+    struct vd_kernel_pmu_profiler_handle kernel_handle;
+    int result = ksceKernelMemcpyUserToKernel(
+        &kernel_handle, handle, sizeof(kernel_handle));
+    if(result >= 0)
+    {
+        lock_pmu_profiler();
+        if(__atomic_load_n(&pmu_profiler_stopping, __ATOMIC_SEQ_CST))
+            result = VD_KERNEL_ERROR_PMU_PROFILER_DISABLED;
+        else
+            result = vdPmuProfilerTransportClose(
+                &pmu_profiler_transport, ksceKernelGetProcessId(),
+                ksceKernelGetThreadId(), &kernel_handle);
+        unlock_pmu_profiler();
+    }
+    EXIT_SYSCALL(syscall_state);
+    return result;
+#else
+    (void)handle;
+    EXIT_SYSCALL(syscall_state);
+    return VD_KERNEL_ERROR_PMU_PROFILER_DISABLED;
+#endif
 }
 
 int vdKernelGetThreadRegisters(unsigned int token, SceUID target_user_thread,

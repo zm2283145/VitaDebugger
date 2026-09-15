@@ -2,16 +2,19 @@
 
 Date: 2026-09-14
 
-This record separates three different questions which must not be conflated:
+This record separates four different questions which must not be conflated:
 
 1. whether VitaSDK's user-mode `ScePerf` imports are callable;
 2. whether the Cortex-A9 PMU registers can be read safely by VitaDebugger's
    kernel companion; and
-3. whether VitaProfiler may configure counters and later restore their exact
-   prior state.
+3. whether an isolated VitaDebugger kernel session can configure one bounded
+   counter transaction and restore its exact prior state; and
+4. whether the production VitaProfiler integration may run arbitrary events
+   continuously.
 
-On the tested retail 3.65 system the answers are **no**, **yes**, and **not yet**
-respectively. Enso_ex version spoofing made
+On the tested retail 3.65 system the answers are **no**, **yes**, **yes for the
+narrow lane-5 software-increment gate**, and **not yet**, respectively. Enso_ex
+version spoofing made
 `sceKernelGetSystemSwVersion()` report 3.74 during discovery; the device's
 actual system-software baseline remained retail 3.65.
 
@@ -88,15 +91,57 @@ The plugin and probe hashes were:
 ## What this proves
 
 The tested retail kernel permits a narrowly bounded companion syscall to read
-the Cortex-A9 PMU identity and control inventory without changing it. That is
-enough to proceed with a separately versioned PMU session design.
+the Cortex-A9 PMU identity and control inventory without changing it. That
+enabled the separately versioned PMU session design and isolated write gate.
 
-It does **not** yet prove that VitaDebugger can safely enable a counter. The
-next gate must claim one CPU, snapshot every field it changes, configure and
-read an allowlisted event, verify every write, and restore the exact snapshot
-on release, error, timeout, disconnect, and process exit. Live PMU profiler
-support remains disabled until those restoration tests pass.
+## Isolated lane-5 write/restore gate: passed
 
-Sony's debug-host trace transport is not needed. Once the leased PMU provider
-passes, samples will use VitaProfiler's own bounded event ring and TCP/file
-transport.
+The follow-up disposable probe then passed on application cores 0, 1, and 2.
+On each core it required an idle PMU, selected only programmable lane 5,
+configured architectural software-increment event `0x00`, issued exactly 17
+`PMSWINC` writes, read back `17/17`, and exactly restored the original gate
+snapshot (shared controls, selector, and selected lane 5). Lanes 0 through 4
+were deliberately not read. Every final record reported stage 7, zero syscall/journal/
+operation/restore results, `ready=1`, and `obligation=0`. The cumulative
+passed-core masks progressed through `0x1`, `0x3`, and `0x7`.
+
+The exact artifact hashes, per-core revisions and MPIDRs, journal hashes, and
+scope are recorded in the
+[isolated PMU session hardware evidence](profiler-pmu-session-gate-3.65.md).
+
+This proves the first deterministic PMU write/read/restore transaction, not
+general profiler support. Live PMU counters remain disabled until the
+production kernel ABI and provider validate allowlisted real events, repeated
+sampling, and exact cleanup on normal release, error, timeout, disconnect, and
+process exit. Cycle-counter use and coexistence with another PMU owner also
+remain unproven.
+
+Sony's debug-host trace transport is not needed. Once the production leased PMU
+provider passes its remaining gates, samples will use VitaProfiler's own bounded
+event ring and TCP/file transport.
+
+## Allowlisted real events: passed
+
+On 2026-09-15 the separately gated profiler transport completed one bounded
+event-`0x01` transaction on application core 0, programmable lane 5. Its open,
+read, close, affinity-restore, and journal results were all successful; the
+sample value was 56 and the durable completion record proved exact restoration.
+See the [event-0x01 hardware record](../../kernel/pmu-profiler-gate/hardware-results/2026-09-15-event-01/README.md).
+
+Two later fresh-boot gates passed the remaining allowlisted events on the same
+fixed core and lane. Event `0x03` (L1 data-cache miss/refill) returned 23 and
+event `0x10` (branch misprediction) returned 97; both completion journals
+proved exact restoration. See the
+[event-0x03](../../kernel/pmu-profiler-gate/hardware-results/2026-09-15-event-03/README.md)
+and [event-0x10](../../kernel/pmu-profiler-gate/hardware-results/2026-09-15-event-10/README.md)
+records. All three normal-close events now pass. Repeated leases/re-arm,
+competing ownership, and watchdog/disconnect/process-exit recovery remain
+separate promotion gates.
+
+A later fresh-boot Render96EX capture advanced `0x01` from one read to 75
+bounded reads within a 5,000 ms lease. All samples entered the named TCP trace,
+the last raw core-wide value was 6,822, and close returned zero with no active
+lease and a completed PMU window. This proves bounded repeated reads and normal
+close for that event; it does not prove another event, repeated leases, re-arm,
+or an abnormal-owner cleanup path. See the
+[Render96EX capture record](profiler-render96ex-head-baseline-2026-09-15.md).

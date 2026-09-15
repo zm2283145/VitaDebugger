@@ -371,6 +371,7 @@ static void test_selector_restore_failure_retains_obligation(void)
     CHECK(vdPmuBackendRecover() == 0);
     CHECK(!vdPmuBackendHostTestSelectorRestorePending());
     CHECK(!vdPmuBackendHasRestoreObligation());
+    CHECK(vdPmuBackendReady());
     CHECK(memcmp(&fake.state, &before, sizeof(before)) == 0);
 }
 
@@ -428,7 +429,37 @@ static void test_timeout_can_complete_late_and_be_reaped(void)
     CHECK(!vdPmuBackendHasRestoreObligation());
     CHECK(vdPmuBackendRecover() == 0);
     CHECK(!vdPmuBackendHostTestIsInflight());
+    CHECK(vdPmuBackendReady());
     CHECK(memcmp(&fake.state, &before, sizeof(before)) == 0);
+}
+
+static void test_negative_late_command_cannot_reenable_on_second_recover(void)
+{
+    struct fake_pmu fake;
+    fake_init(&fake, 0);
+    struct vd_pmu_session_backend backend = start_backend(&fake);
+    struct vd_pmu_snapshot snapshot;
+
+    vdPmuBackendHostTestSetDispatchMode(
+        VD_PMU_BACKEND_HOST_DISPATCH_TIMEOUT);
+    CHECK(backend.snapshot(backend.context, 0, &snapshot) ==
+          VD_PMU_BACKEND_ERROR_TIMEOUT);
+    CHECK(vdPmuBackendHostTestIsInflight());
+    CHECK(vdPmuBackendRecoveryPending());
+    CHECK(!vdPmuBackendReady());
+
+    fake.state.midr = 0;
+    CHECK(vdPmuBackendHostTestCompleteInflight() ==
+          VD_PMU_BACKEND_ERROR_CORE);
+    CHECK(vdPmuBackendRecover() == VD_PMU_BACKEND_ERROR_CORE);
+    CHECK(!vdPmuBackendHostTestIsInflight());
+    CHECK(!vdPmuBackendRecoveryPending());
+    CHECK(!vdPmuBackendReady());
+
+    /* No second call may reinterpret the absence of flags as fresh proof. */
+    fake.state.midr = TEST_MIDR;
+    CHECK(vdPmuBackendRecover() == 0);
+    CHECK(!vdPmuBackendReady());
 }
 
 static void test_signal_failure_has_provable_no_write_restore(void)
@@ -492,6 +523,7 @@ int main(void)
     test_selector_restore_failure_retains_obligation();
     test_external_conflict_preserves_restore_obligation();
     test_timeout_can_complete_late_and_be_reaped();
+    test_negative_late_command_cannot_reenable_on_second_recover();
     test_signal_failure_has_provable_no_write_restore();
     test_not_idle_and_preconfigure_conflict_are_non_mutating();
     vdPmuBackendHostTestReset();

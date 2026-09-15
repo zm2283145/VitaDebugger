@@ -62,6 +62,9 @@ int vdPmuBackendHostTestInit(
     const struct vd_pmu_backend_host_register_ops* ops);
 void vdPmuBackendHostTestReset(void);
 
+/* Advance only the host harness monotonic clock. */
+void vdPmuBackendHostTestAdvanceTimeUs(uint64_t microseconds);
+
 /* Control and resolve the deliberately injected asynchronous paths. */
 void vdPmuBackendHostTestSetDispatchMode(
     enum vd_pmu_backend_host_dispatch_mode mode);

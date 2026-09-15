@@ -688,16 +688,33 @@ static int snapshot_is_idle(const struct vd_pmu_snapshot* snapshot)
     return 1;
 }
 
+static int backend_event_allowed(
+    const struct vd_pmu_event_metadata* event)
+{
+    if(!event)
+        return 0;
+    if(event->event_id == VD_PMU_EVENT_SOFTWARE_INCREMENT &&
+       event->event_code == VD_PMU_BACKEND_SOFTWARE_EVENT)
+        return 1;
+#if VD_PMU_PROFILER_REAL_EVENTS_COMPILED
+    return (event->event_id == VD_PMU_EVENT_ICACHE_MISS &&
+            event->event_code == UINT32_C(0x01)) ||
+           (event->event_id == VD_PMU_EVENT_DCACHE_MISS &&
+            event->event_code == UINT32_C(0x03)) ||
+           (event->event_id == VD_PMU_EVENT_BRANCH_MISPREDICT &&
+            event->event_code == UINT32_C(0x10));
+#else
+    return 0;
+#endif
+}
+
 static int configuration_valid(
     const struct vd_pmu_configuration* configuration,
     const struct vd_pmu_snapshot* original)
 {
     if(!configuration || !original || configuration->flags != 0 ||
        configuration->event_count != 1u || configuration->reserved != 0 ||
-       configuration->events[0].event_id !=
-           VD_PMU_EVENT_SOFTWARE_INCREMENT ||
-       configuration->events[0].event_code !=
-           VD_PMU_BACKEND_SOFTWARE_EVENT ||
+       !backend_event_allowed(&configuration->events[0]) ||
        configuration->events[0].physical_counter !=
            VD_PMU_BACKEND_COUNTER ||
        configuration->events[0].reserved != 0)
@@ -769,10 +786,18 @@ static int do_configure(uint32_t core,
     write_pmcntenclr(VD_PMU_BACKEND_COUNTER_MASK);
     write_pmintenclr(VD_PMU_BACKEND_COUNTER_MASK);
     write_pmselr(VD_PMU_BACKEND_COUNTER);
-    write_pmxevtyper(VD_PMU_BACKEND_SOFTWARE_EVENT);
+    write_pmxevtyper(configuration->events[0].event_code);
     write_pmxevcntr(0);
     if((read_pmovsr() & VD_PMU_BACKEND_COUNTER_MASK) != 0)
         write_pmovsr(VD_PMU_BACKEND_COUNTER_MASK);
+    /* Real events may increment as soon as the lane is enabled.  Prove the
+     * selector and zero write while it is still disabled rather than
+     * incorrectly requiring a zero value in the later configured snapshot. */
+    if((read_pmxevtyper() & VD_PMU_BACKEND_EVENT_TYPE_MASK) !=
+           configuration->events[0].event_code ||
+       read_pmxevcntr() != 0 ||
+       (read_pmovsr() & VD_PMU_BACKEND_COUNTER_MASK) != 0)
+        return VD_PMU_BACKEND_ERROR_VERIFY;
     write_pmcntenset(VD_PMU_BACKEND_COUNTER_MASK);
     if((configuration->control_flags &
         VD_PMU_CONFIGURATION_ENABLE_GLOBAL) != 0)
@@ -795,8 +820,13 @@ static int do_configure(uint32_t core,
     expected.raw_pmintenset &= ~VD_PMU_BACKEND_COUNTER_MASK;
     expected.raw_pmovsr &= ~VD_PMU_BACKEND_COUNTER_MASK;
     expected.raw_pmxevtyper[VD_PMU_BACKEND_COUNTER] =
-        VD_PMU_BACKEND_SOFTWARE_EVENT;
-    expected.raw_pmxevcntr[VD_PMU_BACKEND_COUNTER] = 0;
+        configuration->events[0].event_code;
+    if(configuration->events[0].event_id ==
+       VD_PMU_EVENT_SOFTWARE_INCREMENT)
+        expected.raw_pmxevcntr[VD_PMU_BACKEND_COUNTER] = 0;
+    else
+        expected.raw_pmxevcntr[VD_PMU_BACKEND_COUNTER] =
+            verification.raw_pmxevcntr[VD_PMU_BACKEND_COUNTER];
     if(!snapshot_equal(&verification, &expected))
         return VD_PMU_BACKEND_ERROR_VERIFY;
 
@@ -855,7 +885,7 @@ static int do_read(uint32_t core,
     const uint32_t count = read_pmxevcntr();
     write_pmselr(selector);
     if((type & VD_PMU_BACKEND_EVENT_TYPE_MASK) !=
-           VD_PMU_BACKEND_SOFTWARE_EVENT ||
+           configuration->events[0].event_code ||
        read_pmselr() != selector)
         return VD_PMU_BACKEND_ERROR_VERIFY;
 
@@ -1325,6 +1355,13 @@ static int callback_restore(void* context, uint32_t core,
                sizeof(g_pmu.command.original));
     int result = dispatch_locked(VD_PMU_BACKEND_COMMAND_RESTORE,
                                  core, 1);
+    /* A timed-out command disables ordinary dispatch until its ambiguous
+     * mutation has been recovered.  A successful, idempotent restore proves
+     * that both the retained backend record and any late command are clear;
+     * re-enable the following exact-verification snapshot. */
+    if(result >= 0 && g_pmu.started && !g_pmu.command_inflight &&
+       !g_pmu.restore_needed && !g_pmu.selector_restore_needed)
+        __atomic_store_n(&g_pmu.ready, 1, __ATOMIC_SEQ_CST);
     unlock_engine();
     return result;
 }
@@ -1565,8 +1602,28 @@ int vdPmuBackendHasRestoreObligation(void)
     return pending;
 }
 
+int vdPmuBackendRecoveryPending(void)
+{
+    lock_engine();
+    const int pending = g_pmu.started &&
+        (__atomic_load_n(&g_pmu.command_inflight, __ATOMIC_ACQUIRE) ||
+         g_pmu.restore_needed != 0 ||
+         g_pmu.selector_restore_needed != 0);
+    unlock_engine();
+    return pending;
+}
+
+static void mark_ready_after_recovery_locked(void)
+{
+    if(g_pmu.started && !g_pmu.active && !g_pmu.restore_needed &&
+       !g_pmu.selector_restore_needed &&
+       !__atomic_load_n(&g_pmu.command_inflight, __ATOMIC_ACQUIRE))
+        __atomic_store_n(&g_pmu.ready, 1, __ATOMIC_SEQ_CST);
+}
+
 int vdPmuBackendRecover(void)
 {
+    int recovery_proved = 0;
     lock_engine();
     if(!g_pmu.started)
     {
@@ -1593,6 +1650,8 @@ int vdPmuBackendRecover(void)
             unlock_engine();
             return inflight_result;
         }
+        if(inflight_result >= 0)
+            recovery_proved = 1;
     }
     if(g_pmu.selector_restore_needed)
     {
@@ -1604,9 +1663,16 @@ int vdPmuBackendRecover(void)
             unlock_engine();
             return selector_result;
         }
+        recovery_proved = 1;
     }
     if(!g_pmu.restore_needed)
     {
+        /* Never turn readiness back on merely because a later caller finds
+         * no flags.  This invocation must have reaped a successful command
+         * or completed an exact selector/full restore.  Otherwise a prior
+         * completed negative command remains fail-closed until unload. */
+        if(recovery_proved)
+            mark_ready_after_recovery_locked();
         unlock_engine();
         return 0;
     }
@@ -1617,6 +1683,8 @@ int vdPmuBackendRecover(void)
                sizeof(g_pmu.command.original));
     int result = dispatch_locked(VD_PMU_BACKEND_COMMAND_RESTORE,
                                  g_pmu.saved_core, 1);
+    if(result >= 0)
+        mark_ready_after_recovery_locked();
     unlock_engine();
     return result;
 }
@@ -1686,6 +1754,14 @@ void vdPmuBackendHostTestReset(void)
     g_host_dispatch_mode = VD_PMU_BACKEND_HOST_DISPATCH_INLINE;
     g_host_current_core = 0;
     g_host_time_us = 0;
+}
+
+void vdPmuBackendHostTestAdvanceTimeUs(uint64_t microseconds)
+{
+    if(UINT64_MAX - g_host_time_us < microseconds)
+        g_host_time_us = UINT64_MAX;
+    else
+        g_host_time_us += microseconds;
 }
 
 void vdPmuBackendHostTestSetDispatchMode(

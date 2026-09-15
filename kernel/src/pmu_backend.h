@@ -8,6 +8,16 @@
 extern "C" {
 #endif
 
+/* Treat only the documented numeric value 1 as enabled.  In particular,
+ * build systems commonly emit -D...=0 for disabled options; presence alone
+ * must not open the real-event path. */
+#if defined(VD_KERNEL_ENABLE_EXPERIMENTAL_PMU_PROFILER_REAL_EVENTS) && \
+    ((VD_KERNEL_ENABLE_EXPERIMENTAL_PMU_PROFILER_REAL_EVENTS + 0) == 1)
+#define VD_PMU_PROFILER_REAL_EVENTS_COMPILED 1
+#else
+#define VD_PMU_PROFILER_REAL_EVENTS_COMPILED 0
+#endif
+
 #ifdef VD_KERNEL_ENABLE_EXPERIMENTAL_PMU_SESSION
 
 #define VD_PMU_BACKEND_ABI_VERSION 1u
@@ -76,6 +86,11 @@ int vdPmuBackendStop(void);
 
 int vdPmuBackendReady(void);
 int vdPmuBackendHasRestoreObligation(void);
+
+/* True while the watchdog must call vdPmuBackendRecover().  This is broader
+ * than HasRestoreObligation: a timed-out worker command must be reaped even
+ * when it completed without leaving a selector/full-snapshot restore flag. */
+int vdPmuBackendRecoveryPending(void);
 
 /* Retry the backend's retained exact-restore record.  This is suitable for a
  * plugin watchdog after an ambiguous callback timeout. */

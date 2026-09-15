@@ -86,9 +86,38 @@ The normal Vita cross-build proves the fail-closed adapter and portable
 provider compile for Vita. The separate zero-call discovery target includes
 VitaSDK's `psp2/perf.h` and links the six adapter-used stubs solely to inspect
 their runtime loader state. The exact hardware evidence is in
-[PMU hardware gate](pmu-hardware-gate.md). The practical next backend is a
-separate exact-restore provider mediated by the optional VitaDebugger kernel
-companion.
+[PMU hardware gate](pmu-hardware-gate.md).
+
+The optional companion now has a reviewed host/build-only exact-restore
+adapter in `kernel/src/pmu_profiler_bridge.c`. It binds one owner, application
+core, fixed physical lane 5, and 250–5000 ms lease; retains a linked-copy
+global lease through restore verification; and exposes watchdog and
+failed-acquire cleanup. It is not compiled into the normal Vita kernel target
+and has no production kernel export.
+
+Software increment (`0x00`, `cpu.pmu.software_increment`) is its only default
+selection. A deliberately small real-event catalog is prepared for later
+hardware gating:
+
+- `0x01` — `cpu.pmu.icache_miss`
+- `0x03` — `cpu.pmu.dcache_miss`
+- `0x10` — `cpu.pmu.branch_mispredict`
+
+Those three selections require both
+`VD_KERNEL_ENABLE_EXPERIMENTAL_PMU_PROFILER_REAL_EVENTS=1` at build time and
+`VD_PMU_PROFILER_BRIDGE_CONFIG_ALLOW_REAL_EVENTS` in that bridge instance.
+Undefined and explicitly `=0` builds reject the acknowledgement itself;
+experimental `=1` builds still reject real events unless the caller opts in.
+The backend independently rechecks the same ID/code pairs before its first
+write. Cycles, multiple lanes, and every other event remain rejected.
+
+`vdPmuProfilerBridgePrepareEvent()` validates one enabled selection, registers
+its stable name in an unsealed VitaProfiler dictionary, and returns the
+matching one-lane `vp_pmu_config` and `vp_pmu_name_ids`. It performs no PMU
+access. Host tests take that result through provider acquire/read, then
+`vp_pmu_record_sample()`, and verify the ordinary named counter in the profiler
+ring. This is build-time integration evidence only, not a usable user/kernel
+transport; that boundary still needs an independently reviewed versioned ABI.
 
 ## Generic provider contract
 
@@ -143,5 +172,13 @@ explicit owned-reset opt-in, physical counter mapping, process-local conflict
 handling, raw error reporting, failed-acquire cleanup, retained release
 obligations, and successful retry. The Vita cross-build proves the fail-closed
 adapter compiles for the target. Retail 3.65 read-only discovery rejected the
-direct ScePerf route; kernel PMU inventory is hardware-tested, but real counter
-mutation and sampling still require the separate exact-restoration gate.
+direct ScePerf route. Kernel PMU inventory and the isolated lane-5 mutation
+gate are hardware-tested, while the host-only kernel/provider bridge passes
+normal release, timeout, late-restore, failed-acquire cleanup, default-off
+real-event gating, the three-event catalog, stable dictionary names, and named
+ring publication. The default-off transport has since passed one bounded
+event-`0x01` sample and exact close/restore on retail 3.65. Separate fresh-boot
+gates subsequently passed `0x03` and `0x10` with exact restoration. A
+Render96EX lease produced 75 bounded `0x01` reads and also closed cleanly. Vita
+timeout/disconnect/process-exit/conflict cleanup remains disabled and unproved
+on hardware.

@@ -32,7 +32,7 @@ stacks remain unvalidated unless an individual result says otherwise.
 | stdout to GDB console (`O` packets) | Completed bounded queue, single-owner no-ack transport, restorable nonblocking stdout/stderr capture, and read-only `monitor console` queue/transport/loss statistics; the two-session retail 3.65 gates passed output, Ctrl-C, stopped-state silence, detach, reconnect, and counter inspection, with the monitor result archived in the [console/display record](hardware/gdb-monitor-console-display-3.65.json) | Add longer pressure, abrupt-disconnect, restore/retry, and shutdown hardware soaks; keep DebugNet for sustained logging |
 | Debugger monitor commands | Hardware-tested fixed read-only `qRcmd` registry for `help`, `status`, `threads`, `modules`, `console`, and `display`; bounded host tests, two raw-RSP sessions, and GDB 15.2 passed on retail 3.65 with state preservation, clean detach, and reconnect in the [console/display record](hardware/gdb-monitor-console-display-3.65.json) | Keep every future command explicit, bounded, and read-only by default |
 | Framebuffer/display diagnostics | Read-only `monitor display` metadata is host- and hardware-tested without a client-selected address or pixel read; the retail 3.65 gate reported coherent current/next 960x544 A8B8G8R8 buffers, 59.940 Hz, and advancing vcount | Keep pixel capture outside the monitor registry; add lifecycle stress and consume these diagnostics in the VitaDevDeploy display investigation |
-| Cortex-A9 PMU counters | The user-mode profiler foundation and bounded name dictionary pass all 13 retail 3.65 checks. Both retail user-mode ScePerf loading paths failed and unresolved imports branch to zero, so direct initialization now fails closed. Kernel ABI v1.13 read-only inventory passes on retail 3.65 with the correct six-counter Cortex-A9 identity, same-core snapshots, and unchanged controls | Add a separate lease-protected kernel session which snapshots every touched register, configures only allowlisted events, verifies writes, samples, and restores exactly across normal release, timeout, error, disconnect, and process exit before advertising live PMU counters |
+| Cortex-A9 PMU counters | The user-mode profiler foundation and bounded name dictionary pass all 13 retail 3.65 checks. Both retail user-mode ScePerf loading paths failed, so direct initialization fails closed. Kernel ABI v1.13 read-only inventory passes, the [isolated session gate](hardware/profiler-pmu-session-gate-3.65.md) passed fixed lane-5 software increment on application cores 0-2, all three allowlisted real events passed separate bounded core-0 normal-close gates with exact restoration ([`0x01`](../kernel/pmu-profiler-gate/hardware-results/2026-09-15-event-01/README.md), [`0x03`](../kernel/pmu-profiler-gate/hardware-results/2026-09-15-event-03/README.md), [`0x10`](../kernel/pmu-profiler-gate/hardware-results/2026-09-15-event-10/README.md)), and Render96EX passed a 75-read `0x01` lease with clean close | Gate ownership conflict, timeout/error/disconnect/process-exit restoration, and a strictly proven post-restore re-arm before advertising unrestricted live PMU counters |
 | UART or named-pipe transport | Not a core requirement because VitaDebugger has direct TCP and separate DebugNet UDP | Consider optional UART only if it materially helps recovery or kernel-plugin debugging |
 
 ## Implementation order
@@ -56,11 +56,14 @@ stacks remain unvalidated unless an individual result says otherwise.
 6. Stress same-process hot module load/unload churn and automate the existing
    command-driven refresh in IDE tasks. This is dynamic-module/IDE convenience
    work; ASLR and verified-build correctness are complete.
-7. Build and hardware-gate an exact-restoring kernel PMU lease on top of the
-   completed read-only inventory, then add the Vita-side profiler TCP/file drain
-   owner and integrate the existing named instrumentation and VitaGL/SceGxm hook
-   points into real applications. Build a dedicated desktop GUI on the working
-   bounded receiver/analyzer/Perfetto export pipeline.
+7. Continue hardware-gating the versioned PMU/provider transport. The lane-5
+   event-`0x00` scope and all three bounded allowlisted real events now pass
+   with exact restoration; a Render96EX lease also passed 75 bounded `0x01`
+   reads and clean close. Next gate ownership conflicts and every cleanup path.
+   The Vita TCP sink and both 300-frame Render96EX CPU/VitaGL and
+   Goddard+PMU captures pass; add deeper source-owned graphics timing, then build
+   a dedicated desktop GUI on the working receiver/analyzer/Perfetto export
+   pipeline.
 8. Complete authentication/pairing, peer allowlists, packaging, CI/firmware
    coverage, licensing, and release hardening.
 9. Hardware-stress the VitaDevDeploy GPU lifecycle fix and finish interrupted-

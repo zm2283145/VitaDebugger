@@ -29,3 +29,7 @@ vitadebug_kernel:
         - vdKernelCommitThreadMutation: 0x76A3D011
         - vdKernelRestoreThreadMutation: 0x76A3D012
         - vdKernelGetPmuInfo: 0x76A3D013
+        - vdKernelPmuProfilerGetInfo: 0x76A3D014
+        - vdKernelPmuProfilerOpen: 0x76A3D015
+        - vdKernelPmuProfilerRead: 0x76A3D016
+        - vdKernelPmuProfilerClose: 0x76A3D017

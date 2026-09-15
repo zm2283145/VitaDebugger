@@ -24,6 +24,9 @@ The current increment provides:
 - Allocation-free validation and decoding for complete `VPRF` event streams.
 - A callback-based drain that writes one combined `VPNM` + `VPRF` binary
   capture and permanently fails on ambiguous sink errors.
+- An opt-in, caller-owned Vita TCP sink with bounded nonblocking SceNet
+  connect/send behavior, partial-send handling, explicit cleanup obligations,
+  and transport statistics.
 - A bounded TCP receiver plus text, complete decoded JSON, and Chrome Trace/Perfetto
   viewer output with named zone, counter, frame, and built-in metric handling.
 - Cooperative, header-independent CPU wall-time hook interfaces for VitaGL and
@@ -33,14 +36,28 @@ The current increment provides:
   obligations. Its direct Vita convenience initializer now fails closed
   because retail 3.65 hardware proved that the ScePerf imports remain unbound.
 - A hardware-tested, read-only Cortex-A9 PMU inventory in optional
-  VitaDebugger kernel ABI v1.13. Live counter configuration remains disabled
-  until a separate exact-snapshot/restore lease passes its hardware gates.
+  VitaDebugger kernel ABI v1.13. A separate disposable session gate passed one
+  fixed lane-5 software-increment transaction with exact gate-snapshot
+  restoration on all
+  three application cores of the tested retail 3.65 Vita. Production counter
+  configuration remains disabled. A reviewed bridge and separately versioned,
+  default-off user/kernel transport now adapt this kernel session to the
+  exact-restore provider ABI with fixed core 0/lane 5, an owner-bound lease,
+  watchdog, timeout recovery, and orphan cleanup. The transport and disposable
+  Vita gate pass host/fake-kernel tests and Vita cross-builds. Its ordinary
+  experimental build accepts only software increment; a second compile gate
+  plus request acknowledgement admits only `0x01`, `0x03`, and `0x10`. Cycles
+  remain rejected and the normal kernel build stays unchanged. The first
+  durable hardware gates passed `0x01`, `0x03`, and `0x10` on retail 3.65 with
+  valid samples and exact close/restore; recovery/lifecycle gates remain.
 
-The Vita library does not start threads, allocate memory, open files, use the
+The portable core does not start threads, allocate memory, open files, use the
 network, stop an application, or currently call the VitaDebugger kernel
-companion. The separate development-computer tool owns its TCP listener and
-output files. PMU discovery is an optional companion capability, not a hidden
-dependency of the portable profiler core.
+companion. The optional TCP adapter creates a socket only when the application
+calls it; it never initializes or terminates SceNet. The separate
+development-computer tool owns its TCP listener and output files. PMU discovery
+is an optional companion capability, not a hidden dependency of the portable
+profiler core.
 
 ## Quick start
 
@@ -104,10 +121,16 @@ See [Profiler name dictionary](docs/name-dictionary.md) for complete lifecycle,
 wire-format, receiver, collision, and capacity details.
 
 See [Binary trace pipeline](docs/binary-trace.md) for the stream writer, TCP
-receiver, validation rules, summaries, and Perfetto export. See [Cooperative
-graphics hooks](docs/graphics-hooks.md) for safe VitaGL/SceGxm call-site
-instrumentation and [Guarded CPU/PMU provider boundary](docs/pmu-provider.md)
-for the explicit exact-restore versus application-owned counter lifecycle.
+receiver, validation rules, summaries, and Perfetto export, and [Vita TCP
+stream sink](docs/vita-tcp-stream.md) for the opt-in application-side SceNet
+adapter. The separate [Vita TCP hardware gate](docs/vita-tcp-hardware-gate.md)
+validates that path from an ordinary user-mode app without the kernel plugin.
+See [Cooperative graphics hooks](docs/graphics-hooks.md) for safe
+VitaGL/SceGxm call-site instrumentation, the [Render96EX VitaGL integration
+audit](docs/render96ex-vitagl-integration.md) for concrete default-off hook
+points, and [Guarded CPU/PMU provider
+boundary](docs/pmu-provider.md) for the explicit exact-restore versus
+application-owned counter lifecycle.
 
 Call `vp_vita_record_memory()` at a low frequency, such as once per second, not
 once per draw. Call `vp_vita_record_thread()` with `0` for the current thread or
@@ -208,7 +231,7 @@ built-in Vita sample names.
 | Renderer/audio/allocator metrics | Generic counters and zones are ready | Integration hooks in each subsystem |
 | All-process thread enumeration | Cooperative/known IDs only | Narrow process-owned enumeration |
 | Statistical PC/call-stack sampling | Not safely available | Tokenized, read-only sampler boundary |
-| PMU hardware counters | Provider boundary, named raw samples, and injected owned-reset adapter tests; direct ScePerf initialization fails closed on tested retail 3.65 | Read-only Cortex-A9 inventory is hardware-tested; a separate lease-protected exact-snapshot/restore session is required before enabling counters |
+| PMU hardware counters | Provider boundary, named raw samples, and injected owned-reset adapter tests; direct ScePerf initialization fails closed on tested retail 3.65 | Read-only inventory and the isolated lane-5 software-increment transaction pass on application cores 0-2; the default-off transport also passed separate bounded core-0 `0x01`, `0x03`, and `0x10` samples with exact restoration. Lifecycle/conflict gates and a strictly proven post-restore re-arm remain required; today the real-event latch resets only on reboot |
 | GPU workload timing | Explicit CPU-side VitaGL/SceGxm call-site hooks | GPU timestamps or automatic interposition are not implemented |
 
 `SceKernelThreadInfo.runClocks` is exported as a cumulative **raw** value because
@@ -239,14 +262,20 @@ This compiles both the portable core and the user-mode Vita adapter with
 `-Wall -Wextra -Werror`, then creates `build/vita/libvitaprofiler.a`. Link that
 archive into an application together with the VitaSDK stubs for KernelThreadMgr,
 LibKernel, Processmgr, and Sysmem (ordinary VitaSDK application links normally
-already include LibKernel). `vita-check` cross-builds the fail-closed adapter;
+already include LibKernel). Applications opting into the TCP sink additionally
+link `SceNet_stub` and keep the SceNet module/global lifetime caller-owned.
+`vita-check` cross-builds the fail-closed adapter;
 the separate zero-call `vita-pmu-discovery` target includes VitaSDK's
 `psp2/perf.h` and links the six adapter-used imports as a loader diagnostic.
 Neither build proves that those functions are bound at runtime: both documented
 sysmodule loading and the normal `libperf.suprx` user-module path failed on the
 tested retail 3.65 setup. `vp_vita_pmu_owned_init()` therefore returns
 `VP_ERROR_UNSUPPORTED` instead of calling those unresolved stubs. See the
-[PMU hardware gate](docs/pmu-hardware-gate.md).
+[user-mode PMU hardware gate](docs/pmu-hardware-gate.md), the
+[kernel discovery record](../docs/hardware/profiler-pmu-retail-3.65.md), and the
+[isolated PMU session result](../docs/hardware/profiler-pmu-session-gate-3.65.md).
+The separately built real-event candidate is governed by the
+[PMU profiler transport gate runbook](../kernel/pmu-profiler-gate/README.md).
 
 On a Unix-like development host with a native C compiler:
 
@@ -258,7 +287,8 @@ The native tests check validation, bounded drop/reuse behavior, FIFO ordering,
 zone/frame semantics, exact event and dictionary wire bytes, dictionary
 collisions/capacity/truncation, concurrent multi-producer delivery, concurrent
 read-only name resolution after sealing, combined stream drain/decoding,
-fail-closed sink behavior, PMU ownership/restoration policy, public-ScePerf
+fail-closed sink behavior, bounded/partial Vita TCP transport behavior, PMU
+ownership/restoration policy, public-ScePerf
 adapter sequencing and cleanup, and graphics hook emission.
 The Python suite adds corrupt/truncated capture rejection, fragmented loopback
 TCP reception, byte bounds, named zone analysis, and JSON/Perfetto output.
@@ -310,6 +340,26 @@ The two added gates prove bounded dictionary encoding and live resolution of
 every captured event ID, including custom and built-in names. See the [unedited
 13-check result
 screenshot](../docs/hardware/profiler-name-dictionary-3.65.jpg).
+
+The same 13-check probe was rebuilt from the TCP-sink integration worktree and
+passed again on retail 3.65 on 2026-09-15, without changing or invoking the
+kernel plugin. The artifact hashes and signed-deployment result are recorded in
+the [revalidation journal](../docs/hardware/profiler-user-mode-revalidation-2026-09-15.md).
+
+The production Vita TCP sink and PC receiver subsequently passed a live
+retail-3.65 gate, including named-event decoding, clean EOF, pre-connect cancel,
+forced peer disconnect, and a successful recovery relaunch. See the
+[TCP hardware journal](../docs/hardware/profiler-tcp-stream-retail-3.65.md) and
+its retained raw captures for exact results.
+
+The same transport then captured a clean 300-frame CPU/VitaGL baseline from
+Render96EX's Mario-head scene. It recorded zero ring/transport loss, roughly
+829 draw calls and 82--84 ms per stable head frame, but only about 0.38 ms per
+frame in the two instrumented swap calls. See the
+[Render96EX hardware record](../docs/hardware/profiler-render96ex-head-baseline-2026-09-15.md).
+That baseline predates the newer Goddard phase zones and contains no PMU sample.
+A follow-up 300-frame capture passed those zones plus 75 bounded event-`0x01`
+samples, with balanced scopes, zero loss, and a clean exact-restoring close.
 
 The probe link reserves `__sce_headroom=0x1000`. This uses the VitaSDK linker
 script's supported SCE-metadata headroom mechanism and avoids a Windows

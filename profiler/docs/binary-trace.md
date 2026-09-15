@@ -80,9 +80,11 @@ one event was removed from the ring before its send failed,
 `events_lost_to_sink` accounts it. The writer cannot then claim a clean close.
 Ring-pressure drops remain separately available through `vp_get_stats()`.
 
-The library does not yet provide a Vita socket owner, reconnect protocol,
-authentication, encryption, compression, or a multi-capture container. Those
-belong in a later transport layer.
+The optional [Vita TCP stream sink](vita-tcp-stream.md) now supplies a bounded,
+caller-owned SceNet adapter for this callback. It deliberately provides no
+reconnect/resume protocol, authentication, encryption, compression, or
+multi-capture container. A partial or ambiguous send ends that capture rather
+than reconnecting into the middle of the byte stream.
 
 ## Host receiver and viewer
 

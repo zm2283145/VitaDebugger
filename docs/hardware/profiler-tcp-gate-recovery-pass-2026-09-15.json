@@ -1,0 +1,271 @@
+{
+  "format": "vitaprofiler-decoded-v1",
+  "header": {
+    "version": 1,
+    "flags": 1,
+    "clock_hz": 1000000,
+    "stream_start_us": 45127952461
+  },
+  "dictionary_size": 380,
+  "raw_size": 828,
+  "names": [
+    {
+      "name_id": 222269274,
+      "name_id_hex": "0x0d3f8f5a",
+      "name": "tcp_gate.zone",
+      "builtin": false
+    },
+    {
+      "name_id": 1184778640,
+      "name_id_hex": "0x469e4990",
+      "name": "tcp_gate.counter",
+      "builtin": false
+    },
+    {
+      "name_id": 3458544361,
+      "name_id_hex": "0xce2532e9",
+      "name": "tcp_gate.frame",
+      "builtin": false
+    },
+    {
+      "name_id": 4293918721,
+      "name_id_hex": "0xfff00001",
+      "name": "vita.memory.free_user_bytes",
+      "builtin": true
+    },
+    {
+      "name_id": 4293918722,
+      "name_id_hex": "0xfff00002",
+      "name": "vita.memory.free_cdram_bytes",
+      "builtin": true
+    },
+    {
+      "name_id": 4293918723,
+      "name_id_hex": "0xfff00003",
+      "name": "vita.memory.free_phycont_bytes",
+      "builtin": true
+    },
+    {
+      "name_id": 4293918724,
+      "name_id_hex": "0xfff00004",
+      "name": "vita.process.time_us",
+      "builtin": true
+    },
+    {
+      "name_id": 4293918725,
+      "name_id_hex": "0xfff00005",
+      "name": "vita.thread.run_clocks",
+      "builtin": true
+    },
+    {
+      "name_id": 4293918726,
+      "name_id_hex": "0xfff00006",
+      "name": "vita.thread.stack_free_bytes",
+      "builtin": true
+    },
+    {
+      "name_id": 4293918727,
+      "name_id_hex": "0xfff00007",
+      "name": "vita.thread.preemptions",
+      "builtin": true
+    },
+    {
+      "name_id": 4293918728,
+      "name_id_hex": "0xfff00008",
+      "name": "vita.thread.interrupt_preemptions",
+      "builtin": true
+    }
+  ],
+  "events": [
+    {
+      "index": 0,
+      "timestamp_us": 45127952789,
+      "value": 0,
+      "name_id": 222269274,
+      "name_id_hex": "0x0d3f8f5a",
+      "name": "tcp_gate.zone",
+      "thread_id": 1073807363,
+      "correlation_id": 1,
+      "type": 1,
+      "type_name": "zone_begin",
+      "flags": 0,
+      "flag_names": []
+    },
+    {
+      "index": 1,
+      "timestamp_us": 45127953950,
+      "value": 1161,
+      "name_id": 222269274,
+      "name_id_hex": "0x0d3f8f5a",
+      "name": "tcp_gate.zone",
+      "thread_id": 1073807363,
+      "correlation_id": 1,
+      "type": 2,
+      "type_name": "zone_end",
+      "flags": 0,
+      "flag_names": []
+    },
+    {
+      "index": 2,
+      "timestamp_us": 45127953954,
+      "value": 314,
+      "name_id": 1184778640,
+      "name_id_hex": "0x469e4990",
+      "name": "tcp_gate.counter",
+      "thread_id": 1073807363,
+      "correlation_id": 0,
+      "type": 3,
+      "type_name": "counter",
+      "flags": 0,
+      "flag_names": []
+    },
+    {
+      "index": 3,
+      "timestamp_us": 45127953957,
+      "value": 0,
+      "name_id": 3458544361,
+      "name_id_hex": "0xce2532e9",
+      "name": "tcp_gate.frame",
+      "thread_id": 1073807363,
+      "correlation_id": 0,
+      "type": 4,
+      "type_name": "frame",
+      "flags": 1,
+      "flag_names": [
+        "first"
+      ]
+    },
+    {
+      "index": 4,
+      "timestamp_us": 45127970686,
+      "value": 16729,
+      "name_id": 3458544361,
+      "name_id_hex": "0xce2532e9",
+      "name": "tcp_gate.frame",
+      "thread_id": 1073807363,
+      "correlation_id": 1,
+      "type": 4,
+      "type_name": "frame",
+      "flags": 0,
+      "flag_names": []
+    },
+    {
+      "index": 5,
+      "timestamp_us": 45127970713,
+      "value": 126877696,
+      "name_id": 4293918721,
+      "name_id_hex": "0xfff00001",
+      "name": "vita.memory.free_user_bytes",
+      "thread_id": 1073807363,
+      "correlation_id": 0,
+      "type": 5,
+      "type_name": "memory_sample",
+      "flags": 0,
+      "flag_names": []
+    },
+    {
+      "index": 6,
+      "timestamp_us": 45127970713,
+      "value": 115343360,
+      "name_id": 4293918722,
+      "name_id_hex": "0xfff00002",
+      "name": "vita.memory.free_cdram_bytes",
+      "thread_id": 1073807363,
+      "correlation_id": 0,
+      "type": 5,
+      "type_name": "memory_sample",
+      "flags": 0,
+      "flag_names": []
+    },
+    {
+      "index": 7,
+      "timestamp_us": 45127970713,
+      "value": 27262976,
+      "name_id": 4293918723,
+      "name_id_hex": "0xfff00003",
+      "name": "vita.memory.free_phycont_bytes",
+      "thread_id": 1073807363,
+      "correlation_id": 0,
+      "type": 5,
+      "type_name": "memory_sample",
+      "flags": 0,
+      "flag_names": []
+    },
+    {
+      "index": 8,
+      "timestamp_us": 45127970713,
+      "value": 29498218,
+      "name_id": 4293918724,
+      "name_id_hex": "0xfff00004",
+      "name": "vita.process.time_us",
+      "thread_id": 1073807363,
+      "correlation_id": 0,
+      "type": 7,
+      "type_name": "process_sample",
+      "flags": 0,
+      "flag_names": []
+    },
+    {
+      "index": 9,
+      "timestamp_us": 45127974102,
+      "value": 391475,
+      "name_id": 4293918725,
+      "name_id_hex": "0xfff00005",
+      "name": "vita.thread.run_clocks",
+      "thread_id": 1073807363,
+      "correlation_id": 0,
+      "type": 6,
+      "type_name": "thread_sample",
+      "flags": 8,
+      "flag_names": [
+        "raw_value"
+      ]
+    },
+    {
+      "index": 10,
+      "timestamp_us": 45127974102,
+      "value": 1027056,
+      "name_id": 4293918726,
+      "name_id_hex": "0xfff00006",
+      "name": "vita.thread.stack_free_bytes",
+      "thread_id": 1073807363,
+      "correlation_id": 0,
+      "type": 6,
+      "type_name": "thread_sample",
+      "flags": 0,
+      "flag_names": []
+    },
+    {
+      "index": 11,
+      "timestamp_us": 45127974102,
+      "value": 0,
+      "name_id": 4293918727,
+      "name_id_hex": "0xfff00007",
+      "name": "vita.thread.preemptions",
+      "thread_id": 1073807363,
+      "correlation_id": 0,
+      "type": 6,
+      "type_name": "thread_sample",
+      "flags": 8,
+      "flag_names": [
+        "raw_value"
+      ]
+    },
+    {
+      "index": 12,
+      "timestamp_us": 45127974102,
+      "value": 3,
+      "name_id": 4293918728,
+      "name_id_hex": "0xfff00008",
+      "name": "vita.thread.interrupt_preemptions",
+      "thread_id": 1073807363,
+      "correlation_id": 0,
+      "type": 6,
+      "type_name": "thread_sample",
+      "flags": 8,
+      "flag_names": [
+        "raw_value"
+      ]
+    }
+  ]
+}

@@ -224,10 +224,91 @@ static void test_cooperative_graphics_hooks(void)
           "unknown graphics hook fails closed");
 }
 
+static void test_render96ex_vitagl_callsite_sequence(void)
+{
+    struct vp_context context;
+    struct vp_slot slots[8];
+    struct vp_config config;
+    struct fake_source source = {100u, 7u};
+    struct vp_name_dictionary dictionary;
+    struct vp_name_dictionary_config dictionary_config;
+    struct vp_name_entry entries[16];
+    char text[512];
+    struct vp_graphics_name_ids ids;
+    struct vp_graphics_hooks hooks;
+    struct vp_zone_scope frame;
+    struct vp_zone_scope swap;
+    struct vp_event events[8];
+    size_t count;
+
+    memset(&config, 0, sizeof(config));
+    config.slots = slots;
+    config.capacity = 8u;
+    config.clock = fake_clock;
+    config.clock_user = &source;
+    config.thread_id = fake_thread;
+    config.thread_user = &source;
+    memset(&dictionary_config, 0, sizeof(dictionary_config));
+    dictionary_config.entries = entries;
+    dictionary_config.entry_capacity = 16u;
+    dictionary_config.text = text;
+    dictionary_config.text_capacity = sizeof(text);
+    CHECK(vp_init(&context, &config) == VP_RESULT_OK &&
+              vp_name_dictionary_init(&dictionary, &dictionary_config) ==
+                  VP_RESULT_OK &&
+              vp_graphics_register_names(&dictionary, &ids) ==
+                  VP_RESULT_OK &&
+              vp_name_dictionary_seal(&dictionary) == VP_RESULT_OK &&
+              vp_graphics_hooks_init(&hooks, &context, &ids) ==
+                  VP_RESULT_OK,
+          "initialize the audited Render96EX call-site sequence");
+
+    CHECK(vp_graphics_zone_begin(
+              &hooks, VP_GRAPHICS_ZONE_VITAGL_FRAME, &frame) ==
+                  VP_RESULT_OK,
+          "begin one complete Render96EX game frame");
+    source.now = 110u;
+    CHECK(vp_graphics_counter(
+              &hooks, VP_GRAPHICS_COUNTER_VITAGL_DRAW_CALLS, 23) ==
+                  VP_RESULT_OK,
+          "publish one aggregate VitaGL draw count");
+    source.now = 120u;
+    CHECK(vp_graphics_zone_begin(
+              &hooks, VP_GRAPHICS_ZONE_VITAGL_SWAP_BUFFERS, &swap) ==
+                  VP_RESULT_OK,
+          "begin the application-owned VitaGL swap call");
+    source.now = 135u;
+    CHECK(vp_graphics_zone_end(&hooks, &swap) == VP_RESULT_OK,
+          "end the application-owned VitaGL swap call");
+    source.now = 150u;
+    CHECK(vp_graphics_zone_end(&hooks, &frame) == VP_RESULT_OK,
+          "end one complete Render96EX game frame");
+
+    count = vp_drain(&context, events, 8u);
+    CHECK(count == 5u && events[0].type == VP_EVENT_ZONE_BEGIN &&
+              events[0].name_id ==
+                  ids.zones[VP_GRAPHICS_ZONE_VITAGL_FRAME] &&
+              events[1].type == VP_EVENT_COUNTER &&
+              events[1].name_id ==
+                  ids.counters[VP_GRAPHICS_COUNTER_VITAGL_DRAW_CALLS] &&
+              events[1].value == 23 &&
+              events[2].type == VP_EVENT_ZONE_BEGIN &&
+              events[2].name_id ==
+                  ids.zones[VP_GRAPHICS_ZONE_VITAGL_SWAP_BUFFERS] &&
+              events[3].type == VP_EVENT_ZONE_END &&
+              events[3].value == 15 &&
+              events[4].type == VP_EVENT_ZONE_END &&
+              events[4].value == 50,
+          "audited frame/draw/swap hooks remain ordered and balanced");
+    vp_name_dictionary_deinit(&dictionary);
+    vp_deinit(&context);
+}
+
 int main(void)
 {
     test_guarded_pmu_provider();
     test_cooperative_graphics_hooks();
+    test_render96ex_vitagl_callsite_sequence();
     if (failures != 0) {
         fprintf(stderr, "%d profiler integration test(s) failed\n", failures);
         return 1;

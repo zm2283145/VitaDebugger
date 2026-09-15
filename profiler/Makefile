@@ -21,9 +21,18 @@ HOST_BUILD := build/host
 VITA_BUILD := build/vita
 VITA_PROBE_BUILD := build/vita-probe
 VITA_PMU_DISCOVERY_BUILD := build/vita-pmu-discovery
+VITA_TCP_GATE_BUILD := build/vita-tcp-gate
 VITA_COMMON_DIR ?= $(VITASDK)/share/gcc-arm-vita-eabi/samples/common
 VITA_PROBE_TITLE_ID ?= VDPR00001
 VITA_PMU_DISCOVERY_TITLE_ID ?= VDPD00001
+VITA_TCP_GATE_TITLE_ID := VDPT00001
+-include local/vita-tcp-gate.mk
+VITA_TCP_GATE_HOST_A ?= 127
+VITA_TCP_GATE_HOST_B ?= 0
+VITA_TCP_GATE_HOST_C ?= 0
+VITA_TCP_GATE_HOST_D ?= 1
+VITA_TCP_GATE_PORT ?= 18195
+VITA_TCP_GATE_CONFIG := $(wildcard local/vita-tcp-gate.mk)
 VITA_PROBE_OBJECTS := \
 	$(VITA_PROBE_BUILD)/vita_probe.o \
 	$(VITA_PROBE_BUILD)/debugScreen.o
@@ -48,18 +57,39 @@ VITA_PMU_DISCOVERY_LDLIBS := \
 	-lSceSysmem_stub \
 	-ltaihen_stub \
 	-lSceLibKernel_stub
+VITA_TCP_GATE_OBJECTS := \
+	$(VITA_TCP_GATE_BUILD)/main.o \
+	$(VITA_TCP_GATE_BUILD)/debugScreen.o
+VITA_TCP_GATE_CPPFLAGS := \
+	-DVP_TCP_GATE_HOST_A=$(VITA_TCP_GATE_HOST_A) \
+	-DVP_TCP_GATE_HOST_B=$(VITA_TCP_GATE_HOST_B) \
+	-DVP_TCP_GATE_HOST_C=$(VITA_TCP_GATE_HOST_C) \
+	-DVP_TCP_GATE_HOST_D=$(VITA_TCP_GATE_HOST_D) \
+	-DVP_TCP_GATE_PORT=$(VITA_TCP_GATE_PORT)
+VITA_TCP_GATE_LDLIBS := \
+	-lSceDisplay_stub \
+	-lSceCtrl_stub \
+	-lSceNet_stub \
+	-lSceNetCtl_stub \
+	-lSceSysmodule_stub \
+	-lSceKernelThreadMgr_stub \
+	-lSceProcessmgr_stub \
+	-lSceSysmem_stub \
+	-lSceLibKernel_stub
 
-.PHONY: all vita vita-check vita-probe vita-pmu-discovery host-test check clean
+.PHONY: all vita vita-check vita-probe vita-pmu-discovery vita-tcp-gate host-test check clean
 
 all: vita
 
 vita: $(VITA_BUILD)/libvitaprofiler.a
 
-vita-check: vita $(VITA_BUILD)/vitaprofiler-pmu-link-check.elf
+vita-check: vita $(VITA_BUILD)/vitaprofiler-pmu-link-check.elf $(VITA_BUILD)/vitaprofiler-tcp-link-check.elf
 
 vita-probe: $(VITA_PROBE_BUILD)/vitaprofiler-probe.vpk
 
 vita-pmu-discovery: $(VITA_PMU_DISCOVERY_BUILD)/vitaprofiler-pmu-discovery.vpk
+
+vita-tcp-gate: $(VITA_TCP_GATE_BUILD)/vitaprofiler-tcp-gate.vpk
 
 $(VITA_BUILD)/vitaprofiler.o: src/vitaprofiler.c include/vitaprofiler.h
 	mkdir -p $(VITA_BUILD)
@@ -77,6 +107,10 @@ $(VITA_BUILD)/vitaprofiler_stream.o: src/vitaprofiler_stream.c include/vitaprofi
 	mkdir -p $(VITA_BUILD)
 	$(VITA_CC) $(CPPFLAGS) $(VITA_CFLAGS) -c $< -o $@
 
+$(VITA_BUILD)/vitaprofiler_tcp_vita.o: src/vitaprofiler_tcp_vita.c include/vitaprofiler_tcp_vita.h include/vitaprofiler_stream.h include/vitaprofiler.h
+	mkdir -p $(VITA_BUILD)
+	$(VITA_CC) $(CPPFLAGS) $(VITA_CFLAGS) -c $< -o $@
+
 $(VITA_BUILD)/vitaprofiler_pmu.o: src/vitaprofiler_pmu.c include/vitaprofiler_pmu.h include/vitaprofiler.h
 	mkdir -p $(VITA_BUILD)
 	$(VITA_CC) $(CPPFLAGS) $(VITA_CFLAGS) -c $< -o $@
@@ -89,11 +123,14 @@ $(VITA_BUILD)/vitaprofiler_gpu.o: src/vitaprofiler_gpu.c include/vitaprofiler_gp
 	mkdir -p $(VITA_BUILD)
 	$(VITA_CC) $(CPPFLAGS) $(VITA_CFLAGS) -c $< -o $@
 
-$(VITA_BUILD)/libvitaprofiler.a: $(VITA_BUILD)/vitaprofiler.o $(VITA_BUILD)/vitaprofiler_vita.o $(VITA_BUILD)/vitaprofiler_names.o $(VITA_BUILD)/vitaprofiler_stream.o $(VITA_BUILD)/vitaprofiler_pmu.o $(VITA_BUILD)/vitaprofiler_pmu_vita.o $(VITA_BUILD)/vitaprofiler_gpu.o
+$(VITA_BUILD)/libvitaprofiler.a: $(VITA_BUILD)/vitaprofiler.o $(VITA_BUILD)/vitaprofiler_vita.o $(VITA_BUILD)/vitaprofiler_names.o $(VITA_BUILD)/vitaprofiler_stream.o $(VITA_BUILD)/vitaprofiler_tcp_vita.o $(VITA_BUILD)/vitaprofiler_pmu.o $(VITA_BUILD)/vitaprofiler_pmu_vita.o $(VITA_BUILD)/vitaprofiler_gpu.o
 	$(VITA_AR) rcs $@ $^
 
 $(VITA_BUILD)/vitaprofiler-pmu-link-check.elf: tests/vita_pmu_link_check.c $(VITA_BUILD)/libvitaprofiler.a include/vitaprofiler_pmu_vita.h
 	$(VITA_CC) $(CPPFLAGS) $(VITA_CFLAGS) $< $(VITA_BUILD)/libvitaprofiler.a -lSceKernelThreadMgr_stub -lSceLibKernel_stub -o $@
+
+$(VITA_BUILD)/vitaprofiler-tcp-link-check.elf: tests/vita_tcp_link_check.c $(VITA_BUILD)/libvitaprofiler.a include/vitaprofiler_tcp_vita.h
+	$(VITA_CC) $(CPPFLAGS) $(VITA_CFLAGS) $< $(VITA_BUILD)/libvitaprofiler.a -lSceNet_stub -lSceProcessmgr_stub -lSceLibKernel_stub -o $@
 
 $(VITA_PROBE_BUILD)/vita_probe.o: tests/vita_probe.c include/vitaprofiler.h
 	mkdir -p $(VITA_PROBE_BUILD)
@@ -143,6 +180,30 @@ $(VITA_PMU_DISCOVERY_BUILD)/param.sfo:
 $(VITA_PMU_DISCOVERY_BUILD)/vitaprofiler-pmu-discovery.vpk: $(VITA_PMU_DISCOVERY_BUILD)/eboot.bin $(VITA_PMU_DISCOVERY_BUILD)/param.sfo
 	$(VITA_PACK_VPK) -s $(VITA_PMU_DISCOVERY_BUILD)/param.sfo -b $(VITA_PMU_DISCOVERY_BUILD)/eboot.bin $@
 
+$(VITA_TCP_GATE_BUILD)/main.o: vita-tcp-gate/main.c include/vitaprofiler.h include/vitaprofiler_stream.h include/vitaprofiler_tcp_vita.h Makefile $(VITA_TCP_GATE_CONFIG)
+	mkdir -p $(VITA_TCP_GATE_BUILD)
+	$(VITA_CC) $(CPPFLAGS) -I$(VITA_COMMON_DIR) $(VITA_TCP_GATE_CPPFLAGS) $(VITA_PROBE_CFLAGS) -c $< -o $@
+
+$(VITA_TCP_GATE_BUILD)/debugScreen.o: $(VITA_COMMON_DIR)/debugScreen.c
+	mkdir -p $(VITA_TCP_GATE_BUILD)
+	$(VITA_CC) -I$(VITA_COMMON_DIR) $(VITA_CFLAGS) -c $< -o $@
+
+$(VITA_TCP_GATE_BUILD)/vitaprofiler-tcp-gate.elf: $(VITA_TCP_GATE_OBJECTS) $(VITA_BUILD)/libvitaprofiler.a
+	$(VITA_CC) -Wl,-q -Wl,-z,nocopyreloc $(VITA_PROBE_LDFLAGS) $^ $(VITA_TCP_GATE_LDLIBS) -o $@
+
+$(VITA_TCP_GATE_BUILD)/vitaprofiler-tcp-gate.velf: $(VITA_TCP_GATE_BUILD)/vitaprofiler-tcp-gate.elf
+	$(VITA_ELF_CREATE) $< $@
+
+$(VITA_TCP_GATE_BUILD)/eboot.bin: $(VITA_TCP_GATE_BUILD)/vitaprofiler-tcp-gate.velf
+	$(VITA_MAKE_FSELF) $< $@
+
+$(VITA_TCP_GATE_BUILD)/param.sfo:
+	mkdir -p $(VITA_TCP_GATE_BUILD)
+	$(VITA_MKSFOEX) -s TITLE_ID=$(VITA_TCP_GATE_TITLE_ID) 'VitaProfiler TCP gate' $@
+
+$(VITA_TCP_GATE_BUILD)/vitaprofiler-tcp-gate.vpk: $(VITA_TCP_GATE_BUILD)/eboot.bin $(VITA_TCP_GATE_BUILD)/param.sfo
+	$(VITA_PACK_VPK) -s $(VITA_TCP_GATE_BUILD)/param.sfo -b $(VITA_TCP_GATE_BUILD)/eboot.bin $@
+
 $(HOST_BUILD)/test_vitaprofiler: src/vitaprofiler.c tests/test_vitaprofiler.c include/vitaprofiler.h
 	mkdir -p $(HOST_BUILD)
 	$(HOST_CC) $(CPPFLAGS) $(HOST_CFLAGS) -pthread src/vitaprofiler.c tests/test_vitaprofiler.c -o $@
@@ -154,6 +215,10 @@ $(HOST_BUILD)/test_vitaprofiler_names: src/vitaprofiler.c src/vitaprofiler_names
 $(HOST_BUILD)/test_vitaprofiler_stream: src/vitaprofiler.c src/vitaprofiler_names.c src/vitaprofiler_stream.c tests/test_vitaprofiler_stream.c include/vitaprofiler.h include/vitaprofiler_stream.h
 	mkdir -p $(HOST_BUILD)
 	$(HOST_CC) $(CPPFLAGS) $(HOST_CFLAGS) -pthread src/vitaprofiler.c src/vitaprofiler_names.c src/vitaprofiler_stream.c tests/test_vitaprofiler_stream.c -o $@
+
+$(HOST_BUILD)/test_vitaprofiler_tcp_vita: src/vitaprofiler.c src/vitaprofiler_names.c src/vitaprofiler_stream.c src/vitaprofiler_tcp_vita.c tests/vita_tcp_sce_net_shim.c tests/vita_tcp_sce_net_shim.h tests/test_vitaprofiler_tcp_vita.c include/vitaprofiler.h include/vitaprofiler_stream.h include/vitaprofiler_tcp_vita.h
+	mkdir -p $(HOST_BUILD)
+	$(HOST_CC) $(CPPFLAGS) $(HOST_CFLAGS) -DVP_VITA_TCP_HOST_TEST -DVP_VITA_TCP_SCE_NET_HOST_TEST -pthread src/vitaprofiler.c src/vitaprofiler_names.c src/vitaprofiler_stream.c src/vitaprofiler_tcp_vita.c tests/vita_tcp_sce_net_shim.c tests/test_vitaprofiler_tcp_vita.c -o $@
 
 $(HOST_BUILD)/test_vitaprofiler_integrations: src/vitaprofiler.c src/vitaprofiler_names.c src/vitaprofiler_pmu.c src/vitaprofiler_gpu.c tests/test_vitaprofiler_integrations.c include/vitaprofiler.h include/vitaprofiler_pmu.h include/vitaprofiler_gpu.h
 	mkdir -p $(HOST_BUILD)
@@ -170,10 +235,11 @@ $(HOST_BUILD)/generate_vitaprofiler_fixture: src/vitaprofiler.c src/vitaprofiler
 $(HOST_BUILD)/capture-from-c.vptrace: $(HOST_BUILD)/generate_vitaprofiler_fixture
 	$(HOST_BUILD)/generate_vitaprofiler_fixture $@
 
-host-test: $(HOST_BUILD)/test_vitaprofiler $(HOST_BUILD)/test_vitaprofiler_names $(HOST_BUILD)/test_vitaprofiler_stream $(HOST_BUILD)/test_vitaprofiler_integrations $(HOST_BUILD)/test_vitaprofiler_pmu_vita $(HOST_BUILD)/capture-from-c.vptrace
+host-test: $(HOST_BUILD)/test_vitaprofiler $(HOST_BUILD)/test_vitaprofiler_names $(HOST_BUILD)/test_vitaprofiler_stream $(HOST_BUILD)/test_vitaprofiler_tcp_vita $(HOST_BUILD)/test_vitaprofiler_integrations $(HOST_BUILD)/test_vitaprofiler_pmu_vita $(HOST_BUILD)/capture-from-c.vptrace
 	$(HOST_BUILD)/test_vitaprofiler
 	$(HOST_BUILD)/test_vitaprofiler_names
 	$(HOST_BUILD)/test_vitaprofiler_stream
+	$(HOST_BUILD)/test_vitaprofiler_tcp_vita
 	$(HOST_BUILD)/test_vitaprofiler_integrations
 	$(HOST_BUILD)/test_vitaprofiler_pmu_vita
 	$(PYTHON) tests/test_vitaprofiler_trace.py

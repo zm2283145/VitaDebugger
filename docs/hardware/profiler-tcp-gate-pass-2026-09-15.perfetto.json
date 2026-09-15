@@ -1,0 +1,173 @@
+{
+  "traceEvents": [
+    {
+      "name": "process_name",
+      "ph": "M",
+      "pid": 1,
+      "tid": 0,
+      "args": {
+        "name": "PS Vita application"
+      }
+    },
+    {
+      "name": "tcp_gate.zone",
+      "cat": "cpu.zone",
+      "ph": "X",
+      "pid": 1,
+      "tid": 1073807363,
+      "ts": 44761127605,
+      "dur": 1146,
+      "args": {
+        "correlation_id": 1,
+        "end_timestamp_us": 44761128751,
+        "flags": []
+      }
+    },
+    {
+      "name": "tcp_gate.counter",
+      "pid": 1,
+      "tid": 1073807363,
+      "ts": 44761128755,
+      "cat": "counter",
+      "ph": "C",
+      "args": {
+        "value": 314
+      }
+    },
+    {
+      "name": "tcp_gate.frame",
+      "pid": 1,
+      "tid": 1073807363,
+      "ts": 44761128758,
+      "cat": "frame",
+      "ph": "i",
+      "s": "g",
+      "args": {
+        "duration_us": 0,
+        "frame_sequence": 0,
+        "first": true
+      }
+    },
+    {
+      "name": "tcp_gate.frame",
+      "pid": 1,
+      "tid": 1073807363,
+      "ts": 44761145584,
+      "cat": "frame",
+      "ph": "i",
+      "s": "g",
+      "args": {
+        "duration_us": 16826,
+        "frame_sequence": 1,
+        "first": false
+      }
+    },
+    {
+      "name": "vita.memory.free_user_bytes",
+      "pid": 1,
+      "tid": 1073807363,
+      "ts": 44761145611,
+      "cat": "memory_sample",
+      "ph": "C",
+      "args": {
+        "value": 126877696,
+        "raw": false
+      }
+    },
+    {
+      "name": "vita.memory.free_cdram_bytes",
+      "pid": 1,
+      "tid": 1073807363,
+      "ts": 44761145611,
+      "cat": "memory_sample",
+      "ph": "C",
+      "args": {
+        "value": 115343360,
+        "raw": false
+      }
+    },
+    {
+      "name": "vita.memory.free_phycont_bytes",
+      "pid": 1,
+      "tid": 1073807363,
+      "ts": 44761145611,
+      "cat": "memory_sample",
+      "ph": "C",
+      "args": {
+        "value": 27262976,
+        "raw": false
+      }
+    },
+    {
+      "name": "vita.process.time_us",
+      "pid": 1,
+      "tid": 1073807363,
+      "ts": 44761145611,
+      "cat": "process_sample",
+      "ph": "C",
+      "args": {
+        "value": 40001654,
+        "raw": false
+      }
+    },
+    {
+      "name": "vita.thread.run_clocks",
+      "pid": 1,
+      "tid": 1073807363,
+      "ts": 44761148989,
+      "cat": "thread_sample",
+      "ph": "C",
+      "args": {
+        "value": 419975,
+        "raw": true
+      }
+    },
+    {
+      "name": "vita.thread.stack_free_bytes",
+      "pid": 1,
+      "tid": 1073807363,
+      "ts": 44761148989,
+      "cat": "thread_sample",
+      "ph": "C",
+      "args": {
+        "value": 1027056,
+        "raw": false
+      }
+    },
+    {
+      "name": "vita.thread.preemptions",
+      "pid": 1,
+      "tid": 1073807363,
+      "ts": 44761148989,
+      "cat": "thread_sample",
+      "ph": "C",
+      "args": {
+        "value": 0,
+        "raw": true
+      }
+    },
+    {
+      "name": "vita.thread.interrupt_preemptions",
+      "pid": 1,
+      "tid": 1073807363,
+      "ts": 44761148989,
+      "cat": "thread_sample",
+      "ph": "C",
+      "args": {
+        "value": 1,
+        "raw": true
+      }
+    }
+  ],
+  "displayTimeUnit": "ms",
+  "metadata": {
+    "source": "VitaProfiler",
+    "wire_version": 1,
+    "clock_hz": 1000000,
+    "stream_start_us": 44761127279,
+    "event_count": 13,
+    "dictionary_entries": 11,
+    "unmatched_zone_begins": 0,
+    "unmatched_zone_ends": 0
+  }
+}

@@ -34,9 +34,12 @@ of cores 1 or 2.
   recovery first reaps any late worker completion and then retries the retained
   exact-restore record on the original core.
 
-The test currently targets the already-established retail Vita 3.65 research
-environment. Other firmware versions remain untested. This probe is not a
-claim that the general profiler session API is production ready.
+The gate passed on all three application cores of the tested retail Vita 3.65
+research environment. The exact artifacts and decoded durable records are in
+the [hardware result](../../docs/hardware/profiler-pmu-session-gate-3.65.md).
+Other firmware versions remain untested. This probe is not a claim that the
+general profiler session API or continuous hardware-event sampling is
+production ready.
 
 ## Files
 
@@ -146,3 +149,15 @@ as proof of restoration; archive it before manually clearing the latch.
 
 The Circle button exits only the user UI. It does not unload the resident
 kernel code.
+
+## Completed retail 3.65 result
+
+The final VPK and SKPRX SHA-256 values were respectively
+`0A4D60E056418A8BABBD9266DB50D318D3960DBF76BB4932A67555A25EABB80E`
+and
+`1B170B336D3339FB699A7C7CEEA6683A78650DE01963A035AD5F9BE46279D850`.
+Core 0, core 1, and core 2 each reached stage 7 with zero syscall, journal,
+operation, and restore results; observed `17/17`; proved exact gate-snapshot
+restoration; and finished with `ready=1`, `obligation=0`. The cumulative passed-core masks were
+`0x1`, `0x3`, and `0x7`. See the linked hardware record for the journal
+revisions, MPIDRs, and raw-record hashes.

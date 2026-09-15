@@ -19,6 +19,30 @@ option(VITADEBUG_EXPERIMENTAL_HW_DEBUG
   "Compile the guarded ARMv7 hardware-breakpoint/watchpoint session engine"
   OFF
 )
+option(VITADEBUG_EXPERIMENTAL_PMU_PROFILER
+  "Compile the lease-protected fixed-core/lane PMU profiler transport"
+  OFF
+)
+option(VITADEBUG_EXPERIMENTAL_PMU_PROFILER_REAL_EVENTS
+  "Admit the three reviewed real PMU events (requires PMU profiler)"
+  OFF
+)
+set(VITADEBUG_PMU_PROFILER_GATE_EVENT "0x01" CACHE STRING
+  "One real event compiled into the disposable PMU profiler gate"
+)
+
+if(VITADEBUG_EXPERIMENTAL_PMU_PROFILER_REAL_EVENTS AND
+   NOT VITADEBUG_EXPERIMENTAL_PMU_PROFILER)
+  message(FATAL_ERROR
+    "VITADEBUG_EXPERIMENTAL_PMU_PROFILER_REAL_EVENTS requires VITADEBUG_EXPERIMENTAL_PMU_PROFILER")
+endif()
+if(VITADEBUG_EXPERIMENTAL_PMU_PROFILER_REAL_EVENTS AND
+   NOT (VITADEBUG_PMU_PROFILER_GATE_EVENT STREQUAL "0x01" OR
+        VITADEBUG_PMU_PROFILER_GATE_EVENT STREQUAL "0x03" OR
+        VITADEBUG_PMU_PROFILER_GATE_EVENT STREQUAL "0x10"))
+  message(FATAL_ERROR
+    "VITADEBUG_PMU_PROFILER_GATE_EVENT must be exactly 0x01, 0x03, or 0x10")
+endif()
 
 add_executable(vitadebug_kernel
   src/main.c
@@ -28,6 +52,14 @@ if(VITADEBUG_EXPERIMENTAL_HW_DEBUG)
   target_sources(vitadebug_kernel PRIVATE
     src/hw_debug.c
     src/armv7_debug_codec.c
+  )
+endif()
+if(VITADEBUG_EXPERIMENTAL_PMU_PROFILER)
+  target_sources(vitadebug_kernel PRIVATE
+    src/pmu_session.c
+    src/pmu_backend.c
+    src/pmu_profiler_bridge.c
+    src/pmu_profiler_transport.c
   )
 endif()
 
@@ -45,10 +77,23 @@ if(VITADEBUG_EXPERIMENTAL_HW_DEBUG)
     VD_KERNEL_ENABLE_EXPERIMENTAL_HW_DEBUG=1
   )
 endif()
+if(VITADEBUG_EXPERIMENTAL_PMU_PROFILER)
+  target_compile_definitions(vitadebug_kernel PRIVATE
+    VD_KERNEL_ENABLE_EXPERIMENTAL_PMU_SESSION=1
+    VD_KERNEL_ENABLE_EXPERIMENTAL_PMU_PROFILER_TRANSPORT=1
+    VD_PMU_PROFILER_BRIDGE_NO_DICTIONARY=1
+  )
+endif()
+if(VITADEBUG_EXPERIMENTAL_PMU_PROFILER_REAL_EVENTS)
+  target_compile_definitions(vitadebug_kernel PRIVATE
+    VD_KERNEL_ENABLE_EXPERIMENTAL_PMU_PROFILER_REAL_EVENTS=1
+  )
+endif()
 target_link_options(vitadebug_kernel PRIVATE -Wl,-q -nostdlib)
 
 target_include_directories(vitadebug_kernel PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/include
+  ${CMAKE_CURRENT_SOURCE_DIR}/../profiler/include
 )
 
 target_link_libraries(vitadebug_kernel
@@ -121,9 +166,42 @@ if(VITADEBUG_EXPERIMENTAL_VFP_SNAPSHOT)
   )
 endif()
 
+if(VITADEBUG_EXPERIMENTAL_PMU_PROFILER_REAL_EVENTS)
+  add_executable(vitadebug_pmu_profiler_gate
+    pmu-profiler-gate/main.c
+    ${VITASDK}/share/gcc-arm-vita-eabi/samples/common/debugScreen.c
+  )
+  target_compile_options(vitadebug_pmu_profiler_gate PRIVATE
+    -Wall -Wextra -Werror -O2
+  )
+  target_compile_definitions(vitadebug_pmu_profiler_gate PRIVATE
+    VD_PMU_PROFILER_GATE_EVENT_CODE=${VITADEBUG_PMU_PROFILER_GATE_EVENT}
+  )
+  add_dependencies(vitadebug_pmu_profiler_gate vitadebug_stubs)
+  target_include_directories(vitadebug_pmu_profiler_gate PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${VITASDK}/share/gcc-arm-vita-eabi/samples/common
+  )
+  target_link_libraries(vitadebug_pmu_profiler_gate
+    ${CMAKE_BINARY_DIR}/vitadebug_stubs/libvitadebug_kernel_stub.a
+    SceCtrl_stub
+    SceDisplay_stub
+    SceIofilemgr_stub
+    SceKernelThreadMgr_stub
+  )
+  vita_create_self(vitadebug-pmu-profiler-gate-eboot.bin
+    vitadebug_pmu_profiler_gate UNSAFE)
+  vita_create_vpk(vitadebug-pmu-profiler-gate.vpk "VDCP00010"
+    vitadebug-pmu-profiler-gate-eboot.bin
+    VERSION "01.00"
+    NAME "VD PMU profiler gate"
+  )
+endif()
+
 install(DIRECTORY ${CMAKE_BINARY_DIR}/vitadebug_stubs/
   DESTINATION lib
   FILES_MATCHING PATTERN "*.a"
 )
 
 install(FILES include/vitadebug_kernel.h DESTINATION include)
+install(FILES include/vitadebug_pmu_profiler.h DESTINATION include)

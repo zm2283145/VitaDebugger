@@ -54,3 +54,9 @@ error and cleanup flow.
 The interfaces and name integration compile for both host and Vita targets and
 have native event/dictionary tests. No automatic VitaGL/SceGxm integration and
 no hardware timing claim are part of this increment.
+
+The [Render96EX VitaGL integration record](render96ex-vitagl-integration.md)
+identifies the concrete application-owned frame, draw, and swap boundaries,
+plus the default-off build and bounded capture result. Direct SceGxm hooks belong
+inside the pinned VitaGL source that owns those calls, never in binary
+interposition.
