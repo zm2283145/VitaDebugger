@@ -1,7 +1,7 @@
 all: libuvdb.a
 
 clean:
-	rm -f *.o src/*.o tests/*.o tests/vita/*.o *.a *.elf *.velf eboot.bin param.sfo *.vpk *.psp2dmp test-rsp test-rsp.exe test-rsp-console test-rsp-console.exe test-register-bank test-register-bank.exe test-thread-control test-thread-control.exe test-monitor test-monitor.exe test-breakpoint-patch test-breakpoint-patch.exe test-exclusive-step test-exclusive-step.exe test-console-queue test-console-queue.exe test-console-transport test-console-transport.exe test-vfp-policy test-vfp-policy.exe test-kernel-thread-mutation test-kernel-thread-mutation.exe test-kernel-pmu-session test-kernel-pmu-session.exe test-kernel-pmu-backend test-kernel-pmu-backend.exe kernel/dipsw-read-probe/test-record kernel/dipsw-read-probe/test-record.exe kernel/dipsw-set-restore-probe/test-record kernel/dipsw-set-restore-probe/test-record.exe kernel/dipsw-dbgvcr-probe/test-record kernel/dipsw-dbgvcr-probe/test-record.exe kernel/pmu-session-probe/test-record kernel/pmu-session-probe/test-record.exe kernel/thread-setter-resolver-probe/test-record kernel/thread-setter-resolver-probe/test-record.exe $(UVDB_ASLR_FIXTURE_OBJECT) $(UVDB_ASLR_FIXTURE_ELF) $(UVDB_ASLR_FIXTURE_VELF) $(UVDB_ASLR_FIXTURE_SELF)
+	rm -f *.o src/*.o tests/*.o tests/vita/*.o *.a *.elf *.velf eboot.bin param.sfo *.vpk *.psp2dmp test-rsp test-rsp.exe test-rsp-hardening test-rsp-hardening.exe test-uvdb-core-integration test-uvdb-core-integration.exe test-memory-transaction test-memory-transaction.exe test-protocol-gate test-protocol-gate.exe test-exception-guard test-exception-guard.exe test-exception-handlers test-exception-handlers.exe test-rsp-console test-rsp-console.exe test-register-bank test-register-bank.exe test-thread-control test-thread-control.exe test-monitor test-monitor.exe test-breakpoint-patch test-breakpoint-patch.exe test-exclusive-step test-exclusive-step.exe test-console-queue test-console-queue.exe test-console-transport test-console-transport.exe test-vfp-policy test-vfp-policy.exe test-kernel-thread-mutation test-kernel-thread-mutation.exe test-kernel-pmu-session test-kernel-pmu-session.exe test-kernel-pmu-backend test-kernel-pmu-backend.exe test-kernel-pmu-profiler-bridge test-kernel-pmu-profiler-bridge.exe test-kernel-pmu-profiler-real-events-disabled test-kernel-pmu-profiler-real-events-disabled.exe test-kernel-pmu-profiler-real-events test-kernel-pmu-profiler-real-events.exe kernel/dipsw-read-probe/test-record kernel/dipsw-read-probe/test-record.exe kernel/dipsw-set-restore-probe/test-record kernel/dipsw-set-restore-probe/test-record.exe kernel/dipsw-dbgvcr-probe/test-record kernel/dipsw-dbgvcr-probe/test-record.exe kernel/pmu-session-probe/test-record kernel/pmu-session-probe/test-record.exe kernel/thread-setter-resolver-probe/test-record kernel/thread-setter-resolver-probe/test-record.exe $(UVDB_ASLR_FIXTURE_OBJECT) $(UVDB_ASLR_FIXTURE_ELF) $(UVDB_ASLR_FIXTURE_VELF) $(UVDB_ASLR_FIXTURE_SELF)
 	$(MAKE) -C profiler clean
 	$(MAKE) -C attach clean
 
@@ -102,7 +102,7 @@ psvDebugScreen.o: $(VITASDK)/share/gcc-arm-vita-eabi/samples/common/debugScreen.
 tests/vita/thumb_step_returns.o: tests/vita/thumb_step_returns.S
 	arm-vita-eabi-gcc $< $(CFLAGS) -c -o $@
 
-libuvdb.a: src/uvdb.o src/uvdb_registers.o src/uvdb_rsp.o src/uvdb_thread_control.o src/uvdb_monitor.o src/uvdb_breakpoint_patch.o src/uvdb_exclusive_step.o $(UVDB_VFP_OBJECTS) src/uvdb_console.o src/uvdb_console_transport.o src/uvdb_debugnet.o src/stdio_redirect.o
+libuvdb.a: src/uvdb.o src/uvdb_registers.o src/uvdb_rsp.o src/uvdb_rsp_frame.o src/uvdb_fileio_flow.o src/uvdb_memory_transaction.o src/uvdb_protocol_gate.o src/uvdb_exception_guard.o src/uvdb_exception_handlers.o src/uvdb_thread_control.o src/uvdb_monitor.o src/uvdb_breakpoint_patch.o src/uvdb_exclusive_step.o $(UVDB_VFP_OBJECTS) src/uvdb_console.o src/uvdb_console_transport.o src/uvdb_debugnet.o src/stdio_redirect.o
 	arm-vita-eabi-ar rcs $@ $^
 
 HOST_CC ?= cc
@@ -119,12 +119,30 @@ HOST_CC_RUN ?= $(HOST_CC)
 HOST_PYTHON ?= python3
 endif
 
-.PHONY: host-tests host-test-rsp host-test-rsp-console host-test-register-bank host-test-thread-control host-test-monitor host-test-breakpoint-patch host-test-exclusive-step host-test-vfp-policy host-test-kernel-thread-mutation host-test-kernel-pmu-session host-test-kernel-pmu-backend host-test-pmu-session-probe-record host-test-thread-setter-resolver-record host-test-console-queue host-test-console-transport host-test-symbols host-test-vfp-lifecycle host-test-aslr-lifecycle host-test-live-gates host-test-target-xml host-test-dipsw-probe-record host-test-dipsw-set-restore-record host-test-dipsw-dbgvcr-record host-test-profiler host-test-attach aslr-fixture
+.PHONY: host-tests host-test-rsp host-test-rsp-hardening host-test-uvdb-core-integration host-test-memory-transaction host-test-protocol-gate host-test-exception-guard host-test-exception-handlers host-test-rsp-console host-test-register-bank host-test-thread-control host-test-monitor host-test-breakpoint-patch host-test-exclusive-step host-test-vfp-policy host-test-kernel-thread-mutation host-test-kernel-pmu-session host-test-kernel-pmu-backend host-test-kernel-pmu-profiler-bridge host-test-kernel-pmu-profiler-real-events-disabled host-test-kernel-pmu-profiler-real-events host-test-pmu-profiler-gate-record host-test-pmu-session-probe-record host-test-thread-setter-resolver-record host-test-console-queue host-test-console-transport host-test-symbols host-test-vfp-lifecycle host-test-aslr-lifecycle host-test-live-gates host-test-target-xml host-test-dipsw-probe-record host-test-dipsw-set-restore-record host-test-dipsw-dbgvcr-record host-test-profiler host-test-attach aslr-fixture
 
-host-tests: host-test-rsp host-test-rsp-console host-test-register-bank host-test-thread-control host-test-monitor host-test-breakpoint-patch host-test-exclusive-step host-test-vfp-policy host-test-kernel-thread-mutation host-test-kernel-pmu-session host-test-kernel-pmu-backend host-test-pmu-session-probe-record host-test-thread-setter-resolver-record host-test-console-queue host-test-console-transport host-test-symbols host-test-vfp-lifecycle host-test-aslr-lifecycle host-test-live-gates host-test-target-xml host-test-dipsw-probe-record host-test-dipsw-set-restore-record host-test-dipsw-dbgvcr-record host-test-profiler host-test-attach
+host-tests: host-test-rsp host-test-rsp-hardening host-test-uvdb-core-integration host-test-memory-transaction host-test-protocol-gate host-test-exception-guard host-test-exception-handlers host-test-rsp-console host-test-register-bank host-test-thread-control host-test-monitor host-test-breakpoint-patch host-test-exclusive-step host-test-vfp-policy host-test-kernel-thread-mutation host-test-kernel-pmu-session host-test-kernel-pmu-backend host-test-kernel-pmu-profiler-bridge host-test-kernel-pmu-profiler-real-events-disabled host-test-kernel-pmu-profiler-real-events host-test-pmu-profiler-gate-record host-test-pmu-session-probe-record host-test-thread-setter-resolver-record host-test-console-queue host-test-console-transport host-test-symbols host-test-vfp-lifecycle host-test-aslr-lifecycle host-test-live-gates host-test-target-xml host-test-dipsw-probe-record host-test-dipsw-set-restore-record host-test-dipsw-dbgvcr-record host-test-profiler host-test-attach
 
 host-test-rsp: test-rsp$(HOST_EXEEXT)
 	./test-rsp$(HOST_EXEEXT)
+
+host-test-rsp-hardening: test-rsp-hardening$(HOST_EXEEXT)
+	./test-rsp-hardening$(HOST_EXEEXT)
+
+host-test-uvdb-core-integration: test-uvdb-core-integration$(HOST_EXEEXT)
+	./test-uvdb-core-integration$(HOST_EXEEXT)
+
+host-test-memory-transaction: test-memory-transaction$(HOST_EXEEXT)
+	./test-memory-transaction$(HOST_EXEEXT)
+
+host-test-protocol-gate: test-protocol-gate$(HOST_EXEEXT)
+	./test-protocol-gate$(HOST_EXEEXT)
+
+host-test-exception-guard: test-exception-guard$(HOST_EXEEXT)
+	./test-exception-guard$(HOST_EXEEXT)
+
+host-test-exception-handlers: test-exception-handlers$(HOST_EXEEXT)
+	./test-exception-handlers$(HOST_EXEEXT)
 
 host-test-rsp-console: test-rsp-console$(HOST_EXEEXT)
 	./test-rsp-console$(HOST_EXEEXT)
@@ -155,6 +173,18 @@ host-test-kernel-pmu-session: test-kernel-pmu-session$(HOST_EXEEXT)
 
 host-test-kernel-pmu-backend: test-kernel-pmu-backend$(HOST_EXEEXT)
 	./test-kernel-pmu-backend$(HOST_EXEEXT)
+
+host-test-kernel-pmu-profiler-bridge: test-kernel-pmu-profiler-bridge$(HOST_EXEEXT)
+	./test-kernel-pmu-profiler-bridge$(HOST_EXEEXT)
+
+host-test-kernel-pmu-profiler-real-events-disabled: test-kernel-pmu-profiler-real-events-disabled$(HOST_EXEEXT)
+	./test-kernel-pmu-profiler-real-events-disabled$(HOST_EXEEXT)
+
+host-test-kernel-pmu-profiler-real-events: test-kernel-pmu-profiler-real-events$(HOST_EXEEXT)
+	./test-kernel-pmu-profiler-real-events$(HOST_EXEEXT)
+
+host-test-pmu-profiler-gate-record: test-pmu-profiler-gate-record$(HOST_EXEEXT)
+	./test-pmu-profiler-gate-record$(HOST_EXEEXT)
 
 host-test-pmu-session-probe-record: kernel/pmu-session-probe/test-record$(HOST_EXEEXT)
 	./kernel/pmu-session-probe/test-record$(HOST_EXEEXT)
@@ -207,6 +237,24 @@ host-test-attach:
 test-rsp$(HOST_EXEEXT): src/uvdb_rsp.c src/uvdb_rsp.h tests/host/test_rsp_registers.c
 	$(HOST_CC_RUN) $(HOST_CFLAGS) src/uvdb_rsp.c tests/host/test_rsp_registers.c -o $@
 
+test-rsp-hardening$(HOST_EXEEXT): src/uvdb_rsp.c src/uvdb_rsp.h src/uvdb_rsp_frame.c src/uvdb_rsp_frame.h src/uvdb_fileio_flow.c src/uvdb_fileio_flow.h src/uvdb_thread_control.c src/uvdb_thread_control.h tests/host/test_rsp_hardening.c
+	$(HOST_CC_RUN) $(HOST_CFLAGS) src/uvdb_rsp.c src/uvdb_rsp_frame.c src/uvdb_fileio_flow.c src/uvdb_thread_control.c tests/host/test_rsp_hardening.c -o $@
+
+test-uvdb-core-integration$(HOST_EXEEXT): src/uvdb.c tests/host/test_uvdb_core_integration.c tests/host/uvdb_host_platform.h src/uvdb_rsp.c src/uvdb_rsp_frame.c src/uvdb_fileio_flow.c src/uvdb_thread_control.c src/uvdb_console_transport.c src/uvdb_console.c src/uvdb_protocol_gate.c src/uvdb_exception_guard.c src/uvdb_exception_handlers.c src/uvdb_breakpoint_patch.c src/uvdb_exclusive_step.c src/uvdb_monitor.c src/uvdb_registers.c
+	$(HOST_CC_RUN) $(HOST_CFLAGS) -ffunction-sections -fdata-sections -Itests/host tests/host/test_uvdb_core_integration.c src/uvdb_rsp.c src/uvdb_rsp_frame.c src/uvdb_fileio_flow.c src/uvdb_thread_control.c src/uvdb_console_transport.c src/uvdb_console.c src/uvdb_protocol_gate.c src/uvdb_exception_guard.c src/uvdb_exception_handlers.c src/uvdb_breakpoint_patch.c src/uvdb_exclusive_step.c src/uvdb_monitor.c src/uvdb_registers.c -Wl,--gc-sections -o $@
+
+test-memory-transaction$(HOST_EXEEXT): src/uvdb_memory_transaction.c src/uvdb_memory_transaction.h tests/host/test_memory_transaction.c
+	$(HOST_CC_RUN) $(HOST_CFLAGS) src/uvdb_memory_transaction.c tests/host/test_memory_transaction.c -o $@
+
+test-protocol-gate$(HOST_EXEEXT): src/uvdb_protocol_gate.c src/uvdb_protocol_gate.h tests/host/test_protocol_gate.c
+	$(HOST_CC_RUN) $(HOST_CFLAGS) src/uvdb_protocol_gate.c tests/host/test_protocol_gate.c $(HOST_THREAD_FLAGS) -o $@
+
+test-exception-guard$(HOST_EXEEXT): src/uvdb_exception_guard.c src/uvdb_exception_guard.h tests/host/test_exception_guard.c
+	$(HOST_CC_RUN) $(HOST_CFLAGS) src/uvdb_exception_guard.c tests/host/test_exception_guard.c $(HOST_THREAD_FLAGS) -o $@
+
+test-exception-handlers$(HOST_EXEEXT): src/uvdb_exception_handlers.c src/uvdb_exception_handlers.h tests/host/test_exception_handlers.c
+	$(HOST_CC_RUN) $(HOST_CFLAGS) src/uvdb_exception_handlers.c tests/host/test_exception_handlers.c -o $@
+
 test-rsp-console$(HOST_EXEEXT): src/uvdb_rsp.c src/uvdb_rsp.h tests/host/test_rsp_console.c
 	$(HOST_CC_RUN) $(HOST_CFLAGS) src/uvdb_rsp.c tests/host/test_rsp_console.c -o $@
 
@@ -236,6 +284,18 @@ test-kernel-pmu-session$(HOST_EXEEXT): kernel/src/pmu_session.c kernel/src/pmu_s
 
 test-kernel-pmu-backend$(HOST_EXEEXT): kernel/src/pmu_backend.c kernel/src/pmu_backend.h kernel/src/pmu_backend_host_test.h kernel/src/pmu_session.c kernel/src/pmu_session.h tests/host/test_kernel_pmu_backend.c
 	$(HOST_CC_RUN) $(HOST_CFLAGS) -pedantic-errors -DVD_KERNEL_ENABLE_EXPERIMENTAL_PMU_SESSION=1 -DVD_PMU_BACKEND_HOST_TEST=1 -Ikernel/src kernel/src/pmu_backend.c kernel/src/pmu_session.c tests/host/test_kernel_pmu_backend.c -o $@
+
+test-kernel-pmu-profiler-bridge$(HOST_EXEEXT): kernel/src/pmu_profiler_bridge.c kernel/src/pmu_profiler_bridge.h kernel/src/pmu_profiler_transport.c kernel/src/pmu_profiler_transport.h kernel/src/pmu_backend.c kernel/src/pmu_backend.h kernel/src/pmu_backend_host_test.h kernel/src/pmu_session.c kernel/src/pmu_session.h kernel/include/vitadebug_pmu_profiler.h profiler/src/vitaprofiler.c profiler/src/vitaprofiler_names.c profiler/src/vitaprofiler_pmu.c profiler/include/vitaprofiler_pmu.h profiler/include/vitaprofiler.h tests/host/test_kernel_pmu_profiler_bridge.c
+	$(HOST_CC_RUN) $(HOST_CFLAGS) -pedantic-errors -DVD_KERNEL_ENABLE_EXPERIMENTAL_PMU_SESSION=1 -DVD_KERNEL_ENABLE_EXPERIMENTAL_PMU_PROFILER_TRANSPORT=1 -DVD_TEST_EXPECT_REAL_EVENTS_COMPILED=0 -DVD_PMU_BACKEND_HOST_TEST=1 -Iprofiler/include -Ikernel/include -Ikernel/src kernel/src/pmu_profiler_bridge.c kernel/src/pmu_profiler_transport.c kernel/src/pmu_backend.c kernel/src/pmu_session.c profiler/src/vitaprofiler.c profiler/src/vitaprofiler_names.c profiler/src/vitaprofiler_pmu.c tests/host/test_kernel_pmu_profiler_bridge.c -o $@
+
+test-kernel-pmu-profiler-real-events-disabled$(HOST_EXEEXT): kernel/src/pmu_profiler_bridge.c kernel/src/pmu_profiler_bridge.h kernel/src/pmu_profiler_transport.c kernel/src/pmu_profiler_transport.h kernel/src/pmu_backend.c kernel/src/pmu_backend.h kernel/src/pmu_backend_host_test.h kernel/src/pmu_session.c kernel/src/pmu_session.h kernel/include/vitadebug_pmu_profiler.h profiler/src/vitaprofiler.c profiler/src/vitaprofiler_names.c profiler/src/vitaprofiler_pmu.c profiler/include/vitaprofiler_pmu.h profiler/include/vitaprofiler.h tests/host/test_kernel_pmu_profiler_bridge.c
+	$(HOST_CC_RUN) $(HOST_CFLAGS) -pedantic-errors -DVD_KERNEL_ENABLE_EXPERIMENTAL_PMU_SESSION=1 -DVD_KERNEL_ENABLE_EXPERIMENTAL_PMU_PROFILER_TRANSPORT=1 -DVD_KERNEL_ENABLE_EXPERIMENTAL_PMU_PROFILER_REAL_EVENTS=0 -DVD_TEST_EXPECT_REAL_EVENTS_COMPILED=0 -DVD_PMU_BACKEND_HOST_TEST=1 -Iprofiler/include -Ikernel/include -Ikernel/src kernel/src/pmu_profiler_bridge.c kernel/src/pmu_profiler_transport.c kernel/src/pmu_backend.c kernel/src/pmu_session.c profiler/src/vitaprofiler.c profiler/src/vitaprofiler_names.c profiler/src/vitaprofiler_pmu.c tests/host/test_kernel_pmu_profiler_bridge.c -o $@
+
+test-kernel-pmu-profiler-real-events$(HOST_EXEEXT): kernel/src/pmu_profiler_bridge.c kernel/src/pmu_profiler_bridge.h kernel/src/pmu_profiler_transport.c kernel/src/pmu_profiler_transport.h kernel/src/pmu_backend.c kernel/src/pmu_backend.h kernel/src/pmu_backend_host_test.h kernel/src/pmu_session.c kernel/src/pmu_session.h kernel/include/vitadebug_pmu_profiler.h profiler/src/vitaprofiler.c profiler/src/vitaprofiler_names.c profiler/src/vitaprofiler_pmu.c profiler/include/vitaprofiler_pmu.h profiler/include/vitaprofiler.h tests/host/test_kernel_pmu_profiler_bridge.c
+	$(HOST_CC_RUN) $(HOST_CFLAGS) -pedantic-errors -DVD_KERNEL_ENABLE_EXPERIMENTAL_PMU_SESSION=1 -DVD_KERNEL_ENABLE_EXPERIMENTAL_PMU_PROFILER_TRANSPORT=1 -DVD_KERNEL_ENABLE_EXPERIMENTAL_PMU_PROFILER_REAL_EVENTS=1 -DVD_TEST_EXPECT_REAL_EVENTS_COMPILED=1 -DVD_PMU_BACKEND_HOST_TEST=1 -Iprofiler/include -Ikernel/include -Ikernel/src kernel/src/pmu_profiler_bridge.c kernel/src/pmu_profiler_transport.c kernel/src/pmu_backend.c kernel/src/pmu_session.c profiler/src/vitaprofiler.c profiler/src/vitaprofiler_names.c profiler/src/vitaprofiler_pmu.c tests/host/test_kernel_pmu_profiler_bridge.c -o $@
+
+test-pmu-profiler-gate-record$(HOST_EXEEXT): kernel/pmu-profiler-gate/journal.h tests/host/test_pmu_profiler_gate_record.c
+	$(HOST_CC_RUN) $(HOST_CFLAGS) -pedantic-errors -Ikernel/pmu-profiler-gate tests/host/test_pmu_profiler_gate_record.c -o $@
 
 kernel/pmu-session-probe/test-record$(HOST_EXEEXT): kernel/pmu-session-probe/test_record.c kernel/pmu-session-probe/include/vitadebug_pmu_probe.h kernel/src/pmu_backend.h kernel/src/pmu_session.h
 	$(HOST_CC_RUN) $(HOST_CFLAGS) -DVD_KERNEL_ENABLE_EXPERIMENTAL_PMU_SESSION=1 -Ikernel/pmu-session-probe/include -Ikernel/src kernel/pmu-session-probe/test_record.c -o $@

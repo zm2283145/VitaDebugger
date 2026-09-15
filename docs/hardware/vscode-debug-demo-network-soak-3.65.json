@@ -1,0 +1,89 @@
+{
+  "schema": "vitadebugger-vscode-demo-network-soak-v1",
+  "recorded_at_utc": "2026-09-15T14:52:54.448Z",
+  "target": {
+    "device_class": "retail-handheld",
+    "firmware": "3.65",
+    "title_id": "UVDBDEMO1",
+    "kernel_companion_linked": false
+  },
+  "build": {
+    "vpk": {
+      "size_bytes": 229226,
+      "sha256": "f11cb3abf5bcc0388ff24b6c91ab67d35797d000ffaea78f269d94c870d24ae3"
+    },
+    "installed_eboot": {
+      "size_bytes": 542270,
+      "sha256": "4909559a9e227e74ad2a42fb95bafd6a13323f3fb214acc338bb61fe3c6df7a8"
+    },
+    "symbols": {
+      "size_bytes": 464884,
+      "sha256": "db1f401a90f028151520fdd84289f4981a755604a1ce76c679da947f424b4819"
+    }
+  },
+  "deployment": {
+    "transport": "signed VitaDevDeploy FTP carrier",
+    "result_code": 0,
+    "result_stage": "complete",
+    "installed_identity": "local+installed",
+    "post_install_recovery_disposition": "clean",
+    "promotion_marker_present": false,
+    "journal_present": false,
+    "partial_journal_present": false
+  },
+  "debugger": {
+    "gdb": "GNU gdb 15.2",
+    "protocol": "GDB RSP over TCP with QStartNoAckMode",
+    "clean_lifecycle_sessions": 14,
+    "each_clean_session": [
+      "attach",
+      "receive initial T05",
+      "continue",
+      "send asynchronous Ctrl-C",
+      "receive T02",
+      "detach",
+      "reconnect"
+    ],
+    "peer_loss_sessions": {
+      "running_disconnects": 2,
+      "stopped_disconnects": 1,
+      "subsequent_clean_reconnects_passed": true
+    },
+    "source_breakpoint": {
+      "symbol": "vscode_demo_breakpoint",
+      "hit": true,
+      "initial_demo_value": 1,
+      "mutated_demo_value": 42,
+      "readback_matched": true,
+      "restored_demo_value": 1,
+      "breakpoint_removed": true,
+      "detached_cleanly": true
+    },
+    "instruction_step": {
+      "state": "ARM",
+      "pc_before": "0x810461d0",
+      "pc_after": "0x810461d4",
+      "detached_cleanly": true
+    },
+    "listener_reachable_after_gate": true
+  },
+  "scope": {
+    "result": "pass",
+    "validated": [
+      "known stable application-side debugger build",
+      "installed-build identity verification",
+      "persistent no-ack attach and reconnect",
+      "asynchronous interrupt and clean detach",
+      "running and stopped peer-loss recovery",
+      "source breakpoint and reversible memory mutation",
+      "one bounded ARM instruction step"
+    ],
+    "not_validated": [
+      "the uncommitted debugger-core hardening build",
+      "stdout or stderr pressure because this target was quiet during collection",
+      "kernel-assisted all-stop or foreign-thread mutation",
+      "malformed-packet recovery",
+      "long-duration or Wi-Fi-loss soak"
+    ]
+  }
+}

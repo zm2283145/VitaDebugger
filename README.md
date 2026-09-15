@@ -136,7 +136,12 @@ status includes:
   retail 3.65 hardware; see the
   [validation record](docs/hardware/vscode-debug-demo-gdb-mi-3.65.json). The
   actual VS Code UI-driven F5 session also passes build/deploy/attach, source
-  breakpoint, Watch-value mutation, resume, pause, and source stepping.
+  breakpoint, Watch-value mutation, resume, pause, and source stepping. Its
+  direct-TCP revalidation additionally passes installed-EBOOT identity,
+  live-ASLR symbols, detach, and exact-title cleanup. The first post-fix run
+  exposed a recoverable SceShell launch race before the immediate full retry
+  passed; see the
+  [direct-TCP validation record](docs/hardware/vscode-debug-demo-direct-tcp-3.65.json).
 - A completed bounded `stdout`/`stderr` bridge that emits GDB `O` packets only
   after no-ack negotiation, never gives application threads ownership of the
   RSP socket, and isolates output between reconnect generations. Native tests
@@ -182,16 +187,40 @@ status includes:
   bounded name dictionary. All 13 on-device checks pass, including live
   resolution of every captured custom and built-in event ID, without calling
   the kernel plugin.
-- A host-tested profiler capture pipeline: an allocation-free callback drain,
-  bounded TCP receiver, named text summaries, complete decoded JSON, and Chrome
-  Trace/Perfetto export. Cooperative CPU-side VitaGL/SceGxm hook points and a
+- A hardware-tested profiler capture pipeline: an allocation-free callback
+  drain, caller-owned Vita TCP sink, bounded PC receiver, named text summaries,
+  complete decoded JSON, and Chrome Trace/Perfetto export. Two real retail-3.65
+  captures delivered and independently decoded all 13 expected events with
+  clean EOF; pre-connect cancellation, forced peer disconnect, and a successful
+  recovery relaunch also passed. Cooperative CPU-side VitaGL/SceGxm hook points and a
   fail-closed PMU provider/lease boundary are implemented. Retail 3.65 hardware
   rejected both user-mode `ScePerf` loading paths, so the direct adapter now
   returns unsupported instead of calling an unresolved stub. Optional kernel
   ABI v1.13 safely reads a same-core Cortex-A9 PMU inventory, reports six event
-  counters, and leaves all observed control state unchanged. Counter mutation,
-  the Vita-side network owner, automatic graphics interposition, and a dedicated
-  desktop GUI are not implemented.
+  counters, and leaves all observed control state unchanged. A separate
+  disposable kernel gate then passed the first bounded counter mutation on all
+  three application cores: fixed lane 5, software-increment event `0x00`,
+  `17/17` read-back, and byte-exact gate-snapshot restoration with no retained
+  obligation. A host-tested bridge and separately versioned, default-off kernel
+  transport now connect that session to VitaProfiler's exact-restore provider
+  ABI with fixed core 0/lane 5, an owner-bound lease, watchdog, and orphan
+  cleanup. Its ordinary experimental build remains event `0x00`; a second
+  compile gate plus request acknowledgement admits only `0x01`, `0x03`, and
+  `0x10`. Separate durable-journal hardware gates then passed all three events
+  on retail 3.65: fixed core-0/lane-5 samples returned 56, 23, and 97
+  respectively, and every close proved exact restoration. Timeout,
+  disconnect, process-exit, ownership-conflict, and safe re-arm gates remain,
+  so this does not enable unrestricted production PMU sampling.
+  A first 300-frame Render96EX TCP capture also completed with zero ring or
+  transport loss. It measured the stable Mario-head workload at roughly
+  82--84 ms/frame and 814--852 draw calls/frame while the two CPU-observed
+  swaps totaled only about 0.38 ms/frame, localizing the main cost ahead of the
+  instrumented swap calls. A follow-up combined capture then passed the coarse
+  Goddard zones and 75 bounded `0x01` PMU reads with balanced scopes, zero
+  transport loss, and a clean exact-restoring close. Its 3.917 ms median
+  Goddard callback inside an 83.373 ms median head frame moves the next split
+  into VitaGL submission/synchronization or true GPU work. Binary graphics
+  interposition is intentionally not planned.
 - A read-only external-attach protocol and allocation-free broker core with
   exact-title discovery, kernel-ABI/capability negotiation, short-lived identity
   tickets, bounded host tooling, native tests, and a passing Vita cross-build.
@@ -242,7 +271,13 @@ Vita screenshots and structured records capture the completed probe results:
 | GDB monitor registry | [Console/display lifecycle evidence](docs/hardware/gdb-monitor-console-display-3.65.json) | Two raw-RSP sessions and GDB 15.2 passed `help`, `status`, `threads`, `modules`, `console`, and `display` with state preservation, clean detach/reconnect, non-consuming console statistics, and read-only display metadata |
 | DebugNet v24 | [Sustained UDP stream](docs/hardware/debugnet-v24-sustained-stream.jpg) | Logging remains live after a loaded stop/restart cycle, with the displayed queue draining and no packet drops or send errors |
 | Profiler + names | [13-check probe](docs/hardware/profiler-name-dictionary-3.65.json) | Thirteen passing user-mode checks, including the original timing/counter/snapshot/ring-pressure coverage plus bounded dictionary encoding and live resolution of every captured custom and built-in event ID; no kernel calls |
-| VitaDevDeploy UI | [Retail 3.65 lifecycle evidence](docs/hardware/vitadevdeploy-ui-3.65.md) | Native vita2d waiting screen, six clean post-refresh launch/exit cycles through both SceShell peel-close and Circle cleanup, packaged LiveArea asset integrity, and successful artwork refresh; two intermittent launch-time GPU faults are now recorded and keep this mode experimental |
+| Profiler live TCP | [Two validated captures and recovery evidence](docs/hardware/profiler-tcp-stream-retail-3.65.md) | Caller-owned SceNet connection, sealed dictionary plus 13-event stream, PC-side validation/decoding/Perfetto export, clean EOF and teardown, pre-connect cancellation, forced peer reset, and successful recovery relaunch; no kernel calls |
+| PMU session gate | [Per-core write/restore evidence](docs/hardware/profiler-pmu-session-gate-3.65.md) | The isolated lane-5 software-increment transaction passed application cores 0, 1, and 2 with `17/17` read-back, zero operation/restore errors, exact gate-snapshot restoration, and no retained obligation; arbitrary real-event continuous profiling remains disabled |
+| PMU real event `0x01` | [Durable journal and screenshots](kernel/pmu-profiler-gate/hardware-results/2026-09-15-event-01/README.md) | One owner-attended core-0/lane-5 L1 instruction-cache miss/refill sample returned 56; all transport calls succeeded and the completion journal proves exact restoration |
+| Render96EX profiler | [Two 300-frame Mario-head captures](docs/hardware/profiler-render96ex-head-baseline-2026-09-15.md) | The CPU/VitaGL baseline and follow-up Goddard+PMU capture both closed with zero loss; the latter resolved 25 names, balanced 2,321 scope pairs, sampled `0x01` 75 times, and localized only about 3.9 ms of an 83.4 ms median head frame inside Goddard |
+| VitaDevDeploy direct TCP | [Signed transfer/install evidence](docs/hardware/vitadevdeploy-direct-tcp-retail-3.65.md) | Verification-only and disposable install-and-launch jobs returned durable success, installed-EBOOT readback matched, recovery status was clean, and the guarded agent completed twelve launch/Circle-exit cycles without a new GPU dump |
+| VS Code direct-TCP F5 | [Build/deploy/debug evidence](docs/hardware/vscode-debug-demo-direct-tcp-3.65.json) | The immediate full retry passed build, signed install, launch, EBOOT identity, ASLR symbols, source breakpoint, live mutation, resume, detach, and exact-title cleanup; the first attempt's recoverable SceShell launch race remains open |
+| VitaDevDeploy UI | [Retail 3.65 lifecycle evidence](docs/hardware/vitadevdeploy-ui-3.65.md) | Two old launch-time GPU faults led to a wait-before-pool-reuse guard; its replacement passed twelve automated launch/Circle-exit cycles without a new dump, while broader lifecycle and interruption stress keeps the interface opt-in |
 
 Every listed probe check passed. These records document controlled test
 coverage; they do not claim that arbitrary applications or every firmware and
@@ -358,7 +393,9 @@ A separate low-overhead profiler intended for optimized builds:
 - Optional VitaGL RAM/CDRAM pool statistics.
 - Draw, texture, shader, allocation, and audio-underflow counters supplied by
   the host application or graphics/audio integrations.
-- GPU submission, wait, and completion timing where VitaGL/SceGxm permit it.
+- CPU-observed timing around cooperative VitaGL/SceGxm call sites. True GPU
+  submission, wait, and completion timestamps remain planned where the APIs
+  permit them.
 - An in-memory event ring buffer with network and file export options.
 
 Profiling remains separate from GDB because debugger stops and debug compiler
@@ -427,8 +464,10 @@ the internet.
 
 The [`deploy/`](deploy/) subproject supplies a signed PC-to-Vita deployment
 path for the normal edit/build/test loop. Its host command validates a VPK,
-signs a one-use job, transfers it through Vita Companion, waits for a durable
-result from the user-mode Vita agent, and can launch the installed title. Only
+signs a one-use job, transfers the package through the authenticated direct-TCP
+carrier or the FTP fallback, waits for a durable result from the user-mode Vita
+agent, and can launch the installed title. Direct mode still uses Vita
+Companion for small result/recovery reads and title lifecycle commands. Only
 the public signing key is embedded in the agent; the private key remains on the
 development computer.
 
@@ -881,12 +920,20 @@ uvdb_shutdown();
 Call `uvdb_shutdown()` only from normal application code, never from an
 exception callback. It removes debugger breakpoints and handlers, closes
 sockets, restores redirected `stdout` and `stderr`, and releases debugger-owned
-buffers and the safe-memory message pipe.
+buffers and the safe-memory message pipe. Full shutdown is deliberately
+terminal: use `uvdb_stop_server()` followed by `uvdb_start_server()` for an
+ordinary disconnect/reconnect. KuBridge can copy a user-handler pointer before
+slot replacement without exposing when that pending dispatch has retired, so a
+completed `uvdb_shutdown()` cannot safely authorize restarting its handler
+state or unloading a dynamically injected debugger module.
 
 Orderly teardown first joins the server, obtains or recovers a coherent stop,
 verifies restoration of every debugger-owned breakpoint byte, ends the stop
-session, releases handlers, and only then joins the lease keeper and other
-helpers. `uvdb_stop_server()` may retain the lease keeper when a breakpoint
+session, restores handlers, closes new handler admission, and only then joins
+the lease keeper and other helpers. Captured predecessor pointers and the
+closed callback gate remain immutable for the lifetime of the linked image so
+an already-dispatched late callback has a safe chain target. `uvdb_stop_server()`
+may retain the lease keeper when a breakpoint
 restoration obligation is still outstanding; this prevents the watchdog from
 resuming application threads into an uncertain trap. This shutdown ordering is
 host-reviewed and host-tested, but the restoration-failure path has not yet
@@ -1059,7 +1106,11 @@ undefined instructions report `SIGILL`; memory aborts report `SIGSEGV`.
 GDB does not automatically repair a fault. Continuing without changing the bad
 register, memory, or control flow usually triggers the same fault again.
 Applications installing their own exception handlers may conflict with the
-stub and must deliberately preserve and chain handlers.
+stub. VitaDebugger now captures one predecessor per exception type, chains
+unclaimed or nested faults through a serialized path, and restores the exact
+captured slot at terminal shutdown. KuBridge has no compare-and-restore or
+dispatcher-quiescence API, so exclusive ownership of those user slots and a
+non-unloading linked image remain requirements.
 
 ## Project integration example
 
@@ -1109,15 +1160,28 @@ exact matching unstripped ELF on the development computer.
   execution states, and uncertain PC writers are also rejected. A production
   resume-one path still needs transactional cancellation and trap rollback if
   the predicted instruction target is not reached.
-- The initial accept path and exception/RSP path still hold a global spin lock
-  across blocking work. Shutdown, registration, nested faults, and handler
-  chaining need a bounded state-machine refactor before this is suitable for
-  hostile or failure-prone applications.
-- RSP parsing is intended only for a trusted debugger today. Individual `p`/`P`
-  register packets now have exact syntax, number, width, and hexadecimal-value
-  validation. Memory and full-register `G` writes still need strict length,
-  syntax, overflow, page-boundary, and breakpoint-overlap validation plus
-  parser fuzzing.
+- Blocking accept/receive/send now run outside the global debugger lock. A
+  descriptor generation, packet-I/O lifetime, and whole-protocol owner keep
+  buffers stable across those lock drops; shutdown cancels the socket and waits
+  up to five seconds before retaining resources in the error state. Kernel stop
+  acquisition/recovery, cache maintenance, and exception-slot replacement
+  remain under the global lock because their coupled ownership contracts have
+  not yet been split into retryable operations.
+- Packet, memory, register, breakpoint, qXfer, thread-ID, and File-I/O parsing
+  now use strict bounded fields and transactional outputs, with deterministic
+  fuzz coverage. Live multi-chunk `M` writes check every kernel copy and never
+  report success after failure, but remain potentially partially mutated until
+  durable full-span rollback storage is integrated.
+- Standard File-I/O literal `C` and optional bounded attachments parse safely.
+  Exactly one `T02` is permitted only from a real saved all-stop context. The
+  legacy `uvdb_remote_syscall()` path owns neither, so `C` fails closed by
+  severing that protocol generation and returning `-1` rather than exposing
+  synthetic zero registers while peer threads run.
+- Full `uvdb_shutdown()` is terminal. KuBridge may have copied a callback
+  pointer before handler restoration and offers no dispatch-lifetime fence;
+  therefore dynamic debugger-module unload remains unsafe/unproven even after
+  visible callbacks drain. stop/start of the persistent service remains the
+  supported reconnect lifecycle.
 - Foreign-thread register writes are not enabled. A separately versioned
   snapshot/stage/verify/commit-or-restore kernel transaction ABI now passes
   native failure and rollback tests. It requires a retained exact target object,
@@ -1210,28 +1274,49 @@ exact matching unstripped ELF on the development computer.
   its 13-check retail 3.65 probe resolved every captured custom and built-in
   event ID. A callback binary drain and PC-side bounded TCP receiver/viewer now
   pass host tests and can emit text, decoded JSON, and Chrome Trace/Perfetto
-  output. A read-only kernel PMU inventory passes on retail 3.65, but no PMU
-  counter is enabled yet. The Vita-side socket/file owner, lease-protected exact
-  PMU snapshot/configure/restore session, arbitrary thread PC/call-stack
-  sampling, automatic VitaGL/SceGxm interposition, true GPU timestamps, and a
-  bespoke desktop GUI remain pending. The public ScePerf imports are unresolved
-  in the tested retail runtime and the direct adapter fails closed.
-- VitaDevDeploy currently depends on Vita Companion's unauthenticated FTP and
-  command transport. Signed one-use jobs protect the install decision, but do
-  not authenticate or encrypt Companion itself; use it only on a private LAN.
-  An authenticated, size-bounded direct TCP package-ingress port is planned so
-  the agent can receive a signed VPK without Companion FTP; the complete package
-  must still be staged to a local Vita path before the system installer call.
+  output. A read-only kernel PMU inventory and the separate isolated lane-5
+  software-increment write/read/exact-gate-restore test pass on retail 3.65
+  across all three application cores. A reviewed bridge and versioned,
+  default-off kernel transport now adapt that session to the profiler provider
+  ABI and retain restoration obligations across release, timeout, and failed
+  acquire. The normal kernel build still omits the backend/transport; the
+  exported disabled stubs fail closed. Three real events and their stable names
+  pass the double-gated fake-PMU build, and the matching disposable Vita client
+  cross-builds with a durable attempted/completion journal. All three
+  allowlisted events (`0x01`, `0x03`, and `0x10`) have passed separate bounded
+  retail-3.65 normal-close samples with exact restoration. Vita
+  timeout/disconnect/process-exit recovery and ownership-conflict gates remain
+  pending. Two Render96EX 300-frame TCP
+  captures pass with zero loss; the second validates the Goddard zones and 75
+  bounded `0x01` PMU samples with clean close/restoration. Arbitrary thread PC/call-stack
+  sampling, true GPU timestamps, and a bespoke desktop GUI also remain pending.
+  Real-event admission is still latched to one attempt per boot. Any future
+  re-arm must require no active lease, independently verified exact restore,
+  matching owner/generation state, and either explicit close or proof that the
+  owner process/thread is gone; that re-arm is not implemented.
+  Graphics integration uses explicit application/library source call sites
+  rather than binary interposition.
+  The public ScePerf imports are unresolved in the tested retail runtime and the
+  direct adapter fails closed.
+- VitaDevDeploy now has an authenticated, size-bounded direct-TCP package
+  carrier, and its basic signed verification plus disposable install-and-launch
+  gates pass on retail 3.65. The carrier is not encrypted and v1 does not
+  authenticate the Vita or its acknowledgements. Direct mode also still depends
+  on Vita Companion's unauthenticated FTP for small result/recovery reads and
+  its command transport for title lifecycle operations; use it only on a
+  private LAN. The complete verified package must still be staged to a local
+  Vita path before the system installer call.
 - Deployment is serialized and one-shot, starts from LiveArea, does not provide
   general target-app rollback, and still needs full bootstrap recovery and
   interrupted-install fault-injection testing before it is production-ready.
-- The optional vita2d deployment UI has now produced two intermittent
-  launch-time GPU faults on the retail 3.65 test configuration despite six
-  clean supervised launch/exit cycles. Both dumps resolve to the third rapid
-  startup frame in `vita2d_swap_buffers`; the UI now waits for prior GPU work
-  before libvita2d resets its shared transient pool. This mitigation is host
-  tested but still needs a hardware stress gate, so keep unattended deployment
-  headless until startup and teardown are hardened and revalidated.
+- The optional vita2d deployment UI produced two intermittent launch-time GPU
+  faults on the retail 3.65 test configuration after its first six-cycle gate.
+  Both dumps resolve to the third rapid startup frame in
+  `vita2d_swap_buffers`; the UI now waits for prior GPU work before libvita2d
+  resets its shared transient pool. The guarded replacement completed twelve
+  consecutive automated launch/Circle-exit cycles without a new dump, plus
+  direct verification and install-and-launch. Broader lifecycle/interruption
+  stress remains, so the interface stays opt-in.
 - The tested compatibility target is retail handheld Vita and Vita TV hardware
   running system software 3.65 with the tested Kubridge release. Individual
   experimental feature gates may cover only the device class named in their
@@ -1268,23 +1353,38 @@ exact matching unstripped ELF on the development computer.
    register access path. Independently gate a page-protection/data-abort software
    watchpoint design with strict ownership, access decoding, single-step/rearm,
    cleanup, and false-positive tests.
-6. Generalize the hardware-validated VS Code F5 workflow, then stress
-   same-process hot module load/unload churn and add automatic in-session symbol
-   refresh. This is dynamic-module and IDE convenience work; the ASLR,
-   verified-build, and initial VS Code hardware milestones are complete.
-7. Build the lease-protected kernel PMU session on top of the completed
-   read-only retail 3.65 gate: exact snapshot, allowlisted configuration,
-   read-back, sampling, timeout/error cleanup, and exact restoration. Then add
-   the Vita-side profiler TCP/file drain owner, integrate the cooperative
-   VitaGL/SceGxm hook points into real applications, and build a dedicated
-   desktop GUI on top of the working receiver, analyzer, and Perfetto export.
+6. Stress the hardware-validated VS Code F5 workflow across repeated direct-TCP
+   deploy/launch cycles, then stress same-process hot module load/unload churn
+   and add automatic in-session symbol refresh. The TCP-default host path, its
+   combined 51-test symbol/IDE gate, and the end-to-end direct-TCP Vita run pass.
+   A recoverable initial SceShell launch race remains a hardening item. This is
+   dynamic-module and IDE convenience work; the ASLR, verified-build, live edit,
+   detach, and source-step milestones are complete.
+7. Hardware-gate the newly versioned, default-off PMU/provider transport. The
+   fixed lane-5 software-increment transaction already proves exact
+   gate-snapshot restoration on application cores 0 through 2; the narrow
+   transport, fake-kernel matrix, and durable-journal disposable client now
+   build with real events limited to `0x01`, `0x03`, and `0x10`. All three
+   events have passed their separate core-0 normal-close samples with exact
+   restoration on retail 3.65. Next test timeout/error/disconnect/process-exit
+   cleanup and ownership conflicts.
+   Bounded repeated `0x01` sampling has passed in Render96EX. The caller-owned Vita TCP sink and PC receiver pass
+   live retail capture, disconnect, and recovery gates. The first 300-frame
+   Render96EX CPU/VitaGL baseline and combined Goddard+PMU capture also pass;
+   next add deeper VitaGL-owned/SceGxm timing where source hooks can do so
+   safely, then build a dedicated desktop GUI on top of the working receiver,
+   analyzer, and Perfetto export.
+   Only after those recovery gates pass, design a safe post-restore real-event
+   re-arm which requires an idle lease, independently verified exact restore,
+   matching owner/generation, and explicit close or confirmed owner exit.
 8. Complete protocol authentication/pairing and peer allowlists, isolated build
    directories, exported VitaSDK/CMake packages, CI and firmware coverage, and
    the project-wide licensing/release work.
-9. Give VitaDevDeploy an authenticated, bounded direct TCP package-ingress
-   service, hardware-stress its GPU synchronization and startup/teardown
-   lifecycle, then finish interrupted-install and bootstrap-recovery fault
-   injection.
+9. Continue hardening VitaDevDeploy's authenticated, bounded direct-TCP package
+   ingress. Basic signed verification, disposable install-and-launch, installed
+   EBOOT readback, clean recovery status, and a twelve-cycle guarded-UI lifecycle
+   run now pass on retail 3.65. Finish interruption/security, cold-start,
+   Wi-Fi-reconnect, bootstrap-recovery, and device-authenticated protocol gates.
 10. Extend the read-only external-attach scaffold with authenticated pairing,
     a shell-resident listener around the broker core, a trusted Vita target-
     identity provider, a fixed identity-checked per-process debugger-module
