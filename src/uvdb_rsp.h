@@ -54,6 +54,21 @@ struct uvdb_rsp_core_register_write {
     uint32_t value;
 };
 
+/* A fully validated ARM32 memory request. `data` points into the caller's
+ * packet and is populated only for `M` writes. Parser outputs are left
+ * untouched on every failure. */
+struct uvdb_rsp_memory_request {
+    uint32_t address;
+    size_t size;
+    const char* data;
+};
+
+/* One validated qXfer OFFSET,LENGTH suffix. */
+struct uvdb_rsp_xfer_range {
+    uint64_t offset;
+    uint64_t length;
+};
+
 /*
  * Encode one GDB remote-console payload: the literal 'O' followed by two
  * lowercase hexadecimal characters for every input byte.  The RSP '$...#cc'
@@ -121,3 +136,80 @@ int uvdb_rsp_apply_core_register_write(
     struct uvdb_rsp_core_registers* core,
     const struct uvdb_rsp_core_register_write* write,
     struct uvdb_rsp_core_register_write* inverse);
+
+/* Parse a complete legacy `G` packet transactionally. The unavailable FPA
+ * region may contain hexadecimal bytes or `xx` byte markers, but every core
+ * register and CPSR must be present and hexadecimal. `core` is unchanged on
+ * malformed or truncated input. The explicit VFP layout remains unsupported
+ * until a restorable full-bank setter exists. */
+int uvdb_rsp_parse_core_register_packet(
+    const char* packet,
+    size_t packet_size,
+    int include_vfp,
+    struct uvdb_rsp_core_registers* core);
+
+/* Strict ARM32 `mADDR,LENGTH` and `MADDR,LENGTH:HEX` parsers. Addresses and
+ * lengths are nonempty hexadecimal fields, the range must not wrap the
+ * 32-bit address space, and size must not exceed `maximum_size`. For `M`, the
+ * payload must contain exactly two hexadecimal digits per byte. */
+int uvdb_rsp_parse_memory_read_packet(
+    const char* packet,
+    size_t packet_size,
+    size_t maximum_size,
+    struct uvdb_rsp_memory_request* request);
+int uvdb_rsp_parse_memory_write_packet(
+    const char* packet,
+    size_t packet_size,
+    size_t maximum_size,
+    struct uvdb_rsp_memory_request* request);
+
+/* Decode an exact hexadecimal byte span after first validating the complete
+ * input. Destination bytes are never partially changed on malformed input.
+ * Input/output overlap is rejected. */
+int uvdb_rsp_decode_hex_bytes(
+    void* output,
+    size_t output_size,
+    const char* text,
+    size_t text_size);
+
+/* Parse a complete `Z0,ADDR,KIND` or `z0,ADDR,KIND` software-breakpoint
+ * packet. Outputs are unchanged on failure. */
+int uvdb_rsp_parse_software_breakpoint_packet(
+    const char* packet,
+    size_t packet_size,
+    int* insert,
+    uint32_t* address,
+    size_t* kind);
+
+/* Parse an exact qXfer OFFSET,LENGTH suffix. Each field and the resulting
+ * half-open range must fit in uint64_t. */
+int uvdb_rsp_parse_xfer_range(
+    const char* text,
+    size_t text_size,
+    struct uvdb_rsp_xfer_range* range);
+
+struct uvdb_rsp_fileio_result {
+    uint32_t result;
+    uint32_t error_number;
+    int has_error_number;
+    int interrupted;
+    int has_attachment;
+    const char* attachment;
+    size_t attachment_size;
+};
+
+/* Parse a complete remote file-I/O reply
+ * (`FRESULT[,ERRNO[,C]][;ATTACHMENT]`). RESULT may have one leading minus
+ * sign; numeric fields are bounded hexadecimal and the Ctrl-C field is the
+ * protocol's literal `C`. The attachment is a bounded view into `packet` and
+ * may contain arbitrary bytes. Output remains unchanged on failure. */
+int uvdb_rsp_parse_fileio_packet(
+    const char* packet,
+    size_t packet_size,
+    struct uvdb_rsp_fileio_result* result);
+
+/* Compatibility wrapper for callers interested only in RESULT. */
+int uvdb_rsp_parse_fileio_result_packet(
+    const char* packet,
+    size_t packet_size,
+    uint32_t* result);

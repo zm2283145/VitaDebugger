@@ -176,7 +176,14 @@ def assert_quiet_while_stopped(client: RspClient, seconds: float = 0.35) -> None
     raise SmokeFailure(f"unexpected packet while stopped: {payload[:80]!r}")
 
 
-def run_once(host: str, port: int, timeout: float, collect_seconds: float) -> None:
+def run_once(
+    host: str,
+    port: int,
+    timeout: float,
+    collect_seconds: float,
+    *,
+    require_markers: bool = True,
+) -> None:
     client = RspClient(host, port, timeout)
     try:
         supported = client.negotiate()
@@ -185,7 +192,9 @@ def run_once(host: str, port: int, timeout: float, collect_seconds: float) -> No
         print(f"initial stop: {initial_stop.decode('ascii', 'replace')}")
 
         client.connection.sendall(frame(b"c"))
-        output, packets = collect_console(client, collect_seconds)
+        output, packets = collect_console(
+            client, collect_seconds, require_markers=require_markers
+        )
         print(f"console packets: {len(packets)}, decoded bytes: {len(output)}")
         print(output.decode("utf-8", "backslashreplace"), end="")
 
@@ -200,6 +209,28 @@ def run_once(host: str, port: int, timeout: float, collect_seconds: float) -> No
         client.close()
 
 
+def abandon_running_session(
+    host: str,
+    port: int,
+    timeout: float,
+    collect_seconds: float,
+) -> None:
+    """Close one negotiated connection while the target is running.
+
+    This deliberately omits Ctrl-C and ``D`` so the next session verifies the
+    stub's peer-loss cleanup rather than an orderly detach path.
+    """
+
+    client = RspClient(host, port, timeout)
+    try:
+        client.negotiate()
+        expect_stop(client, first_request=True)
+        client.connection.sendall(frame(b"c"))
+        collect_console(client, collect_seconds, require_markers=False)
+    finally:
+        client.close()
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--host", required=True)
@@ -207,16 +238,49 @@ def main() -> int:
     parser.add_argument("--timeout", type=float, default=10.0)
     parser.add_argument("--collect-seconds", type=float, default=3.0)
     parser.add_argument(
+        "--allow-quiet",
+        action="store_true",
+        help=(
+            "do not require the diagnostic [uvdb stdout]/[uvdb stderr] "
+            "markers; still reject malformed or out-of-order console packets"
+        ),
+    )
+    parser.add_argument(
         "--reconnect",
         action="store_true",
         help="repeat the complete handshake/run/stop/detach cycle",
     )
+    parser.add_argument(
+        "--abrupt-first",
+        action="store_true",
+        help=(
+            "first abandon one running connection without detach, then require "
+            "the normal session to reconnect successfully"
+        ),
+    )
     args = parser.parse_args()
 
-    run_once(args.host, args.port, args.timeout, args.collect_seconds)
+    if args.abrupt_first:
+        abandon_running_session(
+            args.host, args.port, args.timeout, args.collect_seconds
+        )
+        time.sleep(1.0)
+    run_once(
+        args.host,
+        args.port,
+        args.timeout,
+        args.collect_seconds,
+        require_markers=not args.allow_quiet,
+    )
     if args.reconnect:
         time.sleep(0.5)
-        run_once(args.host, args.port, args.timeout, args.collect_seconds)
+        run_once(
+            args.host,
+            args.port,
+            args.timeout,
+            args.collect_seconds,
+            require_markers=not args.allow_quiet,
+        )
     print("PASS: GDB no-ack stdout/stderr console smoke test")
     return 0
 

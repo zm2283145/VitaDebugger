@@ -1,8 +1,12 @@
 #include <stdint.h>
 #include <string.h>
+#include <stdarg.h>
+#ifdef UVDB_HOST_INTEGRATION_TEST
+#include <signal.h>
+#include "uvdb_host_platform.h"
+#else
 #include <sys/socket.h>
 #include <sys/signal.h> //for signal constants; these seem to match gdb's
-#include <stdarg.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <psp2/net/net.h>
@@ -15,13 +19,19 @@
 #include <psp2/kernel/threadmgr/thread.h>
 #include <psp2/kernel/modulemgr.h>
 #include <kubridge.h>
+#endif
 #include "uvdb.h"
 #include "uvdb_breakpoint_patch.h"
 #include "uvdb_console_transport.h"
+#include "uvdb_exception_guard.h"
+#include "uvdb_exception_handlers.h"
 #include "uvdb_exclusive_step.h"
+#include "uvdb_fileio_flow.h"
 #include "uvdb_monitor.h"
+#include "uvdb_protocol_gate.h"
 #include "uvdb_registers.h"
 #include "uvdb_rsp.h"
+#include "uvdb_rsp_frame.h"
 #include "uvdb_vfp_policy.h"
 #include "stdio_redirect.h"
 #include "uvdb_thread_control.h"
@@ -60,10 +70,26 @@ static void uvdb_refresh_rsp_vfp_capability(void)
 #define UVDB_MIN_BUFFER 4096
 #define UVDB_MAX_BUFFER (16 * 1024 * 1024)
 
+#ifdef UVDB_HOST_INTEGRATION_TEST
+typedef uintptr_t uvdb_net_syscall_arg;
+#else
+typedef uint32_t uvdb_net_syscall_arg;
+#endif
+
+typedef char uvdb_fileio_sigint_must_match_rsp[
+    SIGINT == UVDB_FILEIO_SIGINT ? 1 : -1];
+typedef char uvdb_exception_handler_token_must_match_kubridge[
+    sizeof(uvdb_exception_handler_token) == sizeof(KuKernelExceptionHandler)
+        ? 1 : -1];
+
 //we prefer to use raw syscalls to avoid issues with signal safety
 void _sceKernelExitProcessForUser(int);
-int _sceKernelSendMsgPipeVector(SceUID, const SceKernelAddrPair*, unsigned int, uint32_t* rest);
-int _sceKernelReceiveMsgPipeVector(SceUID, const SceKernelAddrPair*, unsigned int, uint32_t* rest);
+int _sceKernelSendMsgPipeVector(
+    SceUID, const SceKernelAddrPair*, unsigned int,
+    uvdb_net_syscall_arg* rest);
+int _sceKernelReceiveMsgPipeVector(
+    SceUID, const SceKernelAddrPair*, unsigned int,
+    uvdb_net_syscall_arg* rest);
 extern char __executable_start[];
 
 #define UVDB_MAX_THREADS 32
@@ -84,31 +110,63 @@ static struct uvdb_thread_selection uvdb_selection = {
     .resume = UVDB_RSP_THREAD_ALL,
 };
 
-static int uvdb_lock_state;
+static volatile uint32_t uvdb_lock_owner;
 static int uvdb_lifecycle_lock_state;
 static int uvdb_socket_lifecycle_lock_state;
 
+enum uvdb_try_lock_result {
+    UVDB_TRY_LOCK_SELF = -1,
+    UVDB_TRY_LOCK_BUSY = 0,
+    UVDB_TRY_LOCK_ACQUIRED = 1,
+};
+
+static uint32_t uvdb_lock_owner_token(SceUID thread)
+{
+    uint32_t owner = (uint32_t)thread;
+    return owner ? owner : UINT32_MAX;
+}
+
+static int uvdb_try_lock_for_thread(SceUID thread)
+{
+    const uint32_t owner = uvdb_lock_owner_token(thread);
+    uint32_t observed = __atomic_load_n(
+        &uvdb_lock_owner, __ATOMIC_ACQUIRE);
+    if(observed == owner)
+        return UVDB_TRY_LOCK_SELF;
+    if(observed)
+        return UVDB_TRY_LOCK_BUSY;
+    uint32_t expected = 0;
+    return __atomic_compare_exchange_n(
+               &uvdb_lock_owner, &expected, owner, 0,
+               __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)
+               ? UVDB_TRY_LOCK_ACQUIRED :
+                 (expected == owner ? UVDB_TRY_LOCK_SELF :
+                                      UVDB_TRY_LOCK_BUSY);
+}
+
 static void uvdb_lock(void)
 {
+    const SceUID thread = sceKernelGetThreadId();
     for(;;)
-    {
-        int old_value = 0;
-        if(__atomic_compare_exchange_n(&uvdb_lock_state, &old_value, 1, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST))
+        if(uvdb_try_lock_for_thread(thread) == UVDB_TRY_LOCK_ACQUIRED)
             return;
-    }
 }
 
 static int uvdb_try_lock(void)
 {
-    int old_value = 0;
-    return __atomic_compare_exchange_n(&uvdb_lock_state, &old_value, 1, 0,
-                                       __ATOMIC_SEQ_CST,
-                                       __ATOMIC_SEQ_CST);
+    return uvdb_try_lock_for_thread(sceKernelGetThreadId()) ==
+        UVDB_TRY_LOCK_ACQUIRED;
 }
 
 static void uvdb_unlock(void)
 {
-    __atomic_store_n(&uvdb_lock_state, 0, __ATOMIC_SEQ_CST);
+    uint32_t expected = uvdb_lock_owner_token(sceKernelGetThreadId());
+    /* A mismatched release must never clear another thread's ownership. The
+     * caller cannot safely repair that invariant here, so retain the lock and
+     * let the bounded lifecycle/error path expose the defect. */
+    (void)__atomic_compare_exchange_n(
+        &uvdb_lock_owner, &expected, 0u, 0,
+        __ATOMIC_RELEASE, __ATOMIC_RELAXED);
 }
 
 static void uvdb_lifecycle_lock(void)
@@ -200,13 +258,19 @@ static SceUID uvdb_pipe = -1;
 static size_t uvdb_max_buffer = UVDB_DEFAULT_MAX_BUFFER;
 static unsigned short uvdb_port = UVDB_DEFAULT_PORT;
 static volatile enum uvdb_state uvdb_state = UVDB_STATE_IDLE;
-static int uvdb_io_failed;
-static unsigned int uvdb_handler_mask;
+static volatile int uvdb_io_failed;
+static struct uvdb_exception_handlers uvdb_handlers;
+static struct uvdb_exception_guard uvdb_exception_guard;
+static struct uvdb_protocol_gate uvdb_protocol_gate;
+static struct uvdb_rsp_request_lifetime uvdb_request_lifetime;
 static volatile int uvdb_target_stopped;
 static volatile int uvdb_async_stop_pending;
 static volatile int uvdb_async_stop_cancelled;
 static volatile int uvdb_server_stop;
 static volatile int uvdb_shutdown_pending;
+static volatile int uvdb_accept_active;
+static volatile int uvdb_packet_io_active;
+static volatile int uvdb_network_closing;
 static SceUID uvdb_server_thread = -1;
 static int uvdb_server_thread_ended;
 /*
@@ -244,7 +308,9 @@ static struct uvdb_monitor_display_stop uvdb_monitor_display_stop;
 #endif
 
 static int breakpoint_remove_all(void);
+static size_t breakpoint_active_count(void);
 static int uvdb_kernel_end_stop(void);
+static int uvdb_refresh_stopped_inventory(void);
 #ifdef UVDB_KERNEL_THREAD_CONTROL
 static int breakpoint_any_active(void);
 static void uvdb_claim_stop_controller(void);
@@ -254,7 +320,11 @@ static void uvdb_kernel_abandon_stop(void);
 #endif
 static int uvdb_server_main(SceSize args, void* argp);
 #ifdef UVDB_MONITOR_DISPLAY
+#ifdef UVDB_HOST_INTEGRATION_TEST
+static void uvdb_monitor_trigger_initial_stop(void);
+#else
 static __attribute__((naked)) void uvdb_monitor_trigger_initial_stop(void);
+#endif
 #endif
 static enum uvdb_console_write_result uvdb_console_raw_socket_write(
     void* context,
@@ -283,6 +353,29 @@ static int uvdb_is_controller_thread(SceUID id)
         return 1;
 #endif
     return 0;
+}
+
+static uint32_t uvdb_protocol_owner_for_thread(SceUID id)
+{
+    /* Vita thread IDs are nonzero handles. Retain a deterministic nonzero
+     * fallback so an unexpected syscall failure cannot bypass serialization. */
+    uint32_t owner = (uint32_t)id;
+    return owner ? owner : UINT32_MAX;
+}
+
+static void uvdb_note_io_failure(void)
+{
+    __atomic_store_n(&uvdb_io_failed, 1, __ATOMIC_RELEASE);
+}
+
+static int uvdb_has_io_failure(void)
+{
+    return __atomic_load_n(&uvdb_io_failed, __ATOMIC_ACQUIRE) != 0;
+}
+
+static void uvdb_clear_io_failure(void)
+{
+    __atomic_store_n(&uvdb_io_failed, 0, __ATOMIC_RELEASE);
 }
 
 static int uvdb_is_internal_thread(SceUID id)
@@ -419,6 +512,10 @@ static int uvdb_refresh_thread_inventory(void)
     return 0;
 }
 
+static void uvdb_active_socket_snapshot(int* descriptor,
+                                        uint32_t* generation);
+static int uvdb_begin_packet_io(int* descriptor, uint32_t* generation);
+
 struct buffer
 {
     SceUID memblock_uid;
@@ -480,14 +577,40 @@ static size_t buffer_poll(struct buffer* buf, char** pos)
     size_t chk_size = buffer_getspace(buf, pos);
     if(!chk_size)
     {
-        uvdb_io_failed = 1;
+        uvdb_note_io_failure();
         return 0;
     }
-    uint32_t args[6] = {uvdb_socket, (uint32_t)*pos, chk_size, 0, 0, 0};
+    int active_socket = -1;
+    uint32_t active_generation = 0;
+    if(uvdb_begin_packet_io(
+           &active_socket, &active_generation) < 0)
+    {
+        uvdb_note_io_failure();
+        return 0;
+    }
+    uvdb_net_syscall_arg args[6] = {
+        (uvdb_net_syscall_arg)active_socket,
+        (uvdb_net_syscall_arg)*pos,
+        (uvdb_net_syscall_arg)chk_size,
+        0, 0, 0,
+    };
+    /* The socket shutdown path owns cancellation and waits for this flag.
+     * The surrounding whole-protocol gate excludes every other packet path
+     * from mutating `buf`, so the global state lock need not cover the wait. */
+    uvdb_unlock();
     ssize_t ans = sceNetSyscallRecvfrom((void*)args);
+    uvdb_lock();
+    __atomic_store_n(&uvdb_packet_io_active, 0, __ATOMIC_RELEASE);
+    int after_socket = -1;
+    uint32_t after_generation = 0;
+    uvdb_active_socket_snapshot(&after_socket, &after_generation);
+    if(__atomic_load_n(&uvdb_network_closing, __ATOMIC_ACQUIRE) ||
+       after_socket != active_socket ||
+       after_generation != active_generation)
+        ans = -1;
     if(ans <= 0)
     {
-        uvdb_io_failed = 1;
+        uvdb_note_io_failure();
         return 0;
     }
     buf->size += ans;
@@ -503,7 +626,7 @@ static void buffer_write(struct buffer* buf, const void* source, size_t sz)
         size_t chk = buffer_getspace(buf, &pos);
         if(!chk)
         {
-            uvdb_io_failed = 1;
+            uvdb_note_io_failure();
             return;
         }
         if(chk > sz)
@@ -542,11 +665,36 @@ static void buffer_flush(struct buffer* buf)
     size_t pos = 0;
     while(pos < buf->size)
     {
-        uint32_t args[6] = {uvdb_socket, (uint32_t)(buf->buf+pos), buf->size-pos, 0, 0, 0};
+        int active_socket = -1;
+        uint32_t active_generation = 0;
+        if(uvdb_begin_packet_io(
+               &active_socket, &active_generation) < 0)
+        {
+            uvdb_note_io_failure();
+            break;
+        }
+        uvdb_net_syscall_arg args[6] = {
+            (uvdb_net_syscall_arg)active_socket,
+            (uvdb_net_syscall_arg)(buf->buf + pos),
+            (uvdb_net_syscall_arg)(buf->size - pos),
+            0,
+            0,
+            0,
+        };
+        uvdb_unlock();
         ssize_t chk = sceNetSyscallSendto((void*)args);
+        uvdb_lock();
+        __atomic_store_n(&uvdb_packet_io_active, 0, __ATOMIC_RELEASE);
+        int after_socket = -1;
+        uint32_t after_generation = 0;
+        uvdb_active_socket_snapshot(&after_socket, &after_generation);
+        if(__atomic_load_n(&uvdb_network_closing, __ATOMIC_ACQUIRE) ||
+           after_socket != active_socket ||
+           after_generation != active_generation)
+            chk = -1;
         if(chk <= 0)
         {
-            uvdb_io_failed = 1;
+            uvdb_note_io_failure();
             break;
         }
         pos += chk;
@@ -614,6 +762,29 @@ static void uvdb_active_socket_snapshot(int* descriptor,
     uvdb_socket_lifecycle_unlock();
 }
 
+/* Publish the exact network-pointer lifetime inside the surrounding
+ * whole-protocol ownership. network_closing prevents a new waiter from
+ * appearing after shutdown sampled zero. Caller holds uvdb_lock; this function
+ * deliberately uses only the short descriptor lock. */
+static int uvdb_begin_packet_io(int* descriptor, uint32_t* generation)
+{
+    if(!descriptor || !generation)
+        return -1;
+    int result = -1;
+    uvdb_socket_lifecycle_lock();
+    if(!__atomic_load_n(&uvdb_network_closing, __ATOMIC_ACQUIRE) &&
+       uvdb_socket >= 0 &&
+       !__atomic_exchange_n(&uvdb_packet_io_active, 1,
+                            __ATOMIC_ACQ_REL))
+    {
+        *descriptor = uvdb_socket;
+        *generation = uvdb_socket_generation;
+        result = 0;
+    }
+    uvdb_socket_lifecycle_unlock();
+    return result;
+}
+
 /* Shutdown wakes a descriptor owner without transferring close ownership.
  * Holding the short socket lock through the syscall prevents a simultaneous
  * close followed by descriptor-number reuse from targeting an unrelated fd. */
@@ -658,15 +829,87 @@ static int uvdb_abort_socket(int* socket)
     return result;
 }
 
-static void uvdb_release_handlers(void)
+/* A socket abort/shutdown is expected to wake Vita network syscalls promptly,
+ * but teardown must never wait forever if a firmware or wrapper violates that
+ * contract. Keep every referenced buffer/socket alive when this deadline is
+ * exceeded so a later shutdown retry can finish safely. */
+static int uvdb_wait_for_network_quiescence(void)
 {
-    if(uvdb_handler_mask & (1u << KU_KERNEL_EXCEPTION_TYPE_DATA_ABORT))
-        kuKernelReleaseExceptionHandler(KU_KERNEL_EXCEPTION_TYPE_DATA_ABORT);
-    if(uvdb_handler_mask & (1u << KU_KERNEL_EXCEPTION_TYPE_PREFETCH_ABORT))
-        kuKernelReleaseExceptionHandler(KU_KERNEL_EXCEPTION_TYPE_PREFETCH_ABORT);
-    if(uvdb_handler_mask & (1u << KU_KERNEL_EXCEPTION_TYPE_UNDEFINED_INSTRUCTION))
-        kuKernelReleaseExceptionHandler(KU_KERNEL_EXCEPTION_TYPE_UNDEFINED_INSTRUCTION);
-    uvdb_handler_mask = 0;
+    enum { UVDB_NETWORK_QUIESCE_POLLS = 5000 };
+    for(unsigned int poll = 0; poll < UVDB_NETWORK_QUIESCE_POLLS; ++poll)
+    {
+        if(!__atomic_load_n(&uvdb_accept_active, __ATOMIC_ACQUIRE) &&
+           !__atomic_load_n(&uvdb_packet_io_active, __ATOMIC_ACQUIRE) &&
+           uvdb_protocol_gate_is_idle(&uvdb_protocol_gate))
+            return 0;
+        sceKernelDelayThread(1000);
+    }
+    return -1;
+}
+
+static int uvdb_wait_for_exception_quiescence(void)
+{
+    enum { UVDB_EXCEPTION_QUIESCE_POLLS = 5000 };
+    for(unsigned int poll = 0; poll < UVDB_EXCEPTION_QUIESCE_POLLS; ++poll)
+    {
+        if(uvdb_exception_guard_is_idle(&uvdb_exception_guard))
+            return 0;
+        sceKernelDelayThread(1000);
+    }
+    return -1;
+}
+
+static int uvdb_prepare_protocol_restart(void)
+{
+    /* The protocol owner is released immediately before the exception guard,
+     * so protocol idleness alone is not a complete callback-generation fence. */
+    if(uvdb_wait_for_exception_quiescence() < 0)
+        return -1;
+    return uvdb_protocol_gate_reopen(&uvdb_protocol_gate);
+}
+
+static void exception_handler(KuKernelExceptionContext* ctx);
+
+static int uvdb_handler_backend_replace(
+    void* context,
+    uint32_t exception_type,
+    uvdb_exception_handler_token replacement,
+    uvdb_exception_handler_token* previous)
+{
+    (void)context;
+    struct KuKernelExceptionHandlerOpt opt = {
+        .size = sizeof(opt),
+    };
+    /* KuBridge copies the displaced handler to user memory while holding its
+     * process exception-handler spin lock, then publishes the replacement
+     * before releasing that lock. Pass the registry's permanent slot directly
+     * so a dispatcher cannot observe our callback before its predecessor. */
+    return kuKernelRegisterExceptionHandler(
+        exception_type, (KuKernelExceptionHandler)replacement,
+        previous ? (KuKernelExceptionHandler*)previous : NULL, &opt);
+}
+
+static int uvdb_handler_backend_release(
+    void* context,
+    uint32_t exception_type)
+{
+    (void)context;
+    kuKernelReleaseExceptionHandler(exception_type);
+    return 0;
+}
+
+static const struct uvdb_exception_handler_backend uvdb_handler_backend = {
+    .replace = uvdb_handler_backend_replace,
+    .release = uvdb_handler_backend_release,
+};
+
+static int uvdb_release_handlers(void)
+{
+    /* KuBridge lacks compare-and-restore. This operation relies on the
+     * documented exclusive-slot ownership contract, but retains every failed
+     * restoration bit so shutdown cannot silently complete on uncertainty. */
+    return uvdb_exception_handlers_restore(
+        &uvdb_handlers, &uvdb_handler_backend, NULL);
 }
 
 /* Preserve a thread handle until both termination and deletion are proven.
@@ -749,6 +992,8 @@ static int uvdb_stop_server_locked(void)
         return -1;
 
     __atomic_store_n(&uvdb_server_stop, 1, __ATOMIC_SEQ_CST);
+    uvdb_protocol_gate_close(&uvdb_protocol_gate);
+    __atomic_store_n(&uvdb_network_closing, 1, __ATOMIC_RELEASE);
     /* Stop accepting producer bytes immediately. The serialized socket owner
      * completes generation cleanup after its service thread has exited. */
     uvdb_console_session_close_active_gate();
@@ -761,6 +1006,11 @@ static int uvdb_stop_server_locked(void)
     // Abort wakes a blocking accept without closing its descriptor. The owner
     // observes server_stop and performs the serialized close itself.
     uvdb_abort_socket(&uvdb_listen_socket);
+    /* accept/recv/send publish a lifetime flag and run without uvdb_lock.
+     * Wait outside that lock before any buffer or handler teardown. Socket
+     * shutdown/abort above is the cancellation mechanism for each wait. */
+    if(uvdb_wait_for_network_quiescence() < 0)
+        return -1;
 
     if(thread >= 0 &&
        uvdb_wait_delete_thread(&uvdb_server_thread,
@@ -780,12 +1030,20 @@ static int uvdb_stop_server_locked(void)
         if(uvdb_state != UVDB_STATE_ERROR)
             uvdb_state = UVDB_STATE_IDLE;
         uvdb_unlock();
+        if(uvdb_wait_for_network_quiescence() < 0)
+            return -1;
     }
     if(thread >= 0)
     {
         uvdb_close_socket(&uvdb_socket);
         uvdb_close_socket(&uvdb_listen_socket);
     }
+    /* Protocol-gate idleness precedes the tail of exception_handler(): that
+     * callback releases the protocol owner before dropping its guard lifetime.
+     * Do not report a stopped generation as reusable until the full callback
+     * has left, or an immediate start can misclassify its first trap as nested. */
+    if(uvdb_wait_for_exception_quiescence() < 0)
+        return -1;
     return 0;
 }
 
@@ -826,20 +1084,36 @@ int uvdb_stop_server(void)
 {
     uvdb_lifecycle_lock();
     int result = uvdb_stop_server_locked();
-#ifdef UVDB_KERNEL_THREAD_CONTROL
     if(result >= 0)
     {
         /* The joined server has published the result of its last restore
-         * attempt in the transaction slots. Retain the keeper on uncertainty
-         * so a subsequent shutdown retry still owns a coherent all-stop. */
+         * attempt in the transaction slots. This check applies to cooperative
+         * and kernel builds; neither may report a clean stop over an uncertain
+         * executable patch. The kernel build additionally retains its keeper
+         * so a subsequent retry still owns a coherent all-stop. */
         uvdb_lock();
-        int restore_required = breakpoint_any_active();
+        int restore_required = breakpoint_active_count() != 0;
         if(restore_required)
             uvdb_state = UVDB_STATE_ERROR;
         uvdb_unlock();
-        result = restore_required ? -1 : uvdb_stop_lease_keeper_locked();
-    }
+        if(restore_required)
+            result = -1;
+#ifdef UVDB_KERNEL_THREAD_CONTROL
+        else
+            result = uvdb_stop_lease_keeper_locked();
 #endif
+    }
+    if(result >= 0)
+    {
+        /* Intentional shutdown can make a blocked receive report the same
+         * transport error used for an unexpected peer loss. Once the server
+         * is joined, callbacks are drained, sockets are retired, and every
+         * restoration obligation has passed, the public stopped state is
+         * unambiguously IDLE. */
+        uvdb_lock();
+        uvdb_state = UVDB_STATE_IDLE;
+        uvdb_unlock();
+    }
     uvdb_lifecycle_unlock();
     return result;
 }
@@ -922,11 +1196,32 @@ void uvdb_shutdown(void)
 #endif
     uvdb_close_socket(&uvdb_socket);
     uvdb_close_socket(&uvdb_listen_socket);
-    uvdb_release_handlers();
+    if(uvdb_release_handlers() < 0)
+    {
+        uvdb_state = UVDB_STATE_ERROR;
+        uvdb_unlock();
+        uvdb_lifecycle_unlock();
+        return;
+    }
+    /* Restore kernel dispatch first, then close this user-side gate. KuBridge
+     * can have copied our callback pointer before replacement without having
+     * entered it yet, so captured predecessors and the closed guard remain
+     * process-lifetime state. Every callback that does enter is counted,
+     * including one still executing a predecessor after its primary peer
+     * returns. Do not hold uvdb_lock while waiting for visible callbacks. */
+    uvdb_exception_guard_close(&uvdb_exception_guard);
+    uvdb_unlock();
+    if(uvdb_wait_for_exception_quiescence() < 0)
+    {
+        uvdb_lock();
+        uvdb_state = UVDB_STATE_ERROR;
+        uvdb_unlock();
+        uvdb_lifecycle_unlock();
+        return;
+    }
 #ifdef UVDB_KERNEL_THREAD_CONTROL
     /* Executable patches and handlers are gone before uvdb_lock is dropped.
      * The keeper may now take that lock once to unregister and terminate. */
-    uvdb_unlock();
     if(uvdb_stop_lease_keeper_locked() < 0)
     {
         uvdb_lock();
@@ -935,8 +1230,6 @@ void uvdb_shutdown(void)
         uvdb_lifecycle_unlock();
         return;
     }
-#else
-    uvdb_unlock();
 #endif
     /* With the server gone and no renewal guarding executable patches, a
      * capture helper suspended by the former all-stop can finish and join. */
@@ -956,10 +1249,11 @@ void uvdb_shutdown(void)
     }
     buffer_release(&in_buf);
     buffer_release(&out_buf);
+    uvdb_rsp_request_lifetime_init(&uvdb_request_lifetime);
     uvdb_thread_inventory_reset(&uvdb_inventory);
     uvdb_thread_selection_reset(&uvdb_selection);
     uvdb_exception_thread = -1;
-    uvdb_io_failed = 0;
+    uvdb_clear_io_failure();
     uvdb_target_stopped = 0;
     uvdb_async_stop_pending = 0;
     uvdb_async_stop_cancelled = 0;
@@ -972,78 +1266,143 @@ void uvdb_shutdown(void)
     uvdb_stop_token = 0;
 #endif
     memset(uvdb_threads, 0, sizeof(uvdb_threads));
-    uvdb_server_stop = 0;
-    __atomic_store_n(&uvdb_shutdown_pending, 0, __ATOMIC_SEQ_CST);
+    /* Full shutdown is terminal. KuBridge does not expose a dispatcher
+     * quiescence primitive, so an already-dispatched callback could enter even
+     * after the visible active count reached zero. Keeping shutdown_pending,
+     * both gates, and captured predecessor tokens intact makes that late path
+     * safe while this linked image remains loaded. stop_server/start_server is
+     * the supported nonterminal reconnect lifecycle. */
     uvdb_state = UVDB_STATE_IDLE;
     uvdb_unlock();
     uvdb_lifecycle_unlock();
 }
 
-#define POLL() while(cur == end) { size_t sz = buffer_poll(&in_buf, &cur); if(!sz && uvdb_io_failed) return 0; end = cur + sz; }
-
 static size_t recv_packet(char** data)
 {
-    char* cur = in_buf.buf;
-    char* end = cur + in_buf.size;
-retry:;
-    char c = 0;
-    while(c != '$')
+    if(!data)
+        return 0;
+    for(;;)
     {
-        POLL();
-        c = *cur++;
+        struct uvdb_rsp_frame frame;
+        int result = uvdb_rsp_scan_frame(
+            in_buf.buf, in_buf.size, uvdb_max_buffer - 4u, &frame);
+        if(result == UVDB_RSP_FRAME_COMPLETE)
+        {
+            if(!uvdb_console_transport_no_ack(&uvdb_console_transport))
+            {
+                buffer_write(&out_buf, "+", 1);
+                buffer_flush(&out_buf);
+                if(uvdb_has_io_failure())
+                    return 0;
+            }
+            if(uvdb_rsp_request_lifetime_begin(
+                   &uvdb_request_lifetime) < 0)
+            {
+                uvdb_note_io_failure();
+                return 0;
+            }
+            *data = in_buf.buf + frame.payload_offset;
+            in_buf.buf[frame.payload_offset + frame.payload_size] = 0;
+            return frame.payload_size;
+        }
+        if(result == UVDB_RSP_FRAME_DISCARD)
+        {
+            if(!frame.consumed_size ||
+               frame.consumed_size > in_buf.size)
+            {
+                uvdb_note_io_failure();
+                return 0;
+            }
+            const int send_nack = uvdb_rsp_frame_should_nack(
+                &frame,
+                uvdb_console_transport_no_ack(&uvdb_console_transport));
+            buffer_popleft(&in_buf, frame.consumed_size);
+            if(send_nack)
+            {
+                /* ACK-mode corruption recovery is one raw NACK per discarded
+                 * malformed frame. Prefix noise never requests a NACK, and
+                 * no-ack sessions suppress it entirely. */
+                buffer_write(&out_buf, "-", 1u);
+                buffer_flush(&out_buf);
+                if(uvdb_has_io_failure())
+                    return 0;
+            }
+            continue;
+        }
+
+        char* unused = NULL;
+        if(!buffer_poll(&in_buf, &unused) && uvdb_has_io_failure())
+            return 0;
     }
-    size_t start_packet = cur - in_buf.buf;
-    while(c != '#')
-    {
-        POLL();
-        c = *cur++;
-    }
-    size_t end_packet = cur - in_buf.buf - 1;
-    uint8_t cksum = 0;
-    for(size_t i = start_packet; i < end_packet; i++)
-        cksum += (uint8_t)in_buf.buf[i];
-    POLL();
-    char c1 = *cur++;
-    POLL();
-    char c2 = *cur++;
-    if(c1 != int2hex(cksum>>4) || c2 != int2hex(cksum&15))
-        goto retry;
-    if(!uvdb_console_transport_no_ack(&uvdb_console_transport))
-    {
-        buffer_write(&out_buf, "+", 1);
-        buffer_flush(&out_buf);
-    }
-    *data = in_buf.buf + start_packet;
-    in_buf.buf[end_packet] = 0;
-    return end_packet - start_packet;
 }
 
 static void discard_packet(char* data, size_t sz)
 {
-    buffer_popleft(&in_buf, data - in_buf.buf + sz + 3);
+    if(!data || !in_buf.buf)
+    {
+        uvdb_note_io_failure();
+        return;
+    }
+    const uintptr_t base = (uintptr_t)in_buf.buf;
+    const uintptr_t position = (uintptr_t)data;
+    if(position < base || position - base > in_buf.size)
+    {
+        uvdb_note_io_failure();
+        return;
+    }
+    const size_t offset = (size_t)(position - base);
+    if(sz > in_buf.size - offset || in_buf.size - offset - sz < 3u)
+    {
+        uvdb_note_io_failure();
+        return;
+    }
+    buffer_popleft(&in_buf, offset + sz + 3u);
+    if(uvdb_rsp_request_lifetime_release(
+           &uvdb_request_lifetime) < 0)
+        uvdb_note_io_failure();
 }
 
 static int send_packet(void)
 {
+    /* Waiting for the peer's ACK may compact/refill in_buf. Never retain a
+     * payload pointer into that buffer across the wait. */
+    if(uvdb_rsp_request_lifetime_is_active(&uvdb_request_lifetime))
+    {
+        uvdb_note_io_failure();
+        return -1;
+    }
     buffer_end_packet(&out_buf);
     buffer_flush(&out_buf);
-    if(uvdb_io_failed)
+    if(uvdb_has_io_failure())
         return -1;
     if(uvdb_console_transport_no_ack(&uvdb_console_transport))
         return 0;
-    char* cur = in_buf.buf;
-    char* end = cur + in_buf.size;
-    char c = 0;
-    while(c != '+')
+    for(;;)
     {
-        POLL();
-        c = *cur++;
+        for(size_t i = 0; i < in_buf.size; ++i)
+        {
+            if(in_buf.buf[i] == '+')
+            {
+                buffer_popleft(&in_buf, i + 1u);
+                return 0;
+            }
+            /* Retransmission is intentionally unsupported because the frame
+             * has already left the bounded output buffer. Fail closed rather
+             * than letting a NACK fill the receive buffer indefinitely. */
+            if(in_buf.buf[i] == '-')
+            {
+                uvdb_note_io_failure();
+                return -1;
+            }
+        }
+        if(in_buf.size)
+            buffer_popleft(&in_buf, in_buf.size);
+        char* unused = NULL;
+        if(!buffer_poll(&in_buf, &unused) && uvdb_has_io_failure())
+            return -1;
     }
-    buffer_popleft(&in_buf, cur - in_buf.buf);
-    return 0;
 }
 
-#undef POLL
 #define IS(s) (sz == sizeof(s) - 1 && !memcmp(pkt, s, sizeof(s) - 1))
 #define STARTSWITH(s) (sz >= sizeof(s) - 1 && !memcmp(pkt, s, sizeof(s) - 1))
 #define STRING(s) s, sizeof(s) - 1
@@ -1057,41 +1416,24 @@ struct stream
     int wrote;
 };
 
-#define PARSE_HEX(type, name, cond) static type name(char** s)\
-{\
-    type ans = 0;\
-    for(cond)\
-    {\
-        char c = *(*s)++;\
-        if(c >= '0' && c <= '9')\
-            ans = 16 * ans + (c - '0');\
-        else\
-        {\
-            c &= -33;\
-            if(c >= 'A' && c <= 'F')\
-                ans = 16 * ans + 10 + (c - 'A');\
-            else\
-                return ans;\
-        }\
-    }\
-    return ans;\
-}
-
-PARSE_HEX(uint64_t, parse_hex, ;;)
-PARSE_HEX(uint8_t, parse_hex_byte, int c = 0; c < 2; c++)
-
-#undef PARSE_HEX
-
-static struct stream parse_stream(char* s)
+static int parse_stream(
+    const char* text,
+    size_t text_size,
+    struct stream* stream)
 {
-    struct stream ans = {};
+    if(!stream)
+        return -1;
+    struct uvdb_rsp_xfer_range range;
+    if(uvdb_rsp_parse_xfer_range(text, text_size, &range) < 0)
+        return -1;
+    struct stream ans = {0};
     ans.marker_index = SIZE_MAX;
-    ans.start = parse_hex(&s);
-    uint64_t length = parse_hex(&s);
-    ans.end = ans.start + length;
+    ans.start = range.offset;
+    ans.end = ans.start + range.length;
     if(ans.end < ans.start)
         ans.end = UINT64_MAX;
-    return ans;
+    *stream = ans;
+    return 0;
 }
 
 static void stream_write(struct stream* st, const char* buf, size_t sz)
@@ -1203,27 +1545,6 @@ static void write_hex(const char* start, size_t sz)
         uint8_t q[2] = {int2hex(c>>4), int2hex(c&15)};
         buffer_write(&out_buf, q, 2);
     }
-}
-
-static void read_hex(char** p, char* start, size_t sz)
-{
-    while(sz--)
-    {
-        if(**p == 'x' && (*p)[1] == 'x')
-        {
-            *p += 2;
-            start++;
-        }
-        else if(!**p || !(*p)[1])
-            *start++ = 0;
-        else
-            *start++ = parse_hex_byte(p);
-    }
-}
-
-static void skip_hex(char** p, size_t cnt)
-{
-    *p += strnlen(*p, 2*cnt);
 }
 
 #ifndef UVDB_KERNEL_THREAD_CONTROL
@@ -2073,8 +2394,10 @@ static size_t safe_memcpy(char* dst, const char* src, size_t sz)
     while(sz)
     {
         size_t chk;
-        uint32_t rest[3] = {1, (uint32_t)&chk, 0};
-        SceKernelAddrPair q = {(uint32_t)src, sz};
+        uvdb_net_syscall_arg rest[3] = {
+            1, (uvdb_net_syscall_arg)&chk, 0,
+        };
+        SceKernelAddrPair q = {(uvdb_net_syscall_arg)src, sz};
         if(_sceKernelSendMsgPipeVector(uvdb_pipe, &q, 1, rest))
             break;
         if(!chk)
@@ -2085,8 +2408,10 @@ static size_t safe_memcpy(char* dst, const char* src, size_t sz)
         while(chk)
         {
             size_t chk2;
-            uint32_t rest[3] = {1, (uint32_t)&chk2, 0};
-            SceKernelAddrPair q = {(uint32_t)dst, chk};
+            uvdb_net_syscall_arg rest[3] = {
+                1, (uvdb_net_syscall_arg)&chk2, 0,
+            };
+            SceKernelAddrPair q = {(uvdb_net_syscall_arg)dst, chk};
             if(_sceKernelReceiveMsgPipeVector(uvdb_pipe, &q, 1, rest))
                 return ans;
             if(!chk2)
@@ -2125,6 +2450,32 @@ static int uvdb_pump_console_before_stop(void)
     uvdb_console_transport_end_connection(&uvdb_console_transport);
     uvdb_shutdown_socket_if_current(&uvdb_socket, active_socket);
     return -1;
+}
+
+/* Execute the status-query branch's complete buffer lifetime in one place so
+ * a reply can never be reordered ahead of consuming its request. Return -2
+ * when stopped inventory could not be refreshed (the caller retains the
+ * existing stop failure policy), and -1 for transport/lifetime failure. */
+static int uvdb_handle_status_query_request(
+    char* packet, size_t packet_size, int stop_signal)
+{
+    if(uvdb_refresh_stopped_inventory() < 0)
+        return -2;
+    if(!out_buf.size)
+    {
+        uvdb_note_io_failure();
+        return -1;
+    }
+    out_buf.size--;
+    if(uvdb_pump_console_before_stop() < 0)
+    {
+        discard_packet(packet, packet_size);
+        return -1;
+    }
+    /* send_packet waits for '+' in ACK mode and may compact in_buf. Release
+     * the current payload borrow before constructing and sending Txx. */
+    discard_packet(packet, packet_size);
+    return send_stop_reply(stop_signal);
 }
 
 #ifdef UVDB_KERNEL_THREAD_CONTROL
@@ -2813,17 +3164,29 @@ static int uvdb_apply_resume_plan(
     return 0;
 }
 
-static void uvdb_finish_resume_packet(char* packet)
+static int uvdb_finish_resume_packet(char* packet)
 {
     /* The next exception parses this synthetic status query. Keeping it in the
      * receive buffer preserves the existing all-stop no-immediate-reply flow. */
     memcpy(packet, "?#3f", 4);
+    if(uvdb_rsp_request_lifetime_release(
+           &uvdb_request_lifetime) < 0)
+    {
+        uvdb_note_io_failure();
+        return -1;
+    }
     out_buf.size--;
     buffer_flush(&out_buf);
+    if(uvdb_has_io_failure())
+        return -1;
     uvdb_note_target_running();
+    return 0;
 }
 
-static void uvdb_main_loop(KuKernelExceptionContext* ctx, int stop_signal)
+static void uvdb_main_loop(
+    KuKernelExceptionContext* ctx,
+    int stop_signal,
+    enum uvdb_fileio_context fileio_context)
 {
 #ifdef UVDB_KERNEL_VFP_READS
     // Negotiate the extended register shape only with the exact matching ABI
@@ -2842,7 +3205,7 @@ static void uvdb_main_loop(KuKernelExceptionContext* ctx, int stop_signal)
             return;
         }
 #endif
-        if(uvdb_io_failed)
+        if(uvdb_has_io_failure())
         {
             uvdb_fail_stopped_client();
             return;
@@ -2882,7 +3245,14 @@ static void uvdb_main_loop(KuKernelExceptionContext* ctx, int stop_signal)
         }
         else if(STARTSWITH("qXfer:features:read:target.xml:"))
         {
-            struct stream st = parse_stream(pkt + sizeof("qXfer:features:read:target.xml:") - 1);
+            const size_t prefix_size =
+                sizeof("qXfer:features:read:target.xml:") - 1u;
+            struct stream st;
+            if(parse_stream(pkt + prefix_size, sz - prefix_size, &st) < 0)
+            {
+                buffer_write(&out_buf, STRING("E01"));
+                goto packet_complete;
+            }
 #ifdef UVDB_KERNEL_VFP_READS
             if(uvdb_rsp_vfp_enabled)
                 stream_write(&st, uvdb_arm_vfp_target_xml,
@@ -2894,28 +3264,27 @@ static void uvdb_main_loop(KuKernelExceptionContext* ctx, int stop_signal)
         }
         else if(STARTSWITH("qXfer:libraries:read::"))
         {
-            struct stream st = parse_stream(
-                pkt + sizeof("qXfer:libraries:read::") - 1);
+            const size_t prefix_size =
+                sizeof("qXfer:libraries:read::") - 1u;
+            struct stream st;
+            if(parse_stream(pkt + prefix_size, sz - prefix_size, &st) < 0)
+            {
+                buffer_write(&out_buf, STRING("E01"));
+                goto packet_complete;
+            }
             stream_write_libraries(&st);
         }
         else if(IS("?"))
         {
-            if(uvdb_refresh_stopped_inventory() < 0)
+            int status_result = uvdb_handle_status_query_request(
+                pkt, sz, stop_signal);
+            if(status_result == -2)
                 return;
-            out_buf.size--;
-            if(uvdb_pump_console_before_stop() < 0)
+            if(status_result < 0)
             {
-                discard_packet(pkt, sz);
                 uvdb_fail_stopped_client();
                 return;
             }
-            if(send_stop_reply(stop_signal) < 0)
-            {
-                discard_packet(pkt, sz);
-                uvdb_fail_stopped_client();
-                return;
-            }
-            discard_packet(pkt, sz);
             continue;
         }
         else if(IS("qfThreadInfo"))
@@ -3011,7 +3380,8 @@ static void uvdb_main_loop(KuKernelExceptionContext* ctx, int stop_signal)
             else
             {
                 uvdb_end_stopped_operation();
-                uvdb_finish_resume_packet(pkt);
+                if(uvdb_finish_resume_packet(pkt) < 0)
+                    uvdb_fail_stopped_client();
                 return;
             }
         }
@@ -3072,26 +3442,60 @@ static void uvdb_main_loop(KuKernelExceptionContext* ctx, int stop_signal)
                     buffer_write(&out_buf, STRING("E16"));
             }
         }
-        else if(STARTSWITH("m"))
+        else if(sz && pkt[0] == 'm')
         {
-            char* p = pkt + 1;
-            uintptr_t addr = parse_hex(&p);
-            size_t size = parse_hex(&p);
-            while(size)
+            struct uvdb_rsp_memory_request request;
+            const size_t maximum_read = (uvdb_max_buffer - 4u) / 2u;
+            if(uvdb_rsp_parse_memory_read_packet(
+                   pkt, sz, maximum_read, &request) < 0)
+                buffer_write(&out_buf, STRING("E01"));
+            else
             {
-                size_t chk = size;
-                if(chk > 64)
-                    chk = 64;
-                char buf[64];
-                size_t copy_sz = safe_memcpy(buf, (void*)addr, chk);
-                write_hex(buf, copy_sz);
-                if(copy_sz < chk)
-                    break;
-                addr += chk;
-                size -= chk;
+                uintptr_t addr = (uintptr_t)request.address;
+                size_t remaining = request.size;
+                char probe[64];
+                while(remaining)
+                {
+                    size_t chunk = remaining > sizeof(probe)
+                        ? sizeof(probe) : remaining;
+                    if(safe_memcpy(probe, (const void*)addr, chunk) != chunk)
+                        break;
+                    addr += chunk;
+                    remaining -= chunk;
+                }
+                if(remaining)
+                {
+                    buffer_write(&out_buf, STRING("E0e"));
+                    goto packet_complete;
+                }
+
+                addr = (uintptr_t)request.address;
+                remaining = request.size;
+                const size_t reply_start = out_buf.size;
+                while(remaining)
+                {
+                    size_t chk = remaining;
+                    if(chk > 64u)
+                        chk = 64u;
+                    char buf[64];
+                    size_t copy_sz = safe_memcpy(
+                        buf, (const void*)addr, chk);
+                    if(copy_sz < chk)
+                    {
+                        /* Discard any earlier hexadecimal chunks. A late
+                         * source fault must produce one error reply, never a
+                         * syntactically valid-looking short memory reply. */
+                        out_buf.size = reply_start;
+                        buffer_write(&out_buf, STRING("E0e"));
+                        break;
+                    }
+                    write_hex(buf, copy_sz);
+                    addr += chk;
+                    remaining -= chk;
+                }
             }
         }
-        else if(STARTSWITH("G"))
+        else if(sz && pkt[0] == 'G')
         {
 #ifdef UVDB_KERNEL_VFP_READS
             if(uvdb_rsp_vfp_enabled)
@@ -3112,11 +3516,15 @@ static void uvdb_main_loop(KuKernelExceptionContext* ctx, int stop_signal)
                     buffer_write(&out_buf, STRING("E16"));
                 else
                 {
-                    char* p = pkt + 1;
-                    read_hex(&p, (void*)ctx, 16*4);
-                    skip_hex(&p, 25*4);
-                    read_hex(&p, (void*)&ctx->SPSR, 4);
-                    buffer_write(&out_buf, "OK", 2);
+                    struct uvdb_rsp_core_registers core;
+                    if(uvdb_rsp_parse_core_register_packet(
+                           pkt, sz, 0, &core) < 0)
+                        buffer_write(&out_buf, STRING("E01"));
+                    else
+                    {
+                        apply_exception_thread_registers(ctx, &core);
+                        buffer_write(&out_buf, STRING("OK"));
+                    }
                 }
                 uvdb_end_stopped_operation();
             }
@@ -3164,52 +3572,104 @@ static void uvdb_main_loop(KuKernelExceptionContext* ctx, int stop_signal)
                 uvdb_end_stopped_operation();
             }
         }
-        else if(STARTSWITH("M"))
+        else if(sz && pkt[0] == 'M')
         {
-            if(uvdb_begin_stopped_operation() < 0)
-                return;
-            char* p = pkt + 1;
-            uintptr_t addr = parse_hex(&p);
-            size_t size = parse_hex(&p);
-            while(size)
-            {
-                size_t chk = size;
-                if(chk > 64)
-                    chk = 64;
-                char buf[64];
-                read_hex(&p, buf, chk);
-                char test[64];
-                //this is racey, but should work in practice
-                size_t safe_size = safe_memcpy(test, (void*)addr, chk);
-                kuKernelCpuUnrestrictedMemcpy((void*)addr, buf, safe_size);
-                kuKernelFlushCaches((void*)addr, safe_size);
-                if(safe_size < chk)
-                    break;
-                addr += chk;
-                size -= chk;
-            }
-            if(size)
-                buffer_write(&out_buf, "E0e", 3);
+            struct uvdb_rsp_memory_request request;
+            const size_t maximum_write = (uvdb_max_buffer - 4u) / 2u;
+            if(uvdb_rsp_parse_memory_write_packet(
+                   pkt, sz, maximum_write, &request) < 0)
+                buffer_write(&out_buf, STRING("E01"));
             else
-                buffer_write(&out_buf, "OK", 2);
-            uvdb_end_stopped_operation();
+            {
+                if(uvdb_begin_stopped_operation() < 0)
+                    return;
+                uintptr_t address = (uintptr_t)request.address;
+                size_t remaining = request.size;
+                char test[64];
+                /* Validate the complete destination span before changing a
+                 * byte. With all application peers stopped, its mappings
+                 * cannot disappear between this pass and the copy pass. */
+                while(remaining)
+                {
+                    size_t chunk = remaining > sizeof(test)
+                        ? sizeof(test) : remaining;
+                    if(safe_memcpy(test, (const void*)address, chunk) !=
+                       chunk)
+                        break;
+                    address += chunk;
+                    remaining -= chunk;
+                }
+
+                if(remaining)
+                    buffer_write(&out_buf, STRING("E0e"));
+                else
+                {
+                    address = (uintptr_t)request.address;
+                    remaining = request.size;
+                    size_t data_offset = 0;
+                    while(remaining)
+                    {
+                        size_t chunk = remaining > 64u ? 64u : remaining;
+                        char decoded[64];
+                        if(uvdb_rsp_decode_hex_bytes(
+                               decoded, chunk,
+                               request.data + data_offset * 2u,
+                               chunk * 2u) < 0)
+                        {
+                            remaining = SIZE_MAX;
+                            break;
+                        }
+                        if(kuKernelCpuUnrestrictedMemcpy(
+                               (void*)address, decoded, chunk) < 0)
+                        {
+                            remaining = SIZE_MAX;
+                            break;
+                        }
+                        kuKernelFlushCaches((void*)address, chunk);
+                        char verified[64];
+                        if(safe_memcpy(verified, (const void*)address,
+                                       chunk) != chunk ||
+                           memcmp(verified, decoded, chunk) != 0)
+                        {
+                            remaining = SIZE_MAX;
+                            break;
+                        }
+                        address += chunk;
+                        data_offset += chunk;
+                        remaining -= chunk;
+                    }
+                    buffer_write(&out_buf,
+                                 remaining ? "E0e" : "OK",
+                                 remaining ? 3u : 2u);
+                }
+                uvdb_end_stopped_operation();
+            }
         }
         else if(STARTSWITH("Z0,") || STARTSWITH("z0,"))
         {
-            if(uvdb_begin_stopped_operation() < 0)
-                return;
-            int insert = pkt[0] == 'Z';
-            char* p = pkt + 3;
-            uintptr_t address = parse_hex(&p);
-            size_t kind = parse_hex(&p);
-            int result = insert ? breakpoint_insert(address, kind) : breakpoint_remove(address);
-            if(result == UVDB_BREAKPOINT_PATCH_ERROR_RESTORE_PENDING)
+            int insert = 0;
+            uint32_t parsed_address = 0;
+            size_t kind = 0;
+            if(uvdb_rsp_parse_software_breakpoint_packet(
+                   pkt, sz, &insert, &parsed_address, &kind) < 0)
+                buffer_write(&out_buf, STRING("E01"));
+            else
             {
-                uvdb_fail_stopped_client_owned();
-                return;
+                if(uvdb_begin_stopped_operation() < 0)
+                    return;
+                uintptr_t address = (uintptr_t)parsed_address;
+                int result = insert
+                    ? breakpoint_insert(address, kind)
+                    : breakpoint_remove(address);
+                if(result == UVDB_BREAKPOINT_PATCH_ERROR_RESTORE_PENDING)
+                {
+                    uvdb_fail_stopped_client_owned();
+                    return;
+                }
+                buffer_write(&out_buf, result < 0 ? "E16" : "OK",
+                             result < 0 ? 3u : 2u);
+                uvdb_end_stopped_operation();
             }
-            buffer_write(&out_buf, result < 0 ? "E16" : "OK", result < 0 ? 3 : 2);
-            uvdb_end_stopped_operation();
         }
         else if(IS("k"))
             _sceKernelExitProcessForUser(1);
@@ -3290,19 +3750,78 @@ static void uvdb_main_loop(KuKernelExceptionContext* ctx, int stop_signal)
                 return;
             }
             uvdb_end_stopped_operation();
-            uvdb_finish_resume_packet(pkt);
+            if(uvdb_finish_resume_packet(pkt) < 0)
+                uvdb_fail_stopped_client();
             return; // no breakpoint cleanup; persistent points remain armed
         }
         else if(STARTSWITH("F"))
         {
+            struct uvdb_rsp_fileio_result fileio_result;
+            if(uvdb_rsp_parse_fileio_packet(
+                   pkt, sz, &fileio_result) < 0)
+            {
+                buffer_write(&out_buf, STRING("E01"));
+                goto packet_complete;
+            }
+            struct uvdb_fileio_transition transition;
+            if(uvdb_fileio_transition_decide(
+                   &fileio_result, fileio_context, &transition) < 0)
+            {
+                buffer_write(&out_buf, STRING("E01"));
+                goto packet_complete;
+            }
+            if(transition.action == UVDB_FILEIO_ACTION_FAIL_CLOSED)
+            {
+                /* uvdb_remote_syscall has only a zero-initialized synthetic
+                 * register context and has not published an all-stop. A fake
+                 * T02 would let GDB inspect or mutate running peers through
+                 * invalid registers. Consume the reply, sever this protocol
+                 * generation, and return failure without claiming a stop. */
+                if(out_buf.size)
+                    out_buf.size--;
+                discard_packet(pkt, sz);
+                uvdb_note_io_failure();
+                uvdb_close_socket(&uvdb_socket);
+                uvdb_state = UVDB_STATE_ERROR;
+                return;
+            }
             if(uvdb_begin_stopped_operation() < 0)
                 return;
-            char* p = pkt + 1;
-            ctx->r0 = parse_hex(&p);
+            ctx->r0 = transition.result;
+            if(transition.action ==
+               UVDB_FILEIO_ACTION_REPORT_INTERRUPT)
+            {
+                /* A literal File-I/O Ctrl-C leaves the target stopped. Remove
+                 * the empty response frame opened for `F`, consume the reply,
+                 * and emit exactly one T02. Continuing this loop, rather than
+                 * synthesizing `?` and returning, is the no-resume transition. */
+                uvdb_end_stopped_operation();
+                if(!out_buf.size)
+                {
+                    uvdb_fail_stopped_client();
+                    return;
+                }
+                out_buf.size--;
+                discard_packet(pkt, sz);
+                stop_signal = transition.stop_signal;
+                if(send_stop_reply(transition.stop_signal) < 0)
+                {
+                    uvdb_fail_stopped_client();
+                    return;
+                }
+                continue;
+            }
             //see above for explanation what this does
             memcpy(pkt, "?#3f", 4);
             for(size_t i = 1; i < sz; i++)
                 pkt[i+3] = 0;
+            if(uvdb_rsp_request_lifetime_release(
+                   &uvdb_request_lifetime) < 0)
+            {
+                uvdb_note_io_failure();
+                uvdb_fail_stopped_client_owned();
+                return;
+            }
             out_buf.size--;
             buffer_flush(&out_buf);
             if(uvdb_kernel_end_stop() < 0)
@@ -3339,6 +3858,7 @@ static void uvdb_main_loop(KuKernelExceptionContext* ctx, int stop_signal)
                 }
             }
         }
+packet_complete:
         discard_packet(pkt, sz);
         if(send_packet() < 0)
         {
@@ -3373,14 +3893,30 @@ static void uvdb_main_loop(KuKernelExceptionContext* ctx, int stop_signal)
 #undef STARTSWITH
 #undef IS
 
+#ifndef UVDB_HOST_INTEGRATION_TEST
 static __attribute__((naked)) void uvdb_trap_pc(void)
 {
     asm volatile("udf #0");
+}
+#endif
+
+static uint32_t uvdb_trap_address(void)
+{
+#ifdef UVDB_HOST_INTEGRATION_TEST
+    return UINT32_C(0x7f00d00d);
+#else
+    return (uint32_t)(uintptr_t)uvdb_trap_pc;
+#endif
 }
 
 #ifdef UVDB_MONITOR_DISPLAY
 /* Unlike uvdb_enter(), this cannot fall back into accept if the peer vanished
  * while the post-accept display sample was being collected. */
+#ifdef UVDB_HOST_INTEGRATION_TEST
+static void uvdb_monitor_trigger_initial_stop(void)
+{
+}
+#else
 static __attribute__((naked)) void uvdb_monitor_trigger_initial_stop(void)
 {
     asm volatile(
@@ -3389,10 +3925,164 @@ static __attribute__((naked)) void uvdb_monitor_trigger_initial_stop(void)
     );
 }
 #endif
+#endif
+
+#ifdef UVDB_EXPERIMENTAL_NESTED_FAULT_EXIT
+/* KuBridge does not expose its default bootstrap handler when the previous
+ * user callback is NULL. This opt-in trampoline is therefore the only bounded
+ * fallback for a fault raised inside the debugger itself: abandon the nested
+ * exception stack and terminate the target from ordinary user context. It is
+ * intentionally disabled until a dedicated hardware gate proves exception
+ * return and process-exit behavior on each supported firmware. */
+static void uvdb_nested_fault_exit(void)
+{
+    _sceKernelExitProcessForUser(1);
+    for(;;)
+        sceKernelDelayThread(1000000);
+}
+#endif
+
+static int uvdb_chain_previous_exception_handler(
+    KuKernelExceptionContext* ctx)
+{
+    if(!ctx || ctx->exceptionType >= UVDB_EXCEPTION_GUARD_TYPE_COUNT)
+        return 0;
+    KuKernelExceptionHandler previous = (KuKernelExceptionHandler)
+        uvdb_exception_handlers_previous(&uvdb_handlers,
+                                          ctx->exceptionType);
+    if(!previous || previous == exception_handler ||
+       uvdb_exception_guard_begin_chain(&uvdb_exception_guard) != 1)
+        return 0;
+    previous(ctx);
+    uvdb_exception_guard_end_chain(&uvdb_exception_guard);
+    return 1;
+}
+
+static int uvdb_exception_session_claimable(void)
+{
+    /* Exception context must not spin on the descriptor lifecycle lock: the
+     * interrupted code may itself own it. This is only a conservative gate;
+     * the normal packet path validates the descriptor generation later. */
+    return __atomic_load_n(&uvdb_socket, __ATOMIC_ACQUIRE) >= 0 &&
+        !__atomic_load_n(&uvdb_network_closing, __ATOMIC_ACQUIRE) &&
+        !__atomic_load_n(&uvdb_server_stop, __ATOMIC_SEQ_CST) &&
+        !__atomic_load_n(&uvdb_shutdown_pending, __ATOMIC_SEQ_CST);
+}
+
+static void uvdb_handle_unclaimed_exception(
+    KuKernelExceptionContext* ctx)
+{
+    if(!uvdb_chain_previous_exception_handler(ctx))
+    {
+        uvdb_exception_guard_note_unhandled(&uvdb_exception_guard);
+#ifdef UVDB_EXPERIMENTAL_NESTED_FAULT_EXIT
+        ctx->pc = (uint32_t)(uintptr_t)uvdb_nested_fault_exit;
+        ctx->SPSR &= ~UINT32_C(32);
+#endif
+    }
+}
+
+/* Fail an exception before global debugger-state ownership is available.
+ * This path is deliberately lock-free: it may be running on the thread that
+ * was interrupted while owning uvdb_lock. Retire protocol ownership first,
+ * then offer the original context to the captured predecessor under the
+ * existing single-chain guard. */
+static void uvdb_fail_exception_without_state_lock(
+    KuKernelExceptionContext* ctx,
+    uint32_t exception_type,
+    int guard_result,
+    uint32_t protocol_owner,
+    int owns_protocol)
+{
+    uvdb_note_io_failure();
+    __atomic_store_n(&uvdb_state, UVDB_STATE_ERROR, __ATOMIC_RELEASE);
+    if(owns_protocol)
+        (void)uvdb_protocol_gate_release(
+            &uvdb_protocol_gate, protocol_owner);
+    uvdb_handle_unclaimed_exception(ctx);
+    (void)uvdb_exception_guard_leave(
+        &uvdb_exception_guard, exception_type, guard_result);
+}
 
 static void exception_handler(KuKernelExceptionContext* ctx)
 {
+    if(!ctx)
+        return;
+    const uint32_t exception_type = ctx->exceptionType;
+    int guard_result = uvdb_exception_guard_enter(
+        &uvdb_exception_guard, exception_type);
+    if(guard_result == UVDB_EXCEPTION_GUARD_CLOSED)
+    {
+        /* Handler slots have already been restored, but a callback dispatched
+         * through our former slot can arrive late. Captured predecessor tokens
+         * remain immutable through quiescence, and this full callback is still
+         * counted. With a NULL predecessor, returning re-dispatches the fault
+         * through the now-restored kernel default rather than our old slot. */
+        uvdb_handle_unclaimed_exception(ctx);
+        (void)uvdb_exception_guard_leave(
+            &uvdb_exception_guard, exception_type, guard_result);
+        return;
+    }
+    if(guard_result == UVDB_EXCEPTION_GUARD_INVALID)
+    {
+        uvdb_note_io_failure();
+        __atomic_store_n(&uvdb_state, UVDB_STATE_ERROR, __ATOMIC_RELEASE);
+        return;
+    }
+    if(guard_result == UVDB_EXCEPTION_GUARD_NESTED)
+    {
+        /* Never spin on uvdb_lock from a fault raised by the debugger or a
+         * simultaneous peer. A distinct prior user handler gets one bounded
+         * chance to claim it. Recursive faults in that handler cannot chain
+         * again because begin_chain is serialized. */
+        uvdb_note_io_failure();
+        __atomic_store_n(&uvdb_state, UVDB_STATE_ERROR, __ATOMIC_RELEASE);
+        uvdb_handle_unclaimed_exception(ctx);
+        (void)uvdb_exception_guard_leave(
+            &uvdb_exception_guard, exception_type, guard_result);
+        return;
+    }
+
     SceUID exception_thread = sceKernelGetThreadId();
+    /* A detached, closing, or not-yet-connected debugger has no protocol
+     * peer that could claim this stop. Give the captured application handler
+     * its one guarded opportunity before touching the exception context. */
+    if(!uvdb_exception_session_claimable())
+    {
+        __atomic_store_n(&uvdb_state, UVDB_STATE_ERROR, __ATOMIC_RELEASE);
+        uvdb_handle_unclaimed_exception(ctx);
+        (void)uvdb_exception_guard_leave(
+            &uvdb_exception_guard, exception_type, guard_result);
+        return;
+    }
+
+    const uint32_t protocol_owner =
+        uvdb_protocol_owner_for_thread(exception_thread);
+    if(uvdb_protocol_gate_try_acquire(
+           &uvdb_protocol_gate, protocol_owner) !=
+       UVDB_PROTOCOL_GATE_ACQUIRED)
+    {
+        /* A remote File-I/O operation or simultaneous stopped handler already
+         * owns the shared RSP buffers. Never wait from exception context. */
+        uvdb_fail_exception_without_state_lock(
+            ctx, exception_type, guard_result, protocol_owner, 0);
+        return;
+    }
+
+    /* Exception context must never spin on the global state lock. The fault
+     * may have interrupted this exact thread inside a uvdb_lock critical
+     * section, in which case waiting would self-deadlock permanently. It is
+     * also unsafe to inspect breakpoint or controller state before ownership
+     * is established. Fail closed and give the captured predecessor its one
+     * guarded opportunity to handle the original context. */
+    if(uvdb_try_lock_for_thread(exception_thread) !=
+       UVDB_TRY_LOCK_ACQUIRED)
+    {
+        uvdb_fail_exception_without_state_lock(
+            ctx, exception_type, guard_result, protocol_owner, 1);
+        return;
+    }
+
     int internal_controller = uvdb_is_controller_thread(exception_thread);
     __atomic_store_n(&uvdb_target_stopped, 1, __ATOMIC_SEQ_CST);
     int signal = SIGSEGV;
@@ -3404,7 +4094,7 @@ static void exception_handler(KuKernelExceptionContext* ctx)
         ctx->SPSR &= -33;
         pc |= 1;
     }
-    int synthetic_trap = pc == (uint32_t)uvdb_trap_pc;
+    int synthetic_trap = pc == uvdb_trap_address();
     if(synthetic_trap)
     {
         pc = ctx->r0;
@@ -3420,7 +4110,6 @@ static void exception_handler(KuKernelExceptionContext* ctx)
         pc &= -2;
     }
     ctx->pc = pc;
-    uvdb_lock();
 #ifdef UVDB_MONITOR_DISPLAY
     enum uvdb_monitor_display_stop_action display_stop_action =
         uvdb_monitor_display_stop_on_exception(
@@ -3432,7 +4121,7 @@ static void exception_handler(KuKernelExceptionContext* ctx)
          * stop while the server's deferred display trap was queued. */
         uvdb_note_target_running();
         uvdb_unlock();
-        return;
+        goto exception_done;
     }
 #endif
     int async_stop = 0;
@@ -3445,7 +4134,7 @@ static void exception_handler(KuKernelExceptionContext* ctx)
              * Ctrl-C trap and already satisfied GDB's stop request. */
             uvdb_note_target_running();
             uvdb_unlock();
-            return;
+            goto exception_done;
         }
         async_stop = __atomic_exchange_n(&uvdb_async_stop_pending, 0,
                                           __ATOMIC_SEQ_CST);
@@ -3476,12 +4165,12 @@ static void exception_handler(KuKernelExceptionContext* ctx)
     {
         uvdb_fail_stopped_client();
         uvdb_unlock();
-        return;
+        goto exception_done;
     }
     if(uvdb_begin_stopped_operation() < 0)
     {
         uvdb_unlock();
-        return;
+        goto exception_done;
     }
     if(internal_controller)
     {
@@ -3489,7 +4178,7 @@ static void exception_handler(KuKernelExceptionContext* ctx)
         {
             uvdb_fail_stopped_client_owned();
             uvdb_unlock();
-            return;
+            goto exception_done;
         }
         uvdb_thread_selection_note_stop(&uvdb_selection,
                                         uvdb_inventory.ids[0],
@@ -3500,7 +4189,7 @@ static void exception_handler(KuKernelExceptionContext* ctx)
     {
         uvdb_fail_stopped_client_owned();
         uvdb_unlock();
-        return;
+        goto exception_done;
     }
     /* All application threads are now stopped; restoring a temporary trap is
      * no longer racing a peer executing the same code page. */
@@ -3508,7 +4197,7 @@ static void exception_handler(KuKernelExceptionContext* ctx)
     {
         uvdb_fail_stopped_client_owned();
         uvdb_unlock();
-        return;
+        goto exception_done;
     }
     uvdb_end_stopped_operation();
     int reported_signal = async_stop ? SIGINT : signal;
@@ -3516,13 +4205,21 @@ static void exception_handler(KuKernelExceptionContext* ctx)
      * buffer. Let the common query path emit the sole stop reply, including
      * for an asynchronous Ctrl-C. Sending here as well would produce two T02
      * packets and leave a stale stop notification in a no-ack GDB session. */
-    uvdb_main_loop(ctx, reported_signal);
+    uvdb_main_loop(ctx, reported_signal,
+                   UVDB_FILEIO_CONTEXT_REAL_STOP);
     uvdb_unlock();
+exception_done:
+    (void)uvdb_protocol_gate_release(
+        &uvdb_protocol_gate, protocol_owner);
+    (void)uvdb_exception_guard_leave(
+        &uvdb_exception_guard, exception_type, guard_result);
 }
 
 int uvdb_remote_syscall(const char* name, int nargs, ...)
 {
     KuKernelExceptionContext ctx = {};
+    if(!name || nargs < 0)
+        return -1;
     uvdb_lock();
     if(uvdb_socket < 0)
     {
@@ -3532,8 +4229,20 @@ int uvdb_remote_syscall(const char* name, int nargs, ...)
         uvdb_enter();
         uvdb_lock();
     }
+    const uint32_t protocol_owner = uvdb_protocol_owner_for_thread(
+        sceKernelGetThreadId());
+    if(uvdb_protocol_gate_try_acquire(
+           &uvdb_protocol_gate, protocol_owner) !=
+       UVDB_PROTOCOL_GATE_ACQUIRED)
+    {
+        uvdb_unlock();
+        return -1;
+    }
+    int syscall_result = -1;
     char* pkt;
     size_t sz = recv_packet(&pkt);
+    if(uvdb_has_io_failure())
+        goto syscall_done;
     discard_packet(pkt, sz);
     buffer_start_packet(&out_buf);
     buffer_write(&out_buf, "F", 1);
@@ -3549,16 +4258,22 @@ int uvdb_remote_syscall(const char* name, int nargs, ...)
         buffer_write(&out_buf, packet, 9);
     }
     va_end(va);
-    send_packet();
-    uvdb_main_loop(&ctx, 0);
+    if(send_packet() < 0)
+        goto syscall_done;
+    uvdb_main_loop(&ctx, 0, UVDB_FILEIO_CONTEXT_UNSTOPPED);
+    if(!uvdb_has_io_failure())
+        syscall_result = (int)ctx.r0;
+syscall_done:
+    (void)uvdb_protocol_gate_release(
+        &uvdb_protocol_gate, protocol_owner);
     uvdb_unlock();
-    return ctx.r0;
+    return syscall_result;
 }
 
 static __attribute__((used)) uint64_t real_uvdb_enter(uintptr_t lr)
 {
     uint64_t no_trap = (uint64_t)lr << 32 | lr;
-    uint64_t trap = (uint64_t)(uint32_t)uvdb_trap_pc << 32 | lr;
+    uint64_t trap = (uint64_t)uvdb_trap_address() << 32 | lr;
 #ifdef UVDB_KERNEL_THREAD_CONTROL
     /* A stale companion may retain import-compatible NIDs while exposing an
      * older stop/register ABI. Refuse direct entry before installing handlers
@@ -3571,19 +4286,30 @@ static __attribute__((used)) uint64_t real_uvdb_enter(uintptr_t lr)
 #endif
     uvdb_register_thread(NULL);
     uvdb_lock();
+    if(__atomic_load_n(&uvdb_server_stop, __ATOMIC_SEQ_CST))
+    {
+        /* Shutdown owns the connected descriptor. Never synthesize a trap
+         * merely because its fd has not yet been retired by the server. */
+        uvdb_unlock();
+        return no_trap;
+    }
     if(uvdb_socket >= 0)
     {
         uvdb_unlock();
         return trap;
     }
-    if(__atomic_load_n(&uvdb_server_stop, __ATOMIC_SEQ_CST))
+    if(uvdb_listen_socket >= 0 ||
+       __atomic_load_n(&uvdb_accept_active, __ATOMIC_ACQUIRE))
     {
+        /* Another owner is already establishing this process-wide session.
+         * It will deliver the synthetic stop after publishing the peer. */
         uvdb_unlock();
         return no_trap;
     }
-    uvdb_io_failed = 0;
+    uvdb_clear_io_failure();
     in_buf.size = 0;
     out_buf.size = 0;
+    uvdb_rsp_request_lifetime_init(&uvdb_request_lifetime);
     uvdb_thread_selection_reset(&uvdb_selection);
     uvdb_thread_inventory_reset(&uvdb_inventory);
     uvdb_exception_thread = -1;
@@ -3598,29 +4324,42 @@ static __attribute__((used)) uint64_t real_uvdb_enter(uintptr_t lr)
             return no_trap;
         }
     }
-    if(!uvdb_handler_mask)
+    if(!uvdb_handlers.installed_mask)
     {
-        struct KuKernelExceptionHandlerOpt opt = {
-            .size = sizeof(opt),
-        };
-        KuKernelExceptionHandler old;
-        const unsigned int all_handlers =
-            (1u << KU_KERNEL_EXCEPTION_TYPE_DATA_ABORT) |
-            (1u << KU_KERNEL_EXCEPTION_TYPE_PREFETCH_ABORT) |
-            (1u << KU_KERNEL_EXCEPTION_TYPE_UNDEFINED_INSTRUCTION);
-        if(kuKernelRegisterExceptionHandler(KU_KERNEL_EXCEPTION_TYPE_DATA_ABORT, exception_handler, &old, &opt) >= 0)
-            uvdb_handler_mask |= 1u << KU_KERNEL_EXCEPTION_TYPE_DATA_ABORT;
-        if(kuKernelRegisterExceptionHandler(KU_KERNEL_EXCEPTION_TYPE_PREFETCH_ABORT, exception_handler, &old, &opt) >= 0)
-            uvdb_handler_mask |= 1u << KU_KERNEL_EXCEPTION_TYPE_PREFETCH_ABORT;
-        if(kuKernelRegisterExceptionHandler(KU_KERNEL_EXCEPTION_TYPE_UNDEFINED_INSTRUCTION, exception_handler, &old, &opt) >= 0)
-            uvdb_handler_mask |= 1u << KU_KERNEL_EXCEPTION_TYPE_UNDEFINED_INSTRUCTION;
-        if(uvdb_handler_mask != all_handlers)
+        /* A partial install that was rolled back can still have a callback
+         * copied by KuBridge. Never erase its predecessor tokens or create a
+         * second generation without a kernel dispatcher fence. */
+        if(uvdb_handlers.ever_published_mask)
         {
-            uvdb_release_handlers();
             uvdb_state = UVDB_STATE_ERROR;
             uvdb_unlock();
             return no_trap;
         }
+        if(!uvdb_handlers.self &&
+           uvdb_exception_handlers_init(
+               &uvdb_handlers,
+               (uvdb_exception_handler_token)exception_handler) < 0)
+        {
+            uvdb_state = UVDB_STATE_ERROR;
+            uvdb_unlock();
+            return no_trap;
+        }
+        if(uvdb_exception_handlers_install(
+               &uvdb_handlers, &uvdb_handler_backend, NULL) < 0)
+        {
+            uvdb_state = UVDB_STATE_ERROR;
+            uvdb_unlock();
+            return no_trap;
+        }
+    }
+    if(uvdb_handlers.installed_mask !=
+       ((UINT32_C(1) << UVDB_EXCEPTION_HANDLER_TYPE_COUNT) - 1u))
+    {
+        /* A failed predecessor restore is a retained ownership obligation,
+         * not a partially usable handler set. Only teardown retries it. */
+        uvdb_state = UVDB_STATE_ERROR;
+        uvdb_unlock();
+        return no_trap;
     }
     int listen_socket = sceNetSyscallSocket("gdb socket", AF_INET,
                                             SOCK_STREAM, 0);
@@ -3638,8 +4377,13 @@ static __attribute__((used)) uint64_t real_uvdb_enter(uintptr_t lr)
         return no_trap;
     }
     int value = 1;
-    uint32_t args[5] = {listen_socket, SOL_SOCKET, SO_REUSEADDR,
-                        (uint32_t)&value, sizeof(value)};
+    uvdb_net_syscall_arg args[5] = {
+        (uvdb_net_syscall_arg)listen_socket,
+        SOL_SOCKET,
+        SO_REUSEADDR,
+        (uvdb_net_syscall_arg)&value,
+        sizeof(value),
+    };
     if(sceNetSyscallSetsockopt((void*)&args))
     {
         uvdb_close_socket(&uvdb_listen_socket);
@@ -3684,7 +4428,11 @@ static __attribute__((used)) uint64_t real_uvdb_enter(uintptr_t lr)
         return no_trap;
     }
 
+    __atomic_store_n(&uvdb_accept_active, 1, __ATOMIC_RELEASE);
+    uvdb_unlock();
     int accepted_socket = sceNetSyscallAccept(listen_socket, NULL, NULL);
+    uvdb_lock();
+    __atomic_store_n(&uvdb_accept_active, 0, __ATOMIC_RELEASE);
 
     if(accepted_socket < 0)
     {
@@ -3692,6 +4440,14 @@ static __attribute__((used)) uint64_t real_uvdb_enter(uintptr_t lr)
         uvdb_state = __atomic_load_n(&uvdb_server_stop, __ATOMIC_SEQ_CST)
                          ? UVDB_STATE_IDLE
                          : UVDB_STATE_ERROR;
+        uvdb_unlock();
+        return no_trap;
+    }
+    if(__atomic_load_n(&uvdb_server_stop, __ATOMIC_SEQ_CST))
+    {
+        uvdb_close_socket(&accepted_socket);
+        uvdb_close_socket(&uvdb_listen_socket);
+        uvdb_state = UVDB_STATE_IDLE;
         uvdb_unlock();
         return no_trap;
     }
@@ -3739,6 +4495,12 @@ static __attribute__((used)) uint64_t real_uvdb_enter(uintptr_t lr)
     return trap;
 }
 
+#ifdef UVDB_HOST_INTEGRATION_TEST
+void uvdb_enter(void)
+{
+    (void)real_uvdb_enter(0);
+}
+#else
 __attribute__((naked)) void uvdb_enter(void)
 {
     asm volatile(
@@ -3747,6 +4509,7 @@ __attribute__((naked)) void uvdb_enter(void)
         "bx r1\n"
     );
 }
+#endif
 
 /* This callback can run from the stopped exception path, so keep it on raw
  * network syscalls and avoid public-wrapper TLS/errno state. */
@@ -3758,10 +4521,10 @@ static enum uvdb_console_write_result uvdb_console_raw_socket_write(
     int* native_error)
 {
     int socket = *(const int*)context;
-    uint32_t send_args[6] = {
-        (uint32_t)socket,
-        (uint32_t)data,
-        (uint32_t)size,
+    uvdb_net_syscall_arg send_args[6] = {
+        (uvdb_net_syscall_arg)socket,
+        (uvdb_net_syscall_arg)data,
+        (uvdb_net_syscall_arg)size,
         MSG_DONTWAIT,
         0,
         0,
@@ -3905,6 +4668,8 @@ static int uvdb_server_main(SceSize args, void* argp)
         }
 
         if(uvdb_socket < 0 ||
+           __atomic_load_n(&uvdb_packet_io_active, __ATOMIC_ACQUIRE) ||
+           !uvdb_protocol_gate_is_idle(&uvdb_protocol_gate) ||
            __atomic_load_n(&uvdb_target_stopped, __ATOMIC_SEQ_CST))
         {
             uvdb_unlock();
@@ -3947,9 +4712,9 @@ static int uvdb_server_main(SceSize args, void* argp)
             connection_failed = 1;
         else if(ready_event.events & SCE_NET_EPOLLIN)
         {
-            uint32_t peek_args[6] = {
-                (uint32_t)active_socket,
-                (uint32_t)&command,
+            uvdb_net_syscall_arg peek_args[6] = {
+                (uvdb_net_syscall_arg)active_socket,
+                (uvdb_net_syscall_arg)&command,
                 1,
                 MSG_PEEK,
                 0,
@@ -3960,9 +4725,9 @@ static int uvdb_server_main(SceSize args, void* argp)
                 connection_failed = 1;
             else if(command == 3)
             {
-                uint32_t recv_args[6] = {
-                    (uint32_t)active_socket,
-                    (uint32_t)&command,
+                uvdb_net_syscall_arg recv_args[6] = {
+                    (uvdb_net_syscall_arg)active_socket,
+                    (uvdb_net_syscall_arg)&command,
                     1,
                     0,
                     0,
@@ -3988,9 +4753,9 @@ static int uvdb_server_main(SceSize args, void* argp)
                  * (or a legacy client) so one stray byte cannot starve
                  * console output. Readiness makes this blocking single-byte
                  * consume safe. */
-                uint32_t recv_args[6] = {
-                    (uint32_t)active_socket,
-                    (uint32_t)&command,
+                uvdb_net_syscall_arg recv_args[6] = {
+                    (uvdb_net_syscall_arg)active_socket,
+                    (uvdb_net_syscall_arg)&command,
                     1,
                     0,
                     0,
@@ -4013,9 +4778,18 @@ static int uvdb_server_main(SceSize args, void* argp)
         {
             uvdb_server_epoll_reset(&epoll_id, &watched_socket,
                                     &watched_generation);
-            if(uvdb_socket < 0 &&
-               __atomic_load_n(&uvdb_server_stop, __ATOMIC_SEQ_CST))
+            if(__atomic_load_n(&uvdb_server_stop, __ATOMIC_SEQ_CST))
+            {
+                /* stop_server already published cancellation. Do not turn
+                 * its expected HUP into a synthetic exception at unchanged
+                 * PC; retire the descriptor and let the join complete. */
+                uvdb_lock();
+                uvdb_close_socket(&uvdb_socket);
+                if(uvdb_state != UVDB_STATE_ERROR)
+                    uvdb_state = UVDB_STATE_IDLE;
+                uvdb_unlock();
                 break;
+            }
             /* Enter the normal exception/all-stop path before restoring code.
              * The failed peer makes recv_packet fail there, and the common
              * cleanup removes breakpoints before releasing the stop. */
@@ -4100,8 +4874,17 @@ static int uvdb_start_server_locked(void)
         return -1;
     }
 #endif
+    /* stop_server normally drains the prior callback before returning. Keep a
+     * second gate here so callers recovering from an earlier bounded timeout
+     * still cannot reopen protocol ownership during a late callback tail. */
+    if(uvdb_prepare_protocol_restart() < 0)
+    {
+        uvdb_state = UVDB_STATE_ERROR;
+        return -1;
+    }
 
     __atomic_store_n(&uvdb_server_stop, 0, __ATOMIC_SEQ_CST);
+    __atomic_store_n(&uvdb_network_closing, 0, __ATOMIC_RELEASE);
     #ifdef UVDB_KERNEL_THREAD_CONTROL
     __atomic_store_n(&uvdb_lease_stop, 0, __ATOMIC_SEQ_CST);
     __atomic_store_n(&uvdb_stop_failed, 0, __ATOMIC_SEQ_CST);

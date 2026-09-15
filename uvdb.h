@@ -107,8 +107,11 @@ int uvdb_start_server(void);
 // software-breakpoint restoration must remain protected for a later retry.
 int uvdb_stop_server(void);
 
-// Stop the service thread, close active/listening sockets, and release
-// allocations owned by uvdb.
+// Terminally stop the service thread, restore debugger-owned handler slots,
+// close sockets, and release allocations owned by uvdb. KuBridge does not
+// expose dispatcher quiescence after it has copied a callback pointer, so full
+// shutdown deliberately cannot be restarted and does not authorize unloading
+// a dynamically injected image. Use stop_server/start_server for reconnects.
 // Call only from normal application code, never from an exception handler.
 void uvdb_shutdown(void);
 
@@ -121,6 +124,9 @@ void uvdb_enter(void);
 //gdb exposes a remote syscall api to call some (whitelisted) syscalls on the host
 //example:
 //  uvdb_remote_syscall("write", 3, 1, "Hello, world!\n", 14); //prints hello world in the debugger prompt
+// This legacy path does not own a real saved all-stop context. A File-I/O
+// Ctrl-C reply therefore closes the protocol and returns -1 instead of
+// reporting a false T02 stop with synthetic zero registers.
 int uvdb_remote_syscall(const char* name, int nargs, ... /* int arg1, int arg2, ... */);
 
 // Redirect newlib stdout/stderr into a bounded, nonblocking capture path. Once
