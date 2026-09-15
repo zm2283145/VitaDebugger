@@ -1,0 +1,17 @@
+vitadebug_pmu_probe:
+  attributes: 0
+  process_image: false
+  imagemodule: false
+  version:
+    major: 1
+    minor: 0
+  main:
+    start: module_start
+    stop: module_stop
+  libraries:
+    vitadebug_pmu_probe:
+      syscall: true
+      functions:
+        - vdPmuProbeRunSelfTest: 0x76A3D101
+        - vdPmuProbeGetStatus: 0x76A3D102
+        - vdPmuProbeRecover: 0x76A3D103

@@ -1,0 +1,5 @@
+/build*/
+/test-record.exe
+/__pycache__/
+/*.bin
+/*.json

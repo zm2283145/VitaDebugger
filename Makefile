@@ -1,7 +1,7 @@
 all: libuvdb.a
 
 clean:
-	rm -f *.o src/*.o tests/*.o tests/vita/*.o *.a *.elf *.velf eboot.bin param.sfo *.vpk *.psp2dmp test-rsp test-rsp.exe test-rsp-console test-rsp-console.exe test-register-bank test-register-bank.exe test-thread-control test-thread-control.exe test-monitor test-monitor.exe test-breakpoint-patch test-breakpoint-patch.exe test-exclusive-step test-exclusive-step.exe test-console-queue test-console-queue.exe test-console-transport test-console-transport.exe test-vfp-policy test-vfp-policy.exe test-kernel-thread-mutation test-kernel-thread-mutation.exe kernel/dipsw-read-probe/test-record kernel/dipsw-read-probe/test-record.exe kernel/dipsw-set-restore-probe/test-record kernel/dipsw-set-restore-probe/test-record.exe kernel/dipsw-dbgvcr-probe/test-record kernel/dipsw-dbgvcr-probe/test-record.exe $(UVDB_ASLR_FIXTURE_OBJECT) $(UVDB_ASLR_FIXTURE_ELF) $(UVDB_ASLR_FIXTURE_VELF) $(UVDB_ASLR_FIXTURE_SELF)
+	rm -f *.o src/*.o tests/*.o tests/vita/*.o *.a *.elf *.velf eboot.bin param.sfo *.vpk *.psp2dmp test-rsp test-rsp.exe test-rsp-console test-rsp-console.exe test-register-bank test-register-bank.exe test-thread-control test-thread-control.exe test-monitor test-monitor.exe test-breakpoint-patch test-breakpoint-patch.exe test-exclusive-step test-exclusive-step.exe test-console-queue test-console-queue.exe test-console-transport test-console-transport.exe test-vfp-policy test-vfp-policy.exe test-kernel-thread-mutation test-kernel-thread-mutation.exe test-kernel-pmu-session test-kernel-pmu-session.exe test-kernel-pmu-backend test-kernel-pmu-backend.exe kernel/dipsw-read-probe/test-record kernel/dipsw-read-probe/test-record.exe kernel/dipsw-set-restore-probe/test-record kernel/dipsw-set-restore-probe/test-record.exe kernel/dipsw-dbgvcr-probe/test-record kernel/dipsw-dbgvcr-probe/test-record.exe kernel/pmu-session-probe/test-record kernel/pmu-session-probe/test-record.exe kernel/thread-setter-resolver-probe/test-record kernel/thread-setter-resolver-probe/test-record.exe $(UVDB_ASLR_FIXTURE_OBJECT) $(UVDB_ASLR_FIXTURE_ELF) $(UVDB_ASLR_FIXTURE_VELF) $(UVDB_ASLR_FIXTURE_SELF)
 	$(MAKE) -C profiler clean
 	$(MAKE) -C attach clean
 
@@ -119,9 +119,9 @@ HOST_CC_RUN ?= $(HOST_CC)
 HOST_PYTHON ?= python3
 endif
 
-.PHONY: host-tests host-test-rsp host-test-rsp-console host-test-register-bank host-test-thread-control host-test-monitor host-test-breakpoint-patch host-test-exclusive-step host-test-vfp-policy host-test-kernel-thread-mutation host-test-console-queue host-test-console-transport host-test-symbols host-test-vfp-lifecycle host-test-aslr-lifecycle host-test-live-gates host-test-target-xml host-test-dipsw-probe-record host-test-dipsw-set-restore-record host-test-dipsw-dbgvcr-record host-test-profiler host-test-attach aslr-fixture
+.PHONY: host-tests host-test-rsp host-test-rsp-console host-test-register-bank host-test-thread-control host-test-monitor host-test-breakpoint-patch host-test-exclusive-step host-test-vfp-policy host-test-kernel-thread-mutation host-test-kernel-pmu-session host-test-kernel-pmu-backend host-test-pmu-session-probe-record host-test-thread-setter-resolver-record host-test-console-queue host-test-console-transport host-test-symbols host-test-vfp-lifecycle host-test-aslr-lifecycle host-test-live-gates host-test-target-xml host-test-dipsw-probe-record host-test-dipsw-set-restore-record host-test-dipsw-dbgvcr-record host-test-profiler host-test-attach aslr-fixture
 
-host-tests: host-test-rsp host-test-rsp-console host-test-register-bank host-test-thread-control host-test-monitor host-test-breakpoint-patch host-test-exclusive-step host-test-vfp-policy host-test-kernel-thread-mutation host-test-console-queue host-test-console-transport host-test-symbols host-test-vfp-lifecycle host-test-aslr-lifecycle host-test-live-gates host-test-target-xml host-test-dipsw-probe-record host-test-dipsw-set-restore-record host-test-dipsw-dbgvcr-record host-test-profiler host-test-attach
+host-tests: host-test-rsp host-test-rsp-console host-test-register-bank host-test-thread-control host-test-monitor host-test-breakpoint-patch host-test-exclusive-step host-test-vfp-policy host-test-kernel-thread-mutation host-test-kernel-pmu-session host-test-kernel-pmu-backend host-test-pmu-session-probe-record host-test-thread-setter-resolver-record host-test-console-queue host-test-console-transport host-test-symbols host-test-vfp-lifecycle host-test-aslr-lifecycle host-test-live-gates host-test-target-xml host-test-dipsw-probe-record host-test-dipsw-set-restore-record host-test-dipsw-dbgvcr-record host-test-profiler host-test-attach
 
 host-test-rsp: test-rsp$(HOST_EXEEXT)
 	./test-rsp$(HOST_EXEEXT)
@@ -149,6 +149,19 @@ host-test-vfp-policy: test-vfp-policy$(HOST_EXEEXT)
 
 host-test-kernel-thread-mutation: test-kernel-thread-mutation$(HOST_EXEEXT)
 	./test-kernel-thread-mutation$(HOST_EXEEXT)
+
+host-test-kernel-pmu-session: test-kernel-pmu-session$(HOST_EXEEXT)
+	./test-kernel-pmu-session$(HOST_EXEEXT)
+
+host-test-kernel-pmu-backend: test-kernel-pmu-backend$(HOST_EXEEXT)
+	./test-kernel-pmu-backend$(HOST_EXEEXT)
+
+host-test-pmu-session-probe-record: kernel/pmu-session-probe/test-record$(HOST_EXEEXT)
+	./kernel/pmu-session-probe/test-record$(HOST_EXEEXT)
+
+host-test-thread-setter-resolver-record: kernel/thread-setter-resolver-probe/test-record$(HOST_EXEEXT)
+	./kernel/thread-setter-resolver-probe/test-record$(HOST_EXEEXT)
+	$(HOST_PYTHON) -m unittest discover -s kernel/thread-setter-resolver-probe -p test_decode_record.py -v
 
 host-test-console-queue: test-console-queue$(HOST_EXEEXT)
 	./test-console-queue$(HOST_EXEEXT)
@@ -217,6 +230,18 @@ test-vfp-policy$(HOST_EXEEXT): src/uvdb_vfp_policy.c src/uvdb_vfp_policy.h kerne
 
 test-kernel-thread-mutation$(HOST_EXEEXT): kernel/src/thread_mutation.c kernel/src/thread_mutation.h kernel/include/vitadebug_kernel.h tests/host/test_kernel_thread_mutation.c tests/host/include/psp2/types.h
 	$(HOST_CC_RUN) $(HOST_CFLAGS) -Itests/host/include -Ikernel/include -Ikernel/src kernel/src/thread_mutation.c tests/host/test_kernel_thread_mutation.c -o $@
+
+test-kernel-pmu-session$(HOST_EXEEXT): kernel/src/pmu_session.c kernel/src/pmu_session.h tests/host/test_kernel_pmu_session.c
+	$(HOST_CC_RUN) $(HOST_CFLAGS) -Ikernel/src kernel/src/pmu_session.c tests/host/test_kernel_pmu_session.c -o $@
+
+test-kernel-pmu-backend$(HOST_EXEEXT): kernel/src/pmu_backend.c kernel/src/pmu_backend.h kernel/src/pmu_backend_host_test.h kernel/src/pmu_session.c kernel/src/pmu_session.h tests/host/test_kernel_pmu_backend.c
+	$(HOST_CC_RUN) $(HOST_CFLAGS) -pedantic-errors -DVD_KERNEL_ENABLE_EXPERIMENTAL_PMU_SESSION=1 -DVD_PMU_BACKEND_HOST_TEST=1 -Ikernel/src kernel/src/pmu_backend.c kernel/src/pmu_session.c tests/host/test_kernel_pmu_backend.c -o $@
+
+kernel/pmu-session-probe/test-record$(HOST_EXEEXT): kernel/pmu-session-probe/test_record.c kernel/pmu-session-probe/include/vitadebug_pmu_probe.h kernel/src/pmu_backend.h kernel/src/pmu_session.h
+	$(HOST_CC_RUN) $(HOST_CFLAGS) -DVD_KERNEL_ENABLE_EXPERIMENTAL_PMU_SESSION=1 -Ikernel/pmu-session-probe/include -Ikernel/src kernel/pmu-session-probe/test_record.c -o $@
+
+kernel/thread-setter-resolver-probe/test-record$(HOST_EXEEXT): kernel/thread-setter-resolver-probe/test_record.c kernel/thread-setter-resolver-probe/include/vd_thread_setter_resolver_record.h
+	$(HOST_CC_RUN) $(HOST_CFLAGS) -Ikernel/thread-setter-resolver-probe/include kernel/thread-setter-resolver-probe/test_record.c -o $@
 
 test-console-queue$(HOST_EXEEXT): src/uvdb_console.c src/uvdb_console.h tests/host/test_console_queue.c
 	$(HOST_CC_RUN) $(HOST_CFLAGS) -DUVDB_CONSOLE_TESTING src/uvdb_console.c tests/host/test_console_queue.c $(HOST_THREAD_FLAGS) -o $@
