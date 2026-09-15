@@ -41,17 +41,17 @@ class StepRegisterGateTests(unittest.TestCase):
             script = root / "symbols.gdb"
             script.write_text(
                 'file "one.elf"\nfile "two.elf"\n'
-                'target remote 10.1.1.93:1234\n',
+                'target remote 192.0.2.10:1234\n',
                 encoding="utf-8",
             )
             with self.assertRaisesRegex(GATE.GateFailure, "exactly one"):
-                GATE.main_elf_from_symbol_script(script, "10.1.1.93", 1234)
+                GATE.main_elf_from_symbol_script(script, "192.0.2.10", 1234)
             script.write_text(
-                'file "one.elf"\ntarget remote 10.1.1.92:1234\n',
+                'file "one.elf"\ntarget remote 192.0.2.11:1234\n',
                 encoding="utf-8",
             )
             with self.assertRaisesRegex(GATE.GateFailure, "not requested"):
-                GATE.main_elf_from_symbol_script(script, "10.1.1.93", 1234)
+                GATE.main_elf_from_symbol_script(script, "192.0.2.10", 1234)
 
     def test_gdb_integer_parser_is_bounded_and_accepts_symbol_suffix(self):
         self.assertEqual(GATE.parse_gdb_integer("0x81001234 <fixture>"), 0x81001234)

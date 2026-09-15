@@ -7,7 +7,7 @@ the matching `SLRS00001` diagnostic build first, then run:
 
 ```powershell
 py -3 tools\gdb_step_register_gate.py `
-  --host 10.1.1.93 `
+  --host 192.0.2.10 `
   --main-elf test.elf `
   --vpk uvdb-test.vpk `
   --kernel-plugin kernel\build-vfp-live3\vitadebug.skprx `
