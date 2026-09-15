@@ -2,10 +2,91 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "include/vd_module_info_lookup.h"
 #include "include/vd_thread_setter_resolver_record.h"
 
 #define TEST_MODULE_NID UINT32_C(0xF46ED7B2)
 #define TEST_BASE UINT32_C(0x81000000)
+
+struct lookup_test_state {
+    int current_result;
+    uintptr_t current_address;
+    int legacy_result;
+    uintptr_t legacy_address;
+    unsigned int calls;
+};
+
+static struct lookup_test_state lookup_state;
+
+static int fake_module_export_lookup(int32_t pid, const char* module,
+                                     uint32_t library_nid,
+                                     uint32_t function_nid,
+                                     uintptr_t* address)
+{
+    assert(pid == -1);
+    assert(strcmp(module, VD_MODULE_INFO_MODULE) == 0);
+    lookup_state.calls++;
+    if(library_nid == VD_MODULE_INFO_CURRENT_LIBRARY_NID)
+    {
+        assert(function_nid == VD_MODULE_INFO_CURRENT_FUNCTION_NID);
+        *address = lookup_state.current_address;
+        return lookup_state.current_result;
+    }
+    assert(library_nid == VD_MODULE_INFO_LEGACY_LIBRARY_NID);
+    assert(function_nid == VD_MODULE_INFO_LEGACY_FUNCTION_NID);
+    *address = lookup_state.legacy_address;
+    return lookup_state.legacy_result;
+}
+
+static void test_module_info_runtime_lookup(void)
+{
+    uintptr_t address = UINTPTR_MAX;
+    int result;
+
+    memset(&lookup_state, 0, sizeof(lookup_state));
+    lookup_state.current_address = UINT32_C(0x81000101);
+    result = vd_resolve_kernel_module_info_export(
+        fake_module_export_lookup, -1, &address);
+    assert(result == 0);
+    assert(address == lookup_state.current_address);
+    assert(lookup_state.calls == 1);
+
+    memset(&lookup_state, 0, sizeof(lookup_state));
+    lookup_state.current_result = -2;
+    lookup_state.legacy_address = UINT32_C(0x81000201);
+    result = vd_resolve_kernel_module_info_export(
+        fake_module_export_lookup, -1, &address);
+    assert(result == 0);
+    assert(address == lookup_state.legacy_address);
+    assert(lookup_state.calls == 2);
+
+    memset(&lookup_state, 0, sizeof(lookup_state));
+    lookup_state.current_address = 0;
+    lookup_state.legacy_address = UINT32_C(0x81000301);
+    result = vd_resolve_kernel_module_info_export(
+        fake_module_export_lookup, -1, &address);
+    assert(result == 0);
+    assert(address == lookup_state.legacy_address);
+    assert(lookup_state.calls == 2);
+
+    memset(&lookup_state, 0, sizeof(lookup_state));
+    lookup_state.current_result = -2;
+    lookup_state.legacy_result = -3;
+    address = UINTPTR_MAX;
+    result = vd_resolve_kernel_module_info_export(
+        fake_module_export_lookup, -1, &address);
+    assert(result == -3);
+    assert(address == 0);
+    assert(lookup_state.calls == 2);
+
+    memset(&lookup_state, 0, sizeof(lookup_state));
+    address = UINTPTR_MAX;
+    result = vd_resolve_kernel_module_info_export(
+        fake_module_export_lookup, -1, &address);
+    assert(result == VD_MODULE_INFO_EMPTY_ADDRESS);
+    assert(address == 0);
+    assert(lookup_state.calls == 2);
+}
 
 static void seal(struct vd_thread_setter_resolver_record* record)
 {
@@ -98,6 +179,8 @@ int main(void)
 {
     struct vd_thread_setter_resolver_record record;
     uint32_t original_checksum;
+
+    test_module_info_runtime_lookup();
 
     assert(sizeof(record) == VD_THREAD_SETTER_RESOLVER_RECORD_SIZE);
 

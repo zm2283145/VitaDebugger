@@ -1,10 +1,21 @@
 # ThreadMgr setter resolver probe
 
-Status: source-complete and host-tested. **It has not yet been run on Vita
-hardware.** A `PASS` from this probe would establish only that four fixed NIDs
-resolve into executable `SceKernelThreadMgr` segments and that their first 64
-bytes were captured. It would not establish a setter prototype, prove that a
-setter is safe to call, or enable any writable VitaDebugger capability.
+Status: **paused after a failed retail 3.65 hardware safety gate; do not rerun
+the current probe.** The first attempt failed safely before `module_start()`
+with `SCE_KERNEL_ERROR_MODULEMGR_NO_LIB`; replacing that unavailable static
+import with VitaShell's runtime ModuleMgr lookup allowed the kernel module to
+enter. The second attempt durably wrote revision 2 (`kernel entered`) and then
+the Vita powered off before revision 3, somewhere inside the all-at-once
+metadata collector. Both raw journals were preserved. Source inspection shows
+that no resolved ThreadMgr getter or setter is invoked, so this run did not
+attempt a register mutation, but it does prove that the collector must be
+split into separately durable, non-dereferencing rungs before any further
+hardware use.
+
+A future `PASS` would establish only that four fixed NIDs resolve into
+executable `SceKernelThreadMgr` segments and that their first 64 bytes were
+captured. It would not establish a setter prototype, prove that a setter is
+safe to call, or enable any writable VitaDebugger capability.
 
 This is a disposable, opt-in discovery title for the next foreign-thread
 register-mutation research rung. It is deliberately separate from the installed
@@ -45,10 +56,20 @@ kernel-side utility used by projects such as VitaShell. The public
 kernel syscall searches the calling process rather than accepting an explicit
 kernel PID.
 
-The returned address is never trusted on its own. The probe separately:
+`SceModulemgrForKernel` is not linked as a static import. On retail firmware it
+can make the SKPRX loader fail with `SCE_KERNEL_ERROR_MODULEMGR_NO_LIB` before
+`module_start()` runs. Instead, the probe follows VitaShell's proven pattern:
+it resolves the known read-only module-info function from `SceKernelModulemgr`
+at runtime, trying current library/function NIDs `0xC445FA63`/`0xD269F915`
+before legacy NIDs `0x92C9FFC2`/`0xDAA90093`. It invokes that fixed metadata
+API only after a successful, non-null resolution.
+
+The four ThreadMgr addresses are never trusted on their own. The probe
+separately:
 
 1. locates `SceKernelThreadMgr` with `taiGetModuleInfoForKernel()`;
-2. obtains its four segment records with `ksceKernelGetModuleInfo()`;
+2. obtains its four segment records with the dynamically resolved, fixed
+   `ksceKernelGetModuleInfo()` metadata API;
 3. verifies the taiHEN export-table range is wholly inside one module segment
    and no larger than 64 KiB;
 4. removes only the ARM Thumb-state bit from each returned function pointer;
@@ -64,7 +85,9 @@ journal from partial writes and internally inconsistent records.
 
 ## Safety boundary
 
-- No resolved function pointer is invoked.
+- None of the four resolved `SceKernelThreadMgr` function pointers is invoked.
+- The only dynamically resolved pointer that is invoked is the fixed,
+  read-only module-info metadata API described above.
 - No target thread is enumerated, retained, suspended, resumed, or modified.
 - No register context is supplied and no setter-like import exists.
 - No hook, injection, memory poke, coprocessor instruction, callback, worker
@@ -124,6 +147,12 @@ Every rebuild requires a fresh import, NID, source, and machine-code audit befor
 hardware use.
 
 ## Hardware runbook
+
+**Paused:** the following is the intended lifecycle, not authorization to run
+the current binary. First replace the collector with reviewed one-operation
+checkpoints that initially resolve but do not invoke or dereference dynamic
+pointers, then issue a new version/title/path so the failed evidence cannot be
+mistaken for a later gate.
 
 Do not place the SKPRX in `ur0:tai/config.txt`; it is packaged privately inside
 the disposable VPK.

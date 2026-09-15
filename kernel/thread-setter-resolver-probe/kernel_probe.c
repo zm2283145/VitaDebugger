@@ -5,6 +5,7 @@
 #include <psp2kern/kernel/modulemgr.h>
 #include <taihen.h>
 
+#include "vd_module_info_lookup.h"
 #include "vd_thread_setter_resolver_record.h"
 
 /*
@@ -274,9 +275,12 @@ static void capture_target(
 static void collect_read_only_state(
     struct vd_thread_setter_resolver_record* record)
 {
+    typedef int (*get_module_info_fn)(SceUID pid, SceUID modid,
+                                      SceKernelModuleInfo* info);
     SceKernelFwInfo firmware = {0};
     tai_module_info_t tai_module = {0};
     SceKernelModuleInfo module = {0};
+    uintptr_t module_info_address = 0;
     uint32_t i;
 
     firmware.size = sizeof(firmware);
@@ -308,8 +312,15 @@ static void collect_read_only_state(
     if(record->module_lookup_result >= 0)
     {
         module.size = sizeof(module);
-        record->module_info_result = ksceKernelGetModuleInfo(
-            KERNEL_PID, tai_module.modid, &module);
+        record->module_info_result = vd_resolve_kernel_module_info_export(
+            module_get_export_func, KERNEL_PID, &module_info_address);
+        if(record->module_info_result >= 0)
+        {
+            const get_module_info_fn get_module_info =
+                (get_module_info_fn)module_info_address;
+            record->module_info_result = get_module_info(
+                KERNEL_PID, tai_module.modid, &module);
+        }
         if(record->module_info_result >= 0)
         {
             record->flags |=

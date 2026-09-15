@@ -31,7 +31,6 @@ target_link_libraries(vd_thread_setter_resolver_kernel
   taihenForKernel_stub
   taihenModuleUtils_stub
   SceIofilemgrForDriver_stub
-  SceModulemgrForKernel_stub
   SceModulemgrForDriver_stub
   SceSysclibForDriver_stub
 )
