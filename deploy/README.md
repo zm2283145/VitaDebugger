@@ -10,12 +10,16 @@ workflow when using VitaSDK and retail homebrew hardware. It is not an official
 Sony tool, and it does not emulate every devkit service.
 
 > **Development status:** the host protocol has automated coverage, the Vita
-> agent builds successfully, and the normal signed install-and-launch path has
-> passed on the project's retail Vita running system software 3.65. That result
-> does not establish compatibility with Vita TV or another firmware. Bootstrap
-> recovery and interrupted-install fault injection are still in hardware
-> validation. Use a disposable test title and verified backups until an
-> on-device release is explicitly marked stable.
+> agent builds successfully, and both the staged-FTP path and the authenticated
+> direct-TCP path have completed signed verification plus install-and-launch
+> gates on retail Vita hardware running system software 3.65. The latest
+> graphical/direct agent also completed twelve consecutive launch/Circle-exit
+> cycles without a new GPU dump. These results do not establish compatibility
+> with Vita TV or another firmware. Bootstrap recovery, interruption fault
+> injection, and protocol-v2 device authentication are still in validation.
+> Use a disposable test title and verified backups until an on-device release
+> is explicitly marked stable. See the
+> [direct-TCP hardware checkpoint](../docs/hardware/vitadevdeploy-direct-tcp-retail-3.65.md).
 
 ## What it contains
 
@@ -23,8 +27,9 @@ Sony tool, and it does not emulate every devkit service.
 | --- | --- | --- |
 | Host CLI | Development PC | Validates a VPK, creates a canonical manifest, signs the job, transfers it, waits for a durable result, and optionally launches the target |
 | Vita agent | Vita, normally title ID `VDEVDEP01` | Publishes a fresh challenge, verifies the signed package tree, optionally installs it when that capability was compiled in, records the result, and exits |
+| Direct TCP intake | Vita agent and development PC | Opt-in authenticated package-byte carrier on port 18196; preserves the same signed request, manifest, verifier, and commit point as FTP |
 | Disposable test target | Vita, title ID `VDDT00001` | Harmless safe-user-mode package used to prove installation and launch without replacing another development app |
-| Vita Companion | Vita | Provides the FTP and title-launch transports used by normal deployment; the advanced bootstrap helper also uses exact-title lifecycle commands |
+| Vita Companion | Vita | Supplies title lifecycle commands and the small durable-result/recovery reads still used by direct mode, plus the complete FTP fallback; the advanced bootstrap helper also uses exact-title lifecycle commands |
 | Bootstrap helper | Development PC | Optional advanced recovery path for temporarily substituting a disposable test application's eboot when the active FTP service permits app-directory writes |
 
 Verification-only variants omit all promoter code and libraries and are built
@@ -67,8 +72,9 @@ directory, never copy it to the Vita, never pass it to the build script, and
 never commit it. The repository ignores common private-key names, but
 `.gitignore` is not a security boundary.
 
-See [SECURITY.md](SECURITY.md) for the full security boundary and
-[docs/protocol-v1.md](docs/protocol-v1.md) for the wire format.
+See [SECURITY.md](SECURITY.md) for the full security boundary,
+[docs/protocol-v1.md](docs/protocol-v1.md) for the signed job format, and
+[docs/direct-tcp-v1.md](docs/direct-tcp-v1.md) for the opt-in TCP carrier.
 
 ## Requirements
 
@@ -114,16 +120,16 @@ graphics library. Passing `-EnableExperimentalDisplayUi` to the build helper
 adds an opt-in native 960x544 interface built with the installed libvita2d and
 the Vita's default PGF font. It shows graphical operation cards, stage
 milestones, determinate verification progress, indeterminate installation
-activity, and distinct waiting, completion, and error states. Its retail 3.65
-lifecycle gate passed six consecutive post-refresh launch/exit cycles: three
-SceShell peel closures and three Circle cleanup exits, with no GPU fault or
-LiveArea hang during that sequence. Two intermittent launch-time GPU faults are
-now documented outside that sequence. Both dumps resolve to the third rapid
-startup frame while `vita2d_swap_buffers` is adding its display-queue entry.
-The UI now waits for prior GPU rendering before libvita2d can reset and reuse
-its shared transient vertex/font pool. The guard is host tested but still needs
-a hardware stress gate, so the interface stays opt-in and must not be used for
-unattended deployment yet.
+activity, and distinct waiting, completion, and error states. An earlier retail
+3.65 lifecycle gate completed six clean supervised launch/exit cycles, although
+two intermittent launch-time GPU faults were later preserved. Both dumps
+resolve to the third rapid startup frame while `vita2d_swap_buffers` is adding
+its display-queue entry. The UI now waits for prior GPU rendering before
+libvita2d can reset and reuse its shared transient vertex/font pool. The guarded
+replacement completed twelve consecutive automated launch/Circle-exit cycles
+without a new GPU dump, and also completed the direct-TCP verification and
+install-and-launch gates. Broader cold-start, Wi-Fi-reconnect, app-transition,
+and interruption stress remains, so the interface stays opt-in.
 See [the hardware report](../docs/hardware/vitadevdeploy-ui-3.65.md) and the
 upstream/license notice in [THIRD_PARTY.md](THIRD_PARTY.md).
 
@@ -144,6 +150,7 @@ py -3 -m host.vitadevdeploy --help
 ```
 
 The tests use local fakes; they do not connect to or change a Vita.
+The 2026-09-15 direct-TCP checkpoint passes all 144 tests in this suite.
 
 ## Create the signing keys
 
@@ -216,6 +223,9 @@ $PublicKeyHex = ([BitConverter]::ToString($PublicKeyBytes)).Replace("-", "").ToL
 ```
 
 The build helper has no private-key parameter. It embeds only `$PublicKeyHex`.
+Before compiling, CMake decodes that exact value and rejects non-canonical,
+identity/low-order, and other non-prime-subgroup Ed25519 points. This prevents a
+syntactically valid but unsafe trust anchor from reaching an agent artifact.
 
 ## Build the Vita agent
 
@@ -249,6 +259,18 @@ display test only, opt in explicitly:
 .\tools\build_agent.ps1 -PublicKeyHex $PublicKeyHex -Variant InstallerVerify -EnableExperimentalDisplayUi
 ```
 
+Direct TCP package intake is also an explicit experimental build option. It
+does not remove the staged FTP fallback, and the generic host CLI continues to
+default to FTP unless `--transport tcp` is selected:
+
+```powershell
+.\tools\build_agent.ps1 -PublicKeyHex $PublicKeyHex -Variant PermanentInstaller -EnableDirectTcp -DirectTcpPort 18196
+```
+
+Basic retail-3.65 verification and install-and-launch gates have passed. The
+interruption/security matrix is not complete, so use this option only for
+supervised testing on a trusted private LAN.
+
 The opt-in interface installs a process-owned CDRAM framebuffer
 directly. Close that build only by pressing Circle while it is still waiting
 for a job, or let its one-shot operation finish and exit normally. Never use
@@ -280,7 +302,9 @@ was enabled and the source SHA-256 of every packaged artwork entry. Before
 publishing, the helper opens the finished VPK and verifies each entry's size
 and SHA-256 against the reviewed source. The existing VPK line in
 `SHA256SUMS.txt` therefore authenticates the executable, metadata, and complete
-artwork set together.
+artwork set together. It also records
+`trusted_public_key_fingerprint=sha256:<hex>`, calculated over the exact 32 raw
+public-key bytes compiled into that build. It never contains a private key.
 
 > **Do not install either bootstrap VPK.** A bootstrap artifact uses the
 > existing test application's title ID. Only its `eboot.bin` is temporarily
@@ -565,6 +589,48 @@ committed job. It is not an install cancel button and is not checked after job
 processing begins. Once a job has been committed, let verification or
 installation finish and allow the one-shot agent to exit normally.
 
+An agent built with `-EnableDirectTcp` can receive package bytes directly on
+TCP port 18196 while retaining the same signed-job gate and FTP fallback:
+
+```powershell
+py -3 -m host.vitadevdeploy deploy "C:\path\to\MyHomebrew.vpk" `
+  --vita $VitaIp `
+  --private-key $PrivateKey `
+  --action install_launch `
+  --transport tcp `
+  --output .\local\retained
+```
+
+Metadata is authenticated before the PC sends any package file. The current
+increment restarts an interrupted package from the first file. Commit outcomes
+are reported as `fail_before_commit`, `ambiguous_after_commit`, or
+`known_committed`. V1 acknowledgement frames are not authenticated or bound to
+the job/nonce, so even a positive commit frame remains ambiguous until the
+matching terminal result is read, and no negative frame is allowed to delete
+signed evidence. Replay code `-20012` enters the same result reconciliation.
+If the result is still unavailable, even an automatically created temporary
+job is retained and its exact recovery path is printed.
+If the same agent/challenge is still alive, retry that signed job with:
+
+```powershell
+py -3 -m host.vitadevdeploy resume-direct `
+  .\local\retained\0123456789abcdef0123456789abcdef `
+  --vita $VitaIp
+```
+
+If the Vita agent was relaunched, its one-time challenge changed and the old
+job must be discarded and signed again. Direct mode currently still uses
+Companion FTP to read the small durable result and Companion's command port for
+title launch; package files themselves are not staged through FTP. Full wire,
+recovery, and security details are in
+[docs/direct-tcp-v1.md](docs/direct-tcp-v1.md).
+
+Direct deployment obtains the live challenge on a short connection, closes it,
+then performs VPK extraction, complete hashing, manifest generation, signing,
+and transfer-plan validation offline. It reconnects only after that work and
+requires the same challenge, keeping expensive preparation outside the
+receiver's 30-second pre-authentication deadline.
+
 Useful lower-risk commands:
 
 ```powershell
@@ -584,7 +650,28 @@ py -3 -m host.vitadevdeploy deploy "C:\path\to\MyHomebrew.vpk" --vita $VitaIp --
 Add `--crypto-backend openssl --openssl "C:\path\to\openssl.exe"` to signing
 commands if OpenSSL must be selected explicitly. The default Vita Companion
 ports are FTP 1337 and command 1338; alternate ports can be supplied to the
-`deploy` command.
+`deploy` command. The experimental direct intake defaults to TCP 18196 and can
+be changed with `--tcp-port`.
+
+Read interrupted-promotion evidence without modifying the Vita:
+
+```powershell
+py -3 -m host.vitadevdeploy recovery-status --vita $VitaIp
+```
+
+Any promotion marker blocks automatic retry even when a success result exists,
+because the fixed shallow package stage is outside the FTP client's confined
+deployment root and must be reconciled manually.
+
+The deterministic host-only graphics lifecycle model can exercise wait-before-
+reuse invariants without touching a Vita:
+
+```powershell
+py -3 .\tools\gpu_lifecycle_stress.py --cycles 10000 --frames-per-cycle 8
+```
+
+This is a state-machine regression harness, not a substitute for the pending
+on-device launch/exit and display-queue stress gate.
 
 ## Bootstrap recovery
 
@@ -605,25 +692,42 @@ after the first installation.
 ## Current limitations
 
 - Vita Companion transport has no authentication or encryption.
+- Experimental direct TCP authenticates signed job metadata before accepting
+  package bytes, but it is not encrypted and does not authenticate the Vita or
+  bind/authenticate `VDDACK01` to the job and nonce. This is not compatible with
+  the fixed v1 frame; a device-authenticated revision requires distinct
+  `VDDCHL02`/`VDDJOB02`/`VDDACK02` magics and a separately pinned device
+  identity. Forged ACKs remain a trusted-LAN residual; the host conservatively
+  retains evidence and reconciles a matching result. Keep TCP port 18196
+  private and do not forward it.
+- Direct TCP is opt-in in the generic CLI. Signed verification and a real
+  disposable-target install-and-launch passed on retail 3.65, including exact
+  installed-EBOOT readback and a clean recovery-status result. It restarts an
+  interrupted file stream rather than resuming from a byte offset, and still
+  uses Companion FTP for the durable result plus Companion's command port for
+  title launch. The remaining interruption/security gates are listed in the
+  [direct-TCP protocol document](docs/direct-tcp-v1.md).
 - Version 1 transfers the expanded package file by file, so large VPKs may take
   longer than a single-container protocol.
 - The Vita agent is one-shot: one launch creates one challenge and consumes at
   most one committed job.
 - Jobs are serialized; concurrent deployments are not supported.
+- Version 1 has no authenticated maintenance verb for abandoned uncommitted
+  inbox trees and never silently deletes them. The bounded, explicitly signed
+  version-2 inventory/cleanup design is documented in
+  [docs/direct-tcp-v1.md](docs/direct-tcp-v1.md).
 - Normal host deployment starts from LiveArea and never force-closes the
   current application. `--reuse-running-agent` is explicit because a challenge
   file alone cannot prove that its process is still alive.
-- The optional graphical status interface passed six consecutive post-refresh
-  launch/exit cycles on retail 3.65: three SceShell peel closures and three
-  Circle cleanup exits, with no GPU fault or LiveArea hang in that sequence.
-  Two intermittent launch-time GPU faults have nevertheless been observed. A
-  later manual reopen plus `--reuse-running-agent` completed the same signed
-  install normally, so package verification/promotion remained healthy. Both
-  preserved dumps identify the third rapid startup presentation and its
-  `vita2d_swap_buffers` display-queue submission. A new guard prevents reuse of
-  libvita2d's shared transient pool until prior rendering finishes; hardware
-  stress validation is pending. The interface remains opt-in; production
-  artifacts default to headless.
+- The optional graphical status interface had two intermittent launch-time GPU
+  faults after its first six-cycle lifecycle gate. Both preserved dumps identify
+  the third rapid startup presentation and its `vita2d_swap_buffers`
+  display-queue submission. A new guard prevents reuse of libvita2d's shared
+  transient pool until prior rendering finishes. The guarded replacement then
+  completed twelve consecutive automated launch/Circle-exit cycles without a
+  new dump, plus direct verification and install-and-launch. Broader lifecycle
+  and interruption stress is still pending. The interface remains opt-in;
+  production artifacts default to headless.
 - Updating an already installed app may leave SceShell's cached generic
   LiveArea background visible even when the packaged and installed asset bytes
   match. The ordinary system database update triggered by removing and
@@ -657,9 +761,12 @@ after the first installation.
 agent/                 VitaSDK user-mode deployment agent
 host/vitadevdeploy/    Python validation, signing, transfer, and launch client
 tools/build_agent.ps1  Repeatable four-variant Vita agent build
+tools/gpu_lifecycle_stress.py
+                       Deterministic host-only display lifecycle model runner
 tools/bootstrap_eboot.py
                        Pinned, hash-checked SLRS00001 bootstrap/recovery helper
 docs/protocol-v1.md    Canonical on-device protocol
+docs/direct-tcp-v1.md  Opt-in direct TCP carrier and interruption semantics
 tests/                 Host and bootstrap safety tests
 third_party/           Audited third-party installation template material
 ```

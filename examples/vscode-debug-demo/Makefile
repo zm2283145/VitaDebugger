@@ -17,6 +17,12 @@ UVDB_SOURCE_NAMES := \
 	uvdb \
 	uvdb_registers \
 	uvdb_rsp \
+	uvdb_rsp_frame \
+	uvdb_fileio_flow \
+	uvdb_memory_transaction \
+	uvdb_protocol_gate \
+	uvdb_exception_guard \
+	uvdb_exception_handlers \
 	uvdb_thread_control \
 	uvdb_monitor \
 	uvdb_breakpoint_patch \

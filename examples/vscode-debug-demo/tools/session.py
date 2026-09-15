@@ -18,10 +18,12 @@ from typing import Any, Iterable
 
 
 TITLE_ID = "UVDBDEMO1"
-CONFIG_FORMAT = 1
+CONFIG_FORMAT = 2
 KILL_OK = "Killed."
 KILL_NOT_RUNNING = "Error: cannot kill the app. Is the TITLEID correct?"
-DEFAULT_PORTS = {"ftp": 1337, "companion": 1338, "gdb": 1234}
+DEFAULT_PORTS = {"ftp": 1337, "companion": 1338, "gdb": 1234, "deployTcp": 18196}
+DEFAULT_DEPLOY_TRANSPORT = "tcp"
+SUPPORTED_DEPLOY_TRANSPORTS = frozenset(("ftp", "tcp"))
 
 SAMPLE_ROOT = Path(__file__).resolve().parent.parent
 REPO_ROOT = SAMPLE_ROOT.parent.parent
@@ -45,9 +47,11 @@ class SessionError(RuntimeError):
 @dataclass(frozen=True)
 class DemoConfig:
     vita_ip: str
+    deploy_transport: str
     ftp_port: int
     companion_port: int
     gdb_port: int
+    deploy_tcp_port: int
     vita_sdk_path: Path
     msys2_runtime_path: Path
     msys2_usr_bin_path: Path
@@ -60,10 +64,12 @@ class DemoConfig:
         return {
             "schemaVersion": CONFIG_FORMAT,
             "vitaIp": self.vita_ip,
+            "deployTransport": self.deploy_transport,
             "ports": {
                 "ftp": self.ftp_port,
                 "companion": self.companion_port,
                 "gdb": self.gdb_port,
+                "deployTcp": self.deploy_tcp_port,
             },
             "vitaSdkPath": str(self.vita_sdk_path),
             "msys2RuntimePath": str(self.msys2_runtime_path),
@@ -104,6 +110,31 @@ def configured_port(explicit: int | None, previous: Any, name: str) -> int:
     return checked_port(value, f"{name.upper()} port")
 
 
+def checked_deploy_transport(value: Any) -> str:
+    if not isinstance(value, str) or value not in SUPPORTED_DEPLOY_TRANSPORTS:
+        raise SessionError("deployTransport must be either ftp or tcp")
+    return value
+
+
+def configured_deploy_transport(explicit: str | None, previous: Any) -> str:
+    """Keep an explicit/prior choice; otherwise default a new profile to TCP."""
+
+    value = explicit if explicit is not None else previous
+    if value is None:
+        value = DEFAULT_DEPLOY_TRANSPORT
+    return checked_deploy_transport(value)
+
+
+def previous_deploy_transport(previous: dict[str, Any]) -> Any:
+    """Preserve schema-v1 profiles, whose only package carrier was FTP."""
+
+    if "deployTransport" in previous:
+        return previous["deployTransport"]
+    if previous.get("schemaVersion") == 1:
+        return "ftp"
+    return None
+
+
 def checked_path(value: Any, label: str, *, directory: bool) -> Path:
     if not isinstance(value, str) or not value.strip():
         raise SessionError(f"{label} must be a non-empty absolute path")
@@ -132,6 +163,7 @@ def parse_config(data: Any) -> DemoConfig:
     expected = {
         "schemaVersion",
         "vitaIp",
+        "deployTransport",
         "ports",
         "vitaSdkPath",
         "msys2RuntimePath",
@@ -153,13 +185,16 @@ def parse_config(data: Any) -> DemoConfig:
         )
     ports = data["ports"]
     if not isinstance(ports, dict) or set(ports) != set(DEFAULT_PORTS):
-        raise SessionError("ports must contain exactly ftp, companion, and gdb")
+        raise SessionError("ports must contain exactly ftp, companion, gdb, and deployTcp")
+    deploy_transport = checked_deploy_transport(data["deployTransport"])
 
     config = DemoConfig(
         vita_ip=canonical_ipv4(data["vitaIp"]),
+        deploy_transport=deploy_transport,
         ftp_port=checked_port(ports["ftp"], "FTP port"),
         companion_port=checked_port(ports["companion"], "Companion port"),
         gdb_port=checked_port(ports["gdb"], "GDB port"),
+        deploy_tcp_port=checked_port(ports["deployTcp"], "deploy TCP port"),
         vita_sdk_path=checked_path(data["vitaSdkPath"], "VitaSDK path", directory=True),
         msys2_runtime_path=checked_path(
             data["msys2RuntimePath"], "MSYS2 runtime path", directory=True
@@ -432,12 +467,18 @@ def configure(args: argparse.Namespace) -> DemoConfig:
         {
             "schemaVersion": CONFIG_FORMAT,
             "vitaIp": vita_ip,
+            "deployTransport": configured_deploy_transport(
+                args.deploy_transport, previous_deploy_transport(old)
+            ),
             "ports": {
                 "ftp": configured_port(args.ftp_port, old_ports.get("ftp"), "ftp"),
                 "companion": configured_port(
                     args.companion_port, old_ports.get("companion"), "companion"
                 ),
                 "gdb": configured_port(args.gdb_port, old_ports.get("gdb"), "gdb"),
+                "deployTcp": configured_port(
+                    args.deploy_tcp_port, old_ports.get("deployTcp"), "deployTcp"
+                ),
             },
             "vitaSdkPath": str(vita_sdk),
             "msys2RuntimePath": str(msys_runtime),
@@ -451,6 +492,12 @@ def configure(args: argparse.Namespace) -> DemoConfig:
     atomic_write_json(CONFIG_PATH, config.to_json())
     write_editor_files(config)
     print(f"Configured Vita {config.vita_ip}:{config.gdb_port}")
+    deploy_port = (
+        config.deploy_tcp_port
+        if config.deploy_transport == "tcp"
+        else config.ftp_port
+    )
+    print(f"Deployment transport: {config.deploy_transport} on port {deploy_port}")
     print(f"Wrote ignored local profile: {CONFIG_PATH}")
     print("Press F5 and choose 'Vita: Build, deploy, and debug demo'.")
     return config
@@ -587,6 +634,44 @@ def companion_bindings():
     return VitaCompanionClient, VitaDevDeployError
 
 
+def recovery_bindings():
+    deploy_host = REPO_ROOT / "deploy" / "host"
+    if str(deploy_host) not in sys.path:
+        sys.path.insert(0, str(deploy_host))
+    try:
+        from vitadevdeploy.errors import VitaDevDeployError
+        from vitadevdeploy.ftp import VitaFtpClient
+        from vitadevdeploy.recovery import collect_recovery_snapshot
+    except ImportError as exc:
+        raise SessionError(
+            "bundled VitaDevDeploy recovery tools could not be imported"
+        ) from exc
+    return VitaFtpClient, VitaDevDeployError, collect_recovery_snapshot
+
+
+def require_tcp_recovery_safe(config: DemoConfig) -> None:
+    """Fail the F5 workflow before building when direct install is retry-unsafe."""
+
+    if config.deploy_transport != "tcp":
+        return
+    ftp_type, error_type, collect_snapshot = recovery_bindings()
+    try:
+        with ftp_type(
+            config.vita_ip, port=config.ftp_port, timeout=10.0
+        ) as ftp:
+            snapshot = collect_snapshot(ftp)
+    except (error_type, OSError) as exc:
+        raise SessionError(
+            f"TCP deployment blocked because recovery-status could not be read: {exc}"
+        ) from exc
+    if not snapshot.safe_to_retry:
+        raise SessionError(
+            "TCP deployment blocked by recovery-status "
+            f"({snapshot.disposition}): {snapshot.operator_action}"
+        )
+    print("TCP recovery status is clean; direct deployment may proceed.")
+
+
 def companion_client(config: DemoConfig):
     client_type, _error_type = companion_bindings()
     return client_type(
@@ -633,6 +718,10 @@ def deploy_demo(config: DemoConfig) -> None:
             str(config.deploy_private_key_path),
             "--ftp-port",
             str(config.ftp_port),
+            "--transport",
+            config.deploy_transport,
+            "--tcp-port",
+            str(config.deploy_tcp_port),
             "--command-port",
             str(config.companion_port),
             "--action",
@@ -681,6 +770,7 @@ def create_live_symbols(config: DemoConfig) -> None:
 def prepare_debug_session(config: DemoConfig) -> None:
     validate_editor_files(config)
     print(f"Preparing one-click debug session for Vita {config.vita_ip}...")
+    require_tcp_recovery_safe(config)
     build_demo(config)
     create_identity()
     stop_demo(config, settle_before=False)
@@ -722,6 +812,15 @@ def add_configure_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--ftp-port", type=int)
     parser.add_argument("--companion-port", type=int)
     parser.add_argument("--gdb-port", type=int)
+    parser.add_argument("--deploy-tcp-port", type=int)
+    parser.add_argument(
+        "--deploy-transport",
+        choices=("ftp", "tcp"),
+        help=(
+            "VitaDevDeploy package transport "
+            "(new profiles default to direct TCP; FTP is the fallback)"
+        ),
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:

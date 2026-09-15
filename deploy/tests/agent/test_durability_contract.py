@@ -48,10 +48,10 @@ class AgentDurabilityContractTests(unittest.TestCase):
         self.assertEqual(helper.count("sceIoDopen(directory)"), 1)
         self.assertEqual(helper.count("sceIoSyncByFd(descriptor, 0)"), 1)
         self.assertEqual(helper.count("sceIoDclose(descriptor)"), 1)
-        self.assertEqual(helper.count(DEVICE_SYNC_CALL), 1)
+        self.assertEqual(helper.count("vdev_sync_device()"), 1)
         self.assertLess(helper.index("sceIoDopen"), helper.index("sceIoSyncByFd"))
         self.assertLess(helper.index("sceIoSyncByFd"), helper.index("sceIoDclose"))
-        self.assertLess(helper.index("sceIoDclose"), helper.index(DEVICE_SYNC_CALL))
+        self.assertLess(helper.index("sceIoDclose"), helper.index("vdev_sync_device()"))
         self.assertIn("if (descriptor < 0) return descriptor;", helper)
         self.assertIn("if (close_result < 0) return close_result;", helper)
         self.assertIn(
@@ -148,10 +148,16 @@ class AgentDurabilityContractTests(unittest.TestCase):
             {"io.c": 1},
         )
         helper = _function(self.io, "static int sync_directory(")
-        self.assertIn(DEVICE_SYNC_CALL, helper)
+        device_helper = _function(self.io, "int vdev_sync_device(void)")
+        self.assertIn("vdev_sync_device()", helper)
+        self.assertIn(DEVICE_SYNC_CALL, device_helper)
         self.assertIn("VDEV_ATOMIC_STEP_DEVICE_SYNC", helper)
         self.assertNotIn('sceIoSync("ux0:", 0)', self.io)
         self.assertNotIn("0x80010016", self.io)
+        self.assertIn(
+            "int vdev_sync_device(void);",
+            self.io_header,
+        )
         self.assertIn(
             "int vdev_sync_parent_directory(const char *path);",
             self.io_header,

@@ -41,6 +41,7 @@ int vdev_write_atomic(const char *final_path, const void *data, size_t size,
                       VdevAtomicTraceCallback trace_callback,
                       void *trace_context);
 int vdev_consume_challenge(void);
+int vdev_sync_device(void);
 int vdev_sync_parent_directory(const char *path);
 int vdev_sync_rename_parents(const char *source_path,
                              const char *destination_path);

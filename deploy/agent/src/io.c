@@ -255,11 +255,16 @@ static int sync_directory(const char *directory, int *sync_eacces,
     trace_atomic_step(trace_callback, trace_context,
                       VDEV_ATOMIC_STEP_DEVICE_SYNC,
                       VDEV_ATOMIC_TRACE_ENTER, VDEV_OK);
-    result = sceIoSync(VDEV_STORAGE_DEVICE, 0);
+    result = vdev_sync_device();
     trace_atomic_step(trace_callback, trace_context,
                       VDEV_ATOMIC_STEP_DEVICE_SYNC,
                       VDEV_ATOMIC_TRACE_RESULT, result);
     return result < 0 ? result : VDEV_OK;
+}
+
+int vdev_sync_device(void)
+{
+    return sceIoSync(VDEV_STORAGE_DEVICE, 0);
 }
 
 #if !VDEV_ENABLE_INSTALL

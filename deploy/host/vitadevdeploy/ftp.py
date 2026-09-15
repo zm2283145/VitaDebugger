@@ -271,3 +271,50 @@ class VitaFtpClient:
             interval = min(max_interval, interval * 1.5)
         detail = f": {last_error}" if last_error else ""
         raise DeploymentError(f"timed out waiting for deployment result{detail}")
+
+    def read_result(self, job_id: str) -> Result | None:
+        """Read one durable result without polling, or return ``None`` if absent."""
+
+        validate_job_id(job_id)
+        remote = f"{DEFAULT_REMOTE_ROOT}/results/{job_id}.result"
+        data = self.read_optional_bytes(remote, max_size=4096)
+        if data is None:
+            return None
+        result = parse_result(data)
+        if result.job != job_id:
+            raise ProtocolError("result job id does not match the requested job")
+        return result
+
+    def read_optional_bytes(self, remote_path: str, *, max_size: int) -> bytes | None:
+        """Read an optional regular file within the deployment root."""
+
+        self._validate_remote_path(remote_path)
+        if max_size <= 0:
+            raise ValueError("optional remote-file limit must be positive")
+        chunks: list[bytes] = []
+        size = 0
+
+        def collect(block: bytes) -> None:
+            nonlocal size
+            size += len(block)
+            if size > max_size:
+                raise DeploymentError(f"remote file exceeds {max_size} bytes: {remote_path}")
+            chunks.append(block)
+
+        try:
+            self.ftp.retrbinary(f"RETR {remote_path}", collect)
+        except DeploymentError:
+            raise
+        except ftplib.error_perm as exc:
+            response = str(exc).strip().lower()
+            missing_markers = ("missing", "not found", "no such file", "does not exist")
+            if (
+                size == 0
+                and response.startswith("550")
+                and any(marker in response for marker in missing_markers)
+            ):
+                return None
+            raise DeploymentError(f"could not read optional file {remote_path}: {exc}") from exc
+        except (OSError, ftplib.Error) as exc:
+            raise DeploymentError(f"could not read optional file {remote_path}: {exc}") from exc
+        return b"".join(chunks)

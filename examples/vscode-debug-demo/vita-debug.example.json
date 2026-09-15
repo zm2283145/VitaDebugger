@@ -1,10 +1,12 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "vitaIp": "YOUR_VITA_IP",
+  "deployTransport": "tcp",
   "ports": {
     "ftp": 1337,
     "companion": 1338,
-    "gdb": 1234
+    "gdb": 1234,
+    "deployTcp": 18196
   },
   "vitaSdkPath": "C:\\vitasdk",
   "msys2RuntimePath": "C:\\msys64\\mingw64\\bin",

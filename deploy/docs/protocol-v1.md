@@ -1,9 +1,10 @@
 # VitaDevDeploy protocol v1
 
 VitaDevDeploy is a one-shot, signed deployment bridge. Vita Companion supplies
-file transfer and application lifecycle control; the VitaDevDeploy app is the
-only component allowed to promote an uploaded package into an installed Vita
-application.
+the default file-transfer path and application lifecycle control; an opt-in
+direct TCP carrier can transfer package bytes to the agent itself. Both paths
+commit the same canonical job, and the VitaDevDeploy app is the only component
+allowed to promote it into an installed Vita application.
 
 The on-device root is fixed at `ux0:data/VitaDevDeploy`. Client input never
 selects an arbitrary device path.
@@ -15,8 +16,8 @@ selects an arbitrary device path.
    and signs the request and manifest with the developer's private key.
 3. The PC launches title `VDEVDEP01` through Vita Companion.
 4. VitaDevDeploy creates a fresh challenge and waits for one committed job.
-5. The PC reads the challenge, uploads the job with temporary names, and
-   renames `request.v1.part` to `request.v1` last.
+5. The PC reads the challenge and delivers the job through FTP or direct TCP.
+   Both carriers make `request.v1` visible last as the only commit point.
 6. VitaDevDeploy verifies the signature, challenge, metadata, package tree,
    hashes, and requested title before verification or promotion.
 7. VitaDevDeploy writes an atomic verification or installation result and
@@ -25,6 +26,11 @@ selects an arbitrary device path.
 
 One challenge authorizes at most one job. Relaunching the deployer creates a
 new challenge and invalidates the previous one.
+
+The canonical files and verification rules below are transport-independent.
+The direct carrier authenticates request and manifest metadata before accepting
+package bytes; its framing, acknowledgements, interruption behavior, and
+remaining hardware gates are specified in [direct-tcp-v1.md](direct-tcp-v1.md).
 
 ## Device layout
 
@@ -105,7 +111,9 @@ installing only `VDEVDEP01`.
 VITADEVDEPLOY-SIGNED-JOB-1\0 || request.v1 || manifest.v1
 ```
 
-The 32-byte public key is compiled into the deployer. The private key remains
+The canonical non-identity, prime-subgroup 32-byte public key is validated at
+configure time and compiled into the deployer. Its exact raw-byte SHA-256
+fingerprint is recorded in published build metadata. The private key remains
 on the developer PC and is never uploaded or committed.
 
 ## Result
@@ -143,7 +151,10 @@ for developer-built homebrew packages, not arbitrary PSN content:
 - no target-title deletion before promotion;
 - no deployer self-update.
 
-The initial hardware milestone compiles promotion off and accepts only
-`action=verify`. Promotion is enabled only after valid, forged-signature,
-wrong-hash, wrong-title, replay, and interrupted-upload tests all fail or pass
-as expected.
+The initial hardware milestone compiled promotion off and accepted only
+`action=verify`. Verification-only remains the required first gate for a new
+agent/key pairing. The current install-enabled path has subsequently completed
+signed install-and-launch on retail 3.65 through both staged FTP and direct TCP.
+Direct TCP remains experimental while its hardware interruption/security matrix
+is incomplete; passing the basic install gate does not authorize automatic
+retry after an ambiguous outcome.

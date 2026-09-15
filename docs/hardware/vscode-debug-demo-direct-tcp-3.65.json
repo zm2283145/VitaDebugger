@@ -1,0 +1,68 @@
+{
+  "artifacts": {
+    "successful_f5_vpk": {
+      "sha256": "422c5d17547a2e3ae80b3b2ef3e653df5b95e6ae3827a7838a4dfd3a41c62555"
+    },
+    "eboot": {
+      "installed_readback": "exact_match",
+      "sha256": "04785d0684536d2e146f03da1607e1d73cefbfa659887a1b591c86f2a1799e5e"
+    },
+    "note": "A later F5 repack may have a different VPK archive hash while retaining the same EBOOT runtime identity."
+  },
+  "hardware": {
+    "device_class": "retail-handheld",
+    "firmware": "3.65"
+  },
+  "host_tests": {
+    "combined_symbol_and_vscode": {
+      "passed": 51,
+      "total": 51
+    },
+    "makefile_source_parity_regression": "PASS"
+  },
+  "recorded_date": "2026-09-15",
+  "result": "PASS_WITH_RECORDED_LAUNCH_RACE",
+  "schema": "vitadebugger-vscode-demo-direct-tcp-live-v1",
+  "sessions": [
+    {
+      "deploy_job": "2367625492992a0696c2f4016de4d1e0",
+      "name": "first post-linker-fix attempt",
+      "result": "DEPLOY_PASS_LAUNCH_RACE",
+      "steps": [
+        "direct-TCP transfer committed",
+        "installation result and every journal stage reported code zero",
+        "initial SceShell launch reported C2-2752-6",
+        "VS Code symbol attach timed out",
+        "a later manual launch opened the target but was too late for this session"
+      ]
+    },
+    {
+      "deploy_job": "4c96023692e9798805d216cad7a61703",
+      "name": "immediate complete F5 retry",
+      "result": "PASS",
+      "steps": [
+        "built the debug ELF and VPK",
+        "installed all package stages with result zero over direct TCP",
+        "launched UVDBDEMO1",
+        "verified the installed EBOOT against the retained build identity",
+        "loaded current ASLR symbols",
+        "established the only GDB connection to TCP port 1234",
+        "hit the source breakpoint",
+        "changed the visible variable while paused and observed it after resume",
+        "stopped debugging and performed exact-title cleanup",
+        "returned to LiveArea"
+      ]
+    }
+  ],
+  "safety": {
+    "arbitrary_process_kill_used": false,
+    "private_key_committed": false,
+    "stop_scope": "UVDBDEMO1 only"
+  },
+  "validation_boundary": {
+    "direct_tcp_f5": "PASS",
+    "first_launch_race": "OPEN_HARDENING_ITEM",
+    "firmware_other_than_3_65": "not tested",
+    "repeated_direct_tcp_f5_soak": "not yet complete"
+  }
+}

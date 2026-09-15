@@ -19,6 +19,14 @@ option(VDEV_ENABLE_LIVEAREA_ASSETS
     "Package the reviewed icon, splash, and LiveArea artwork" ON)
 option(VDEV_ENABLE_DISPLAY_UI
     "Enable the opt-in native vita2d status interface" OFF)
+option(VDEV_ENABLE_DIRECT_TCP
+    "Enable the experimental authenticated direct TCP package intake" OFF)
+set(VDEV_DIRECT_TCP_PORT "18196" CACHE STRING
+    "TCP port used by the optional direct package intake")
+if(NOT VDEV_DIRECT_TCP_PORT MATCHES "^[0-9]+$" OR
+   VDEV_DIRECT_TCP_PORT LESS 1 OR VDEV_DIRECT_TCP_PORT GREATER 65535)
+    message(FATAL_ERROR "VDEV_DIRECT_TCP_PORT must be an integer from 1 through 65535")
+endif()
 set(VDEV_AGENT_TITLE_ID "VDEVDEP01" CACHE STRING
     "Title ID used by this agent build (use SLRS00001 for the bootstrap build)")
 set(VDEV_ONLY_TARGET_TITLE_ID "" CACHE STRING
@@ -148,9 +156,39 @@ if(VDD_PUBLIC_KEY_HEX STREQUAL
     message(FATAL_ERROR "VDD_PUBLIC_KEY_HEX cannot be the all-zero key")
 endif()
 
+# Syntax and an all-zero check are not enough for an Ed25519 trust anchor.
+# Reject non-canonical points, the identity/low-order points, and points with a
+# torsion component before any Vita object or package is built. The validator
+# uses only Python's standard library and prints the fingerprint of the exact
+# 32 raw bytes that will be compiled into the agent.
+find_package(Python3 3.8 REQUIRED COMPONENTS Interpreter)
+execute_process(
+    COMMAND "${Python3_EXECUTABLE}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/../tools/validate_ed25519_public_key.py"
+            "${VDD_PUBLIC_KEY_HEX}"
+    RESULT_VARIABLE VDD_PUBLIC_KEY_VALIDATION_RESULT
+    OUTPUT_VARIABLE VDD_PUBLIC_KEY_SHA256
+    ERROR_VARIABLE VDD_PUBLIC_KEY_VALIDATION_ERROR
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_STRIP_TRAILING_WHITESPACE
+)
+string(LENGTH "${VDD_PUBLIC_KEY_SHA256}" VDD_PUBLIC_KEY_SHA256_LENGTH)
+if(NOT "${VDD_PUBLIC_KEY_VALIDATION_RESULT}" STREQUAL "0" OR
+   NOT VDD_PUBLIC_KEY_SHA256_LENGTH EQUAL 64 OR
+   NOT VDD_PUBLIC_KEY_SHA256 MATCHES "^[0-9a-f]+$")
+    message(FATAL_ERROR
+        "VDD_PUBLIC_KEY_HEX is not a canonical non-identity Ed25519 "
+        "prime-subgroup public key: ${VDD_PUBLIC_KEY_VALIDATION_ERROR}")
+endif()
+message(STATUS
+    "Validated Ed25519 trust key fingerprint: sha256:${VDD_PUBLIC_KEY_SHA256}")
+file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/vdd-public-key-fingerprint.txt"
+    "${VDD_PUBLIC_KEY_SHA256}\n")
+
 set(VITADEVDEPLOY_AGENT_SOURCES
     src/main.c
     src/crypto.c
+    src/direct_intake.c
     src/io.c
     src/protocol.c
     src/result.c
@@ -181,6 +219,8 @@ target_compile_options(vitadevdeploy_agent PRIVATE
 target_compile_definitions(vitadevdeploy_agent PRIVATE
     VDEV_ENABLE_INSTALL=$<BOOL:${VDEV_ENABLE_INSTALL}>
     VDEV_ENABLE_DISPLAY_UI=$<BOOL:${VDEV_ENABLE_DISPLAY_UI}>
+    VDEV_ENABLE_DIRECT_TCP=$<BOOL:${VDEV_ENABLE_DIRECT_TCP}>
+    VDEV_DIRECT_TCP_PORT=${VDEV_DIRECT_TCP_PORT}
     VDEV_AGENT_TITLE_ID="${VDEV_AGENT_TITLE_ID}"
     VDEV_ONLY_TARGET_TITLE_ID="${VDEV_ONLY_TARGET_TITLE_ID}"
     VDD_PUBLIC_KEY_HEX="${VDD_PUBLIC_KEY_HEX}"
@@ -222,6 +262,13 @@ if(VDEV_ENABLE_INSTALL)
     vita_create_self(eboot.bin vitadevdeploy_agent UNSAFE)
 else()
     vita_create_self(eboot.bin vitadevdeploy_agent)
+endif()
+
+if(VDEV_ENABLE_DIRECT_TCP)
+    target_link_libraries(vitadevdeploy_agent
+        SceNet_stub
+        SceSysmodule_stub
+    )
 endif()
 
 # vita.cmake currently flattens FILE arguments into a shell-style string before

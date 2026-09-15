@@ -188,6 +188,46 @@ class FtpTests(unittest.TestCase):
                 with self.assertRaises(DeploymentError):
                     client.stage_job(job)
 
+    def test_read_result_is_nonpolling_and_optional(self) -> None:
+        fake = FakeFtp()
+        job_id = "34" * 16
+        client = VitaFtpClient("vita", ftp_factory=lambda: fake)
+        with client:
+            self.assertIsNone(client.read_result(job_id))
+            remote = f"{DEFAULT_REMOTE_ROOT}/results/{job_id}.result"
+            fake.files[remote] = (
+                "VITADEVDEPLOY-RESULT-1\n"
+                f"job={job_id}\n"
+                "state=success\n"
+                "stage=complete\n"
+                "code=0\n"
+                "title_id=TEST00001\n"
+                "message=ok\n"
+            ).encode("ascii")
+            result = client.read_result(job_id)
+        self.assertIsNotNone(result)
+        self.assertTrue(result.succeeded)  # type: ignore[union-attr]
+
+    def test_optional_read_remains_confined_to_deployment_root(self) -> None:
+        fake = FakeFtp()
+        client = VitaFtpClient("vita", ftp_factory=lambda: fake)
+        with client:
+            with self.assertRaises(DeploymentError):
+                client.read_optional_bytes("/ux0:/app/TEST00001/eboot.bin", max_size=1)
+
+    def test_optional_read_fails_closed_on_permission_error(self) -> None:
+        class PermissionDeniedFtp(FakeFtp):
+            def retrbinary(self, command: str, callback: object) -> str:
+                raise ftplib.error_perm("550 Permission denied")
+
+        fake = PermissionDeniedFtp()
+        client = VitaFtpClient("vita", ftp_factory=lambda: fake)
+        with client:
+            with self.assertRaises(DeploymentError):
+                client.read_optional_bytes(
+                    f"{DEFAULT_REMOTE_ROOT}/promote.state", max_size=1024
+                )
+
 
 class CompanionTests(unittest.TestCase):
     def _server(self, response: bytes) -> tuple[int, list[bytes], threading.Thread]:

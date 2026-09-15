@@ -1,14 +1,15 @@
 # VitaDevDeploy graphical UI lifecycle gate
 
-Status: the opt-in native vita2d interface passed its supervised lifecycle gate
-on a retail Vita running system software 3.65 on 2026-09-14. After the initial
-checks and memory-card database update, it completed six consecutive
-launch/exit cycles:
-three SceShell peel closures and three Circle cleanup exits. None produced a GPU
-fault or LiveArea hang during that sequence. Two intermittent launch-time GPU
-faults have now been observed outside the sequence, so the UI gate no longer
-supports unattended use. The headless agent remains the production default
-until graphics startup/teardown and SceShell transition stress pass.
+Status: the opt-in native vita2d interface completed its first supervised
+lifecycle gate on a retail Vita running system software 3.65 on 2026-09-14.
+After the initial checks and memory-card database update, it completed six
+consecutive launch/exit cycles: three SceShell peel closures and three Circle
+cleanup exits. None produced a GPU fault or LiveArea hang during that sequence.
+Two intermittent launch-time GPU faults were later observed outside the
+sequence. The guarded replacement described below subsequently completed a
+twelve-cycle automated launch/Circle-exit run without a new dump. The UI remains
+opt-in while broader cold-start, app-transition, Wi-Fi, and interruption stress
+continues.
 
 ## Artifact under test
 
@@ -109,6 +110,26 @@ until the guarded build passes repeated cold launches, immediate app-to-agent
 transitions, Circle cleanup, SceShell peel closure, and signed-install exits on
 hardware. The host should still quiesce a recently closed target before
 launching the graphical agent.
+
+## Guarded replacement checkpoint
+
+On 2026-09-15, the install-enabled graphical/direct-TCP replacement completed
+twelve consecutive automated launch/Circle-exit cycles. Every Companion launch
+returned success, every normal exit returned to LiveArea, and no GPU dump newer
+than the two incidents above appeared. The same installed agent completed a
+signed direct-TCP verification and a real disposable-target install-and-launch.
+
+- Title ID: `VDEVDEP01`
+- VPK size: 528,855 bytes
+- VPK SHA-256:
+  `1afde6fa38aa131f28a733c5f1a21d5ee6d302097c135b29f5917f0a935f03a7`
+- EBOOT SHA-256, matched by installed readback:
+  `888e654dda6fbdf801a1b02bf29727c74660193adaa8e88c222aad080ce60986`
+- Build features: install enabled, guarded vita2d UI enabled, direct TCP enabled
+  on port 18196, LiveArea assets enabled
+
+This bounded run materially improves confidence in the wait-before-reuse guard,
+but it does not prove that every former startup timing can no longer occur.
 
 ## LiveArea presentation follow-up
 

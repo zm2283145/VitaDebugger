@@ -1,5 +1,6 @@
 #include "common.h"
 #include "crypto.h"
+#include "direct_intake.h"
 #include "io.h"
 #include "promoter.h"
 #include "protocol.h"
@@ -168,6 +169,9 @@ static const char *message_for_code(int code)
         case VDEV_ERR_PROMOTE_UNKNOWN: return "Vita installer outcome is unknown; do not retry automatically";
         case VDEV_ERR_STALE_STAGE: return "a previous shallow installation stage still exists";
         case VDEV_ERR_REPORTING: return "installation completed but durable reporting failed; do not retry";
+        case VDEV_ERR_NETWORK: return "direct TCP network operation failed";
+        case VDEV_ERR_INTERRUPTED: return "direct TCP transfer was interrupted before commit";
+        case VDEV_ERR_COMMIT_UNKNOWN: return "direct TCP request commit outcome is uncertain";
         default: return "Vita API or I/O failure";
     }
 }
@@ -633,9 +637,14 @@ int main(void)
     char job_id[VDEV_JOB_ID_HEX_LEN + 1u];
     char job_directory[VDEV_PATH_MAX];
     int job_processed = 0;
+    int direct_enabled = 0;
+    VdevDirectServer direct_server;
     uint32_t previous_buttons = 0u;
     const char *startup_stage = "startup";
     int result;
+
+    memset(&direct_server, 0, sizeof(direct_server));
+    direct_server.listener = -1;
 
     record_startup_stage(VDEV_STARTUP_MAIN, VDEV_OK);
     vdev_ui_init();
@@ -662,6 +671,13 @@ int main(void)
     result = create_challenge(nonce);
     if (result < 0) goto done;
 
+    /* Direct TCP is an additive transport. A listener initialization failure
+     * leaves the existing filesystem/FTP challenge and commit path fully
+     * available. */
+    result = vdev_direct_start(&direct_server);
+    if (result >= 0) direct_enabled = 1;
+    result = VDEV_OK;
+
     record_startup_stage(VDEV_STARTUP_WAITING, VDEV_OK);
     startup_stage = "waiting";
     vdev_ui_waiting();
@@ -673,6 +689,15 @@ int main(void)
             vdev_ui_status(100, "Closing safely",
                            "Releasing the display before returning to LiveArea");
             goto done;
+        }
+        if (direct_enabled) {
+            const int direct_result = vdev_direct_poll(&direct_server, nonce);
+            if (direct_result < 0) {
+                vdev_direct_stop(&direct_server);
+                direct_enabled = 0;
+            } else if (direct_result == 2) {
+                vdev_ui_waiting();
+            }
         }
         result = vdev_find_committed_job(job_id, job_directory);
         if (result == VDEV_OK) break;
@@ -688,6 +713,7 @@ done:
     if (result < 0 && !job_processed) {
         vdev_ui_error(startup_stage, result, message_for_code(result));
     }
+    vdev_direct_stop(&direct_server);
     if (result < 0) {
         sceKernelDelayThread(10u * 1000u * 1000u);
     } else {

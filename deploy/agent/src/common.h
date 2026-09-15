@@ -64,7 +64,12 @@ enum {
     VDEV_ERR_PROMOTE_RESULT = -20015,
     VDEV_ERR_PROMOTE_UNKNOWN = -20016,
     VDEV_ERR_STALE_STAGE = -20017,
-    VDEV_ERR_REPORTING = -20018
+    VDEV_ERR_REPORTING = -20018,
+    VDEV_ERR_NETWORK = -20019,
+    VDEV_ERR_INTERRUPTED = -20020,
+    /* request.v1 may already have crossed its rename commit point. The host
+     * must retain the signed job and reconcile the durable result. */
+    VDEV_ERR_COMMIT_UNKNOWN = -20021
 };
 
 int vdev_is_lower_hex(const char *text, size_t length);

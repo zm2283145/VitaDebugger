@@ -28,13 +28,14 @@ claim rename-namespace or power-loss durability.
 
 Set CMake's `VDEV_ENABLE_DISPLAY_UI=ON`, or pass
 `-EnableExperimentalDisplayUi` to `tools/build_agent.ps1`, only for a supervised
-display session. Its retail 3.65 lifecycle gate passed six consecutive
-post-refresh launch/exit cycles: three SceShell peel closures and three Circle
-cleanup exits, with no GPU fault or LiveArea hang. Two intermittent GPU faults
-were later preserved; both dumps resolve to the third rapid startup frame in
-`vita2d_swap_buffers`. The graphical path now waits for prior GPU work before
-libvita2d resets its shared transient vertex/font pool, but that guard still
-needs a hardware stress gate. The opt-in build uses a process-owned framebuffer
+display session. Its first retail-3.65 gate completed six clean launch/exit
+cycles, although two intermittent GPU faults were later preserved; both dumps
+resolve to the third rapid startup frame in `vita2d_swap_buffers`. The
+graphical path now waits for prior GPU work before libvita2d resets its shared
+transient vertex/font pool. A replacement containing that guard completed
+twelve consecutive automated launch/Circle-exit cycles without a new GPU dump,
+plus direct-TCP verification and install-and-launch. Broader lifecycle and
+interruption stress remains. The opt-in build uses a process-owned framebuffer
 and should still exit normally. It uses the
 installed libvita2d and the Vita's default PGF font to present a native 960x544
 interface with operation cards, stage milestones, status detail, and distinct
@@ -45,6 +46,16 @@ Close this build only by pressing Circle during the idle wait or by letting a
 one-shot job finish and exit normally so it can release its font and vita2d
 graphics resources. Do not force-kill it or send Vita Companion's `destroy`
 command; abrupt termination can still bypass normal graphics cleanup.
+
+Set `VDEV_ENABLE_DIRECT_TCP=ON`, or pass `-EnableDirectTcp`, to listen for the
+authenticated package carrier on TCP port 18196 (configurable at build time).
+The carrier commits into the same signed inbox used by FTP; it does not add a
+second verifier or installer. Basic verification and a disposable-target
+install-and-launch passed on retail 3.65. The generic host CLI still defaults
+to FTP, while the VS Code sample defaults new profiles to direct TCP. Direct
+mode still uses Companion FTP for its small durable result/recovery reads and
+Companion commands for title launch. Interruption and device-authentication
+gates remain before unattended use.
 
 Circle is sampled only before the first committed job is found. It requests a
 clean idle exit and is not a verification or installation cancel button. After
@@ -87,7 +98,10 @@ VITADEVDEPLOY-SIGNED-JOB-1\0 || exact request.v1 || exact manifest.v1
 
 `signature.bin` is exactly 64 bytes. The trusted 32-byte public key is required
 at configure time as `-DVDD_PUBLIC_KEY_HEX=<64 lowercase hex>`; missing,
-malformed, and all-zero keys are rejected. Installation is disabled by default
+malformed, non-canonical, identity/low-order, and other non-prime-subgroup keys
+are rejected before compilation. The publish helper records SHA-256 of the
+exact accepted public bytes in `BUILD-INFO.txt` and has no private-key input.
+Installation is disabled by default
 and requires `-DVDEV_ENABLE_INSTALL=ON` after verification-only testing passes.
 For `install_launch`, the agent installs and commits success, then exits; the
 host is the sole launcher and launches only after reading that durable result.

@@ -12,6 +12,11 @@ param(
     [string] $Msys2RuntimePath,
 
     [switch] $EnableExperimentalDisplayUi,
+    [switch] $EnableDirectTcp,
+
+    [ValidateRange(1, 65535)]
+    [int] $DirectTcpPort = 18196,
+
     [switch] $DisableLiveAreaAssets,
 
     [ValidateRange(1, 256)]
@@ -341,6 +346,23 @@ if ($PublicKeyHex -eq ("0" * 64)) {
     throw "PublicKeyHex cannot be the all-zero key."
 }
 
+[byte[]] $publicKeyBytes = [byte[]]::new(32)
+for ($publicKeyIndex = 0; $publicKeyIndex -lt $publicKeyBytes.Length; ++$publicKeyIndex) {
+    $publicKeyBytes[$publicKeyIndex] = [Convert]::ToByte(
+        $PublicKeyHex.Substring($publicKeyIndex * 2, 2),
+        16
+    )
+}
+$publicKeyHasher = [Security.Cryptography.SHA256]::Create()
+try {
+    $publicKeyFingerprint = (
+        [BitConverter]::ToString($publicKeyHasher.ComputeHash($publicKeyBytes))
+    ).Replace("-", "").ToLowerInvariant()
+} finally {
+    $publicKeyHasher.Dispose()
+    [Array]::Clear($publicKeyBytes, 0, $publicKeyBytes.Length)
+}
+
 $projectRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")).Path
 $sourceDirectory = Join-Path $projectRoot "agent"
 $distRoot = Join-Path $projectRoot "dist"
@@ -443,6 +465,12 @@ $displayUiDescription = if ($EnableExperimentalDisplayUi) {
 } else {
     "disabled (headless lifecycle-safe build)"
 }
+$directTcpCMakeValue = if ($EnableDirectTcp) { "ON" } else { "OFF" }
+$directTcpDescription = if ($EnableDirectTcp) {
+    "enabled (authenticated intake on TCP $DirectTcpPort; basic retail-3.65 gate passed, interruption/security gates pending)"
+} else {
+    "disabled (hardware-tested FTP staging remains active)"
+}
 $liveAreaAssetsCMakeValue = if ($DisableLiveAreaAssets) { "OFF" } else { "ON" }
 $liveAreaAssetsDescription = if ($DisableLiveAreaAssets) {
     "disabled by explicit build override"
@@ -492,9 +520,22 @@ try {
             "-DVDEV_ONLY_TARGET_TITLE_ID=$($variantConfig.OnlyTarget)",
             "-DVDEV_ENABLE_INSTALL=$($variantConfig.EnableInstall)",
             "-DVDEV_ENABLE_LIVEAREA_ASSETS=$liveAreaAssetsCMakeValue",
-            "-DVDEV_ENABLE_DISPLAY_UI=$displayUiCMakeValue"
+            "-DVDEV_ENABLE_DISPLAY_UI=$displayUiCMakeValue",
+            "-DVDEV_ENABLE_DIRECT_TCP=$directTcpCMakeValue",
+            "-DVDEV_DIRECT_TCP_PORT=$DirectTcpPort"
         )
         Invoke-Checked -Executable $resolvedCMake -Arguments $configureArguments -Description ("CMake configuration for " + $variantConfig.OutputName)
+        $validatedFingerprintPath = Join-Path $buildDirectory "vdd-public-key-fingerprint.txt"
+        if (-not (Test-Path -LiteralPath $validatedFingerprintPath -PathType Leaf)) {
+            throw "CMake did not publish its validated Ed25519 public-key fingerprint."
+        }
+        $validatedPublicKeyFingerprint = [IO.File]::ReadAllText(
+            $validatedFingerprintPath,
+            [Text.Encoding]::ASCII
+        ).Trim()
+        if ($validatedPublicKeyFingerprint -cne $publicKeyFingerprint) {
+            throw "Validated Ed25519 public-key fingerprint does not match the exact build input."
+        }
 
         Write-Host ("Building {0}..." -f $variantConfig.OutputName)
         Invoke-Checked -Executable $resolvedCMake -Arguments @("--build", $buildDirectory, "--parallel", $Jobs) -Description ("Agent build for " + $variantConfig.OutputName)
@@ -578,11 +619,13 @@ try {
                 "self_type=$($variantConfig.SelfType)",
                 "self_auth_id=0x$expectedAuthIdHex",
                 "display_ui=$displayUiDescription",
+                "direct_tcp=$directTcpDescription",
                 "livearea_assets=$liveAreaAssetsDescription",
                 "metadata_sync_policy=$metadataSyncPolicy",
                 "purpose=$($variantConfig.Purpose)",
+                "trusted_public_key_fingerprint=sha256:$validatedPublicKeyFingerprint",
                 "private_key_embedded=no",
-                "note=The trusted Ed25519 public key is compiled into the agent."
+                "note=The validated prime-subgroup Ed25519 public key is compiled into the agent."
             )
             if ($null -ne $liveAreaAssetHashes) {
                 foreach ($entryName in $liveAreaAssetHashes.Keys) {
