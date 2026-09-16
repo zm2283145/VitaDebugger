@@ -1,7 +1,7 @@
 all: libuvdb.a
 
 clean:
-	rm -f *.o src/*.o tests/*.o tests/vita/*.o *.a *.elf *.velf eboot.bin param.sfo *.vpk *.psp2dmp test-rsp test-rsp.exe test-rsp-hardening test-rsp-hardening.exe test-uvdb-core-integration test-uvdb-core-integration.exe test-memory-transaction test-memory-transaction.exe test-protocol-gate test-protocol-gate.exe test-exception-guard test-exception-guard.exe test-exception-handlers test-exception-handlers.exe test-rsp-console test-rsp-console.exe test-register-bank test-register-bank.exe test-thread-control test-thread-control.exe test-monitor test-monitor.exe test-breakpoint-patch test-breakpoint-patch.exe test-exclusive-step test-exclusive-step.exe test-console-queue test-console-queue.exe test-console-transport test-console-transport.exe test-vfp-policy test-vfp-policy.exe test-kernel-thread-mutation test-kernel-thread-mutation.exe test-kernel-thread-mutation-provider test-kernel-thread-mutation-provider.exe test-kernel-pmu-session test-kernel-pmu-session.exe test-kernel-pmu-backend test-kernel-pmu-backend.exe test-kernel-pmu-profiler-bridge test-kernel-pmu-profiler-bridge.exe test-kernel-pmu-profiler-real-events-disabled test-kernel-pmu-profiler-real-events-disabled.exe test-kernel-pmu-profiler-real-events test-kernel-pmu-profiler-real-events.exe test-kernel-pmu-profiler-safe-rearm test-kernel-pmu-profiler-safe-rearm.exe test-pmu-failure-matrix test-pmu-failure-matrix.exe test-pmu-lifecycle-gate-record test-pmu-lifecycle-gate-record.exe test-pmu-thread-exit-gate-record test-pmu-thread-exit-gate-record.exe kernel/dipsw-read-probe/test-record kernel/dipsw-read-probe/test-record.exe kernel/dipsw-set-restore-probe/test-record kernel/dipsw-set-restore-probe/test-record.exe kernel/dipsw-dbgvcr-probe/test-record kernel/dipsw-dbgvcr-probe/test-record.exe kernel/pmu-session-probe/test-record kernel/pmu-session-probe/test-record.exe kernel/thread-setter-resolver-probe/test-record kernel/thread-setter-resolver-probe/test-record.exe $(UVDB_ASLR_FIXTURE_OBJECT) $(UVDB_ASLR_FIXTURE_ELF) $(UVDB_ASLR_FIXTURE_VELF) $(UVDB_ASLR_FIXTURE_SELF)
+	rm -f *.o src/*.o tests/*.o tests/vita/*.o *.a *.elf *.velf eboot.bin param.sfo *.vpk *.psp2dmp test-rsp test-rsp.exe test-rsp-hardening test-rsp-hardening.exe test-uvdb-core-integration test-uvdb-core-integration.exe test-memory-transaction test-memory-transaction.exe test-protocol-gate test-protocol-gate.exe test-exception-guard test-exception-guard.exe test-exception-handlers test-exception-handlers.exe test-rsp-console test-rsp-console.exe test-register-bank test-register-bank.exe test-thread-control test-thread-control.exe test-monitor test-monitor.exe test-breakpoint-patch test-breakpoint-patch.exe test-exclusive-step test-exclusive-step.exe test-console-queue test-console-queue.exe test-console-transport test-console-transport.exe test-debugnet-lifecycle test-debugnet-lifecycle.exe test-vfp-policy test-vfp-policy.exe test-kernel-thread-mutation test-kernel-thread-mutation.exe test-kernel-thread-mutation-provider test-kernel-thread-mutation-provider.exe test-kernel-pmu-session test-kernel-pmu-session.exe test-kernel-pmu-backend test-kernel-pmu-backend.exe test-kernel-pmu-profiler-bridge test-kernel-pmu-profiler-bridge.exe test-kernel-pmu-profiler-real-events-disabled test-kernel-pmu-profiler-real-events-disabled.exe test-kernel-pmu-profiler-real-events test-kernel-pmu-profiler-real-events.exe test-kernel-pmu-profiler-safe-rearm test-kernel-pmu-profiler-safe-rearm.exe test-pmu-failure-matrix test-pmu-failure-matrix.exe test-pmu-lifecycle-gate-record test-pmu-lifecycle-gate-record.exe test-pmu-thread-exit-gate-record test-pmu-thread-exit-gate-record.exe kernel/dipsw-read-probe/test-record kernel/dipsw-read-probe/test-record.exe kernel/dipsw-set-restore-probe/test-record kernel/dipsw-set-restore-probe/test-record.exe kernel/dipsw-dbgvcr-probe/test-record kernel/dipsw-dbgvcr-probe/test-record.exe kernel/pmu-session-probe/test-record kernel/pmu-session-probe/test-record.exe kernel/thread-setter-resolver-probe/test-record kernel/thread-setter-resolver-probe/test-record.exe $(UVDB_ASLR_FIXTURE_OBJECT) $(UVDB_ASLR_FIXTURE_ELF) $(UVDB_ASLR_FIXTURE_VELF) $(UVDB_ASLR_FIXTURE_SELF)
 	$(MAKE) -C profiler clean
 	$(MAKE) -C attach clean
 
@@ -12,6 +12,19 @@ deploy: package
 
 fetch_dumps:
 	curl ftp://$(VITA_IP):1337/ux0:/data/ | grep -o 'psp2core-.*' | while read line; do curl "ftp://$(VITA_IP):1337/ux0:/data/$$line" > "$$line"; curl -v "ftp://$(VITA_IP):1337/" -Q "DELE ux0:/data/$$line" >/dev/null; done
+
+DEBUGNET_GATE_HOST ?=
+DEBUGNET_GATE_PORT ?= 18194
+
+.PHONY: debugnet-exit-gate debugnet-exit-gate-clean
+
+debugnet-exit-gate:
+	$(MAKE) -C tests/vita/debugnet-exit-gate package \
+		DEBUGNET_GATE_HOST="$(DEBUGNET_GATE_HOST)" \
+		DEBUGNET_GATE_PORT="$(DEBUGNET_GATE_PORT)"
+
+debugnet-exit-gate-clean:
+	$(MAKE) -C tests/vita/debugnet-exit-gate clean
 
 KUBRIDGE_DIR ?= ../kubridge-review
 KUBRIDGE_LIB_DIR ?= $(KUBRIDGE_DIR)/build-local
@@ -119,9 +132,9 @@ HOST_CC_RUN ?= $(HOST_CC)
 HOST_PYTHON ?= python3
 endif
 
-.PHONY: host-tests host-test-rsp host-test-rsp-hardening host-test-uvdb-core-integration host-test-memory-transaction host-test-protocol-gate host-test-exception-guard host-test-exception-handlers host-test-rsp-console host-test-register-bank host-test-thread-control host-test-monitor host-test-breakpoint-patch host-test-exclusive-step host-test-vfp-policy host-test-kernel-thread-mutation host-test-kernel-thread-mutation-provider host-test-kernel-pmu-session host-test-kernel-pmu-backend host-test-kernel-pmu-profiler-bridge host-test-kernel-pmu-profiler-real-events-disabled host-test-kernel-pmu-profiler-real-events host-test-kernel-pmu-profiler-safe-rearm host-test-pmu-failure-matrix host-test-pmu-profiler-gate-record host-test-pmu-lifecycle-gate-record host-test-pmu-thread-exit-gate-record host-test-pmu-session-probe-record host-test-thread-setter-resolver-record host-test-console-queue host-test-console-transport host-test-symbols host-test-vfp-lifecycle host-test-aslr-lifecycle host-test-live-gates host-test-target-xml host-test-dipsw-probe-record host-test-dipsw-set-restore-record host-test-dipsw-dbgvcr-record host-test-profiler host-test-attach aslr-fixture
+.PHONY: host-tests host-test-rsp host-test-rsp-hardening host-test-uvdb-core-integration host-test-memory-transaction host-test-protocol-gate host-test-exception-guard host-test-exception-handlers host-test-rsp-console host-test-register-bank host-test-thread-control host-test-monitor host-test-breakpoint-patch host-test-exclusive-step host-test-vfp-policy host-test-kernel-thread-mutation host-test-kernel-thread-mutation-provider host-test-kernel-pmu-session host-test-kernel-pmu-backend host-test-kernel-pmu-profiler-bridge host-test-kernel-pmu-profiler-real-events-disabled host-test-kernel-pmu-profiler-real-events host-test-kernel-pmu-profiler-safe-rearm host-test-pmu-failure-matrix host-test-pmu-profiler-gate-record host-test-pmu-lifecycle-gate-record host-test-pmu-thread-exit-gate-record host-test-pmu-session-probe-record host-test-thread-setter-resolver-record host-test-console-queue host-test-console-transport host-test-debugnet-lifecycle host-test-symbols host-test-vfp-lifecycle host-test-aslr-lifecycle host-test-live-gates host-test-target-xml host-test-dipsw-probe-record host-test-dipsw-set-restore-record host-test-dipsw-dbgvcr-record host-test-profiler host-test-attach aslr-fixture
 
-host-tests: host-test-rsp host-test-rsp-hardening host-test-uvdb-core-integration host-test-memory-transaction host-test-protocol-gate host-test-exception-guard host-test-exception-handlers host-test-rsp-console host-test-register-bank host-test-thread-control host-test-monitor host-test-breakpoint-patch host-test-exclusive-step host-test-vfp-policy host-test-kernel-thread-mutation host-test-kernel-thread-mutation-provider host-test-kernel-pmu-session host-test-kernel-pmu-backend host-test-kernel-pmu-profiler-bridge host-test-kernel-pmu-profiler-real-events-disabled host-test-kernel-pmu-profiler-real-events host-test-kernel-pmu-profiler-safe-rearm host-test-pmu-failure-matrix host-test-pmu-profiler-gate-record host-test-pmu-lifecycle-gate-record host-test-pmu-thread-exit-gate-record host-test-pmu-session-probe-record host-test-thread-setter-resolver-record host-test-console-queue host-test-console-transport host-test-symbols host-test-vfp-lifecycle host-test-aslr-lifecycle host-test-live-gates host-test-target-xml host-test-dipsw-probe-record host-test-dipsw-set-restore-record host-test-dipsw-dbgvcr-record host-test-profiler host-test-attach
+host-tests: host-test-rsp host-test-rsp-hardening host-test-uvdb-core-integration host-test-memory-transaction host-test-protocol-gate host-test-exception-guard host-test-exception-handlers host-test-rsp-console host-test-register-bank host-test-thread-control host-test-monitor host-test-breakpoint-patch host-test-exclusive-step host-test-vfp-policy host-test-kernel-thread-mutation host-test-kernel-thread-mutation-provider host-test-kernel-pmu-session host-test-kernel-pmu-backend host-test-kernel-pmu-profiler-bridge host-test-kernel-pmu-profiler-real-events-disabled host-test-kernel-pmu-profiler-real-events host-test-kernel-pmu-profiler-safe-rearm host-test-pmu-failure-matrix host-test-pmu-profiler-gate-record host-test-pmu-lifecycle-gate-record host-test-pmu-thread-exit-gate-record host-test-pmu-session-probe-record host-test-thread-setter-resolver-record host-test-console-queue host-test-console-transport host-test-debugnet-lifecycle host-test-symbols host-test-vfp-lifecycle host-test-aslr-lifecycle host-test-live-gates host-test-target-xml host-test-dipsw-probe-record host-test-dipsw-set-restore-record host-test-dipsw-dbgvcr-record host-test-profiler host-test-attach
 
 host-test-rsp: test-rsp$(HOST_EXEEXT)
 	./test-rsp$(HOST_EXEEXT)
@@ -213,6 +226,13 @@ host-test-console-queue: test-console-queue$(HOST_EXEEXT)
 
 host-test-console-transport: test-console-transport$(HOST_EXEEXT)
 	./test-console-transport$(HOST_EXEEXT)
+
+host-test-debugnet-lifecycle: test-debugnet-lifecycle$(HOST_EXEEXT)
+	./test-debugnet-lifecycle$(HOST_EXEEXT)
+	./test-debugnet-lifecycle$(HOST_EXEEXT) --process-exit-after-stop
+	./test-debugnet-lifecycle$(HOST_EXEEXT) --process-exit-full
+	./test-debugnet-lifecycle$(HOST_EXEEXT) --process-exit-fallback
+	./test-debugnet-lifecycle$(HOST_EXEEXT) --process-exit-contention
 
 host-test-symbols:
 	$(HOST_PYTHON) -m unittest \
@@ -338,6 +358,20 @@ test-console-queue$(HOST_EXEEXT): src/uvdb_console.c src/uvdb_console.h tests/ho
 
 test-console-transport$(HOST_EXEEXT): src/uvdb_console.c src/uvdb_console.h src/uvdb_rsp.c src/uvdb_rsp.h src/uvdb_console_transport.c src/uvdb_console_transport.h tests/host/test_console_transport.c
 	$(HOST_CC_RUN) $(HOST_CFLAGS) -DUVDB_CONSOLE_TESTING src/uvdb_console.c src/uvdb_rsp.c src/uvdb_console_transport.c tests/host/test_console_transport.c -o $@
+
+UVDB_DEBUGNET_FAKE_HEADERS := \
+	tests/host/debugnet_fake/include/arpa/inet.h \
+	tests/host/debugnet_fake/include/netinet/in.h \
+	tests/host/debugnet_fake/include/psp2/types.h \
+	tests/host/debugnet_fake/include/psp2/kernel/error.h \
+	tests/host/debugnet_fake/include/psp2/kernel/processmgr.h \
+	tests/host/debugnet_fake/include/psp2/kernel/threadmgr/semaphore.h \
+	tests/host/debugnet_fake/include/psp2/kernel/threadmgr/thread.h \
+	tests/host/debugnet_fake/include/psp2/net/net_syscalls.h \
+	tests/host/debugnet_fake/include/sys/socket.h
+
+test-debugnet-lifecycle$(HOST_EXEEXT): src/uvdb_debugnet.c uvdb.h tests/host/test_debugnet_lifecycle.c $(UVDB_DEBUGNET_FAKE_HEADERS)
+	$(HOST_CC_RUN) $(HOST_CFLAGS) -DUVDB_DEBUGNET_TESTING -Itests/host/debugnet_fake/include src/uvdb_debugnet.c tests/host/test_debugnet_lifecycle.c $(HOST_THREAD_FLAGS) -o $@
 
 kernel/dipsw-read-probe/test-record$(HOST_EXEEXT): kernel/dipsw-read-probe/test_record.c kernel/dipsw-read-probe/include/vd_dipsw_probe_record.h
 	$(HOST_CC_RUN) $(HOST_CFLAGS) kernel/dipsw-read-probe/test_record.c -o $@

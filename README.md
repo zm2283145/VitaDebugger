@@ -487,10 +487,28 @@ if (uvdb_debugnet_start(&logs) == 0)
     uvdb_debugnet_printf(UVDB_LOG_INFO, "frame=%u\n", frame_number);
 ```
 
-The queue is bounded and lossy by design. Query
+The queue is bounded and lossy by design. The thread which calls
+`uvdb_debugnet_start()` owns the stream, so start it from a thread which lives
+for the whole logging session (normally the application's main thread). Query
 `uvdb_debugnet_get_stats()` and call `uvdb_debugnet_stop()` after joining log
-producers. A successful send means the Vita network stack accepted a UDP
-datagram, not that the PC received it.
+producers. Explicit stop drains queued messages on a bounded best-effort basis
+and remains the deterministic choice before `sceNetTerm()` or module unload.
+A single process-wide exit hook covers ordinary `return` from `main()` and
+`exit()`: it closes the writer gate, drops queued work, avoids all socket calls,
+and boundedly joins the sender before newlib releases the heap. If lock, writer,
+or worker quiescence cannot be proven, it uses a narrowly scoped direct process
+exit so heap teardown cannot race the sender. Direct `_Exit()`, `abort()`,
+`sceKernelExitProcess()`, crashes, and SceShell termination can bypass the C
+hook and are not guaranteed graceful-shutdown paths. The exact-owner thread
+callback remains a nonblocking best-effort fallback for owner-thread and
+SceShell close paths; call explicit stop whenever application code can do so.
+Per-session generation and emergency-signal gates make delayed/racing callbacks
+harmless after cleanup, restart, or thread-UID reuse. Socket and kernel-object
+cleanup is retryable; if the initial start fails during resource setup, call
+`uvdb_debugnet_stop()` once before retrying it. A successful send means the Vita
+network stack accepted a UDP datagram, not that the PC received it.
+The lifecycle design and hardware gate are documented in
+[DebugNet owner lifecycle](docs/debugnet-owner-lifecycle.md).
 
 For short debugger-console messages, start the persistent GDB server and then
 call `uvdb_redirect_stdio()`. Forwarding begins only after GDB negotiates

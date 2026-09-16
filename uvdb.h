@@ -42,8 +42,16 @@ struct uvdb_debugnet_stats {
 };
 
 // Start an optional DebugNet-compatible UDP log stream. Vita networking must
-// already be initialized. Calls fail cleanly when configuration is invalid or
-// the sender cannot be started; the GDB service is independent.
+// already be initialized. The calling thread owns the stream; start it from a
+// thread whose lifetime covers logging (normally the application's main
+// thread). A single process-wide exit hook synchronously quiesces the sender
+// when main returns or exit() is called. Because Vita runs that hook after
+// .fini_array destructors, it drops queued data and performs no network calls.
+// An exact-owner thread-exit handler remains the forced/SceShell-exit fallback.
+// Calls fail cleanly when configuration is invalid or either handler cannot be
+// installed; the GDB service is independent. If an initial start fails during
+// kernel resource setup, call stop once before retrying so any rare failed
+// kernel-handle deletion or socket close can be retried.
 int uvdb_debugnet_start(const struct uvdb_debugnet_config* config);
 
 // Queue one bounded message without waiting for network I/O. Returns 0 when
@@ -52,8 +60,12 @@ int uvdb_debugnet_start(const struct uvdb_debugnet_config* config);
 int uvdb_debugnet_write(enum uvdb_log_level level, const char* text);
 int uvdb_debugnet_printf(enum uvdb_log_level level, const char* format, ...);
 
-// Read counters or stop the sender. Stop makes a bounded best-effort attempt to
-// send already queued messages before closing the debugger-owned UDP socket.
+// Read counters or stop the sender. Normal stop makes a bounded best-effort
+// attempt to send already queued messages before closing the debugger-owned
+// UDP socket. Process/owner-exit shutdown drops queued work in favor of prompt
+// teardown; another surviving thread may call stop after an owner-thread exit
+// to reap handles. Call stop explicitly before application network teardown.
+// Stop is retryable when a kernel object deletion or socket close fails.
 int uvdb_debugnet_get_stats(struct uvdb_debugnet_stats* stats);
 int uvdb_debugnet_stop(void);
 

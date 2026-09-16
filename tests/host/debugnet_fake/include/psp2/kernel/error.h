@@ -1,0 +1,3 @@
+#pragma once
+
+#define SCE_KERNEL_ERROR_UNKNOWN_THREAD_EVENT_ID ((int)0x80028061)
