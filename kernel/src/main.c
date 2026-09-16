@@ -1,6 +1,7 @@
 #include <psp2kern/kernel/cpu.h>
 #include <psp2kern/kernel/modulemgr.h>
 #include <psp2kern/kernel/sysmem/data_transfers.h>
+#include <psp2kern/kernel/sysmem/uid_guid.h>
 #include <psp2kern/kernel/threadmgr/debugger.h>
 #include <psp2kern/kernel/threadmgr/misc.h>
 #include <psp2kern/kernel/threadmgr/thread.h>
@@ -122,6 +123,129 @@ static void unlock_pmu_profiler(void)
 {
     __atomic_store_n(&pmu_profiler_lock, 0, __ATOMIC_SEQ_CST);
 }
+
+#if VD_PMU_PROFILER_SAFE_REARM_COMPILED
+static int capture_pmu_owner_identity(
+    void* context, int32_t owner_pid, int32_t owner_thread,
+    struct vd_pmu_profiler_owner_identity* identity)
+{
+    (void)context;
+    if(!identity || owner_pid < 0 || owner_thread < 0)
+        return -1;
+    SceKernelThreadInfo info;
+    SceObjectBase* object = NULL;
+    __builtin_memset(&info, 0, sizeof(info));
+    info.size = sizeof(info);
+    if(ksceKernelGetThreadInfo(owner_thread, &info) < 0 ||
+       info.processId != owner_pid || !info.entry || !info.stack ||
+       info.stackSize <= 0)
+        return -1;
+    if(ksceGUIDReferObject(owner_thread, &object) < 0 || !object)
+        return -1;
+    identity->process_id = owner_pid;
+    identity->thread_id = owner_thread;
+    identity->retained_thread_object = (uintptr_t)object;
+    identity->thread_entry = (uintptr_t)info.entry;
+    identity->thread_stack = (uintptr_t)info.stack;
+    identity->thread_stack_size = (uint32_t)info.stackSize;
+    identity->initial_priority = info.initPriority;
+    identity->initial_affinity = info.initCpuAffinityMask;
+    identity->thread_attributes = info.attr;
+    return 0;
+}
+
+static int query_pmu_owner_identity(
+    void* context, int32_t owner_pid, int32_t owner_thread,
+    const struct vd_pmu_profiler_owner_identity* identity)
+{
+    (void)context;
+    if(!identity || owner_pid < 0 || owner_thread < 0 ||
+       identity->process_id != owner_pid ||
+       identity->thread_id != owner_thread ||
+       identity->retained_thread_object == (uintptr_t)0)
+        return VD_PMU_PROFILER_OWNER_UNKNOWN;
+    SceObjectBase* object = NULL;
+    const int reference_result =
+        ksceGUIDReferObject(owner_thread, &object);
+    if(reference_result == (int)SCE_KERNEL_ERROR_UNKNOWN_UID ||
+       reference_result == (int)SCE_KERNEL_ERROR_INVALID_UID)
+        return VD_PMU_PROFILER_OWNER_GONE;
+    if(reference_result < 0 || !object)
+        return VD_PMU_PROFILER_OWNER_UNKNOWN;
+
+    SceKernelThreadInfo info;
+    __builtin_memset(&info, 0, sizeof(info));
+    info.size = sizeof(info);
+    const int info_result = ksceKernelGetThreadInfo(owner_thread, &info);
+    int status = VD_PMU_PROFILER_OWNER_UNKNOWN;
+    if((uintptr_t)object != identity->retained_thread_object)
+    {
+        /* There is no public release-by-object primitive.  Even after the
+         * temporary reference below is released, the original retained
+         * object can no longer be addressed without risking a decrement of
+         * the replacement UID.  Quarantine permanently; never call this
+         * GONE and never authorize re-arm. */
+        status = VD_PMU_PROFILER_OWNER_QUARANTINE;
+    }
+    else if(info_result >= 0 && info.processId == owner_pid &&
+            (info.status & (SCE_THREAD_DORMANT | SCE_THREAD_DELETED |
+                            SCE_THREAD_DEAD)) != 0)
+        status = VD_PMU_PROFILER_OWNER_GONE;
+    else if(info_result >= 0 &&
+            (info.processId != owner_pid ||
+             identity->thread_entry != (uintptr_t)info.entry ||
+             identity->thread_stack != (uintptr_t)info.stack ||
+             identity->thread_stack_size != (uint32_t)info.stackSize ||
+             identity->initial_priority != info.initPriority ||
+             identity->initial_affinity != info.initCpuAffinityMask ||
+             identity->thread_attributes != info.attr))
+        status = VD_PMU_PROFILER_OWNER_UNKNOWN;
+    else if(info_result >= 0 && info.processId == owner_pid)
+        status = VD_PMU_PROFILER_OWNER_ALIVE;
+
+    /* If the temporary lookup cannot be released with certainty, its effect
+     * is unknown.  Never use that observation to authorize re-arm. */
+    if(ksceGUIDReleaseObject(owner_thread) < 0)
+        return VD_PMU_PROFILER_OWNER_QUARANTINE;
+    return status;
+}
+
+static int release_pmu_owner_identity(
+    void* context, int32_t owner_pid, int32_t owner_thread,
+    const struct vd_pmu_profiler_owner_identity* identity)
+{
+    (void)context;
+    if(!identity || identity->process_id != owner_pid ||
+       identity->thread_id != owner_thread ||
+       identity->retained_thread_object == (uintptr_t)0)
+        return -1;
+
+    /* ReleaseObject addresses a reference by numeric UID, not by the saved
+     * object pointer.  Re-resolve the UID immediately before decrementing it
+     * so an authenticated late Close cannot release a replacement object
+     * after UID reuse.  The first Release below balances this temporary
+     * lookup; the second releases the reference retained by capture. */
+    SceObjectBase* object = NULL;
+    if(ksceGUIDReferObject(owner_thread, &object) < 0 || !object)
+        return -1;
+    if((uintptr_t)object != identity->retained_thread_object)
+    {
+        (void)ksceGUIDReleaseObject(owner_thread);
+        return -1;
+    }
+    if(ksceGUIDReleaseObject(owner_thread) < 0)
+        return -1;
+    return ksceGUIDReleaseObject(owner_thread);
+}
+
+static const struct vd_pmu_profiler_owner_backend
+    pmu_profiler_owner_backend = {
+        .context = NULL,
+        .capture = capture_pmu_owner_identity,
+        .query = query_pmu_owner_identity,
+        .release = release_pmu_owner_identity,
+    };
+#endif
 #endif
 
 static int thread_list_contains(const SceUID* threads, int count,
@@ -318,7 +442,14 @@ int module_start(SceSize args, void* argp)
     }
     __atomic_store_n(&pmu_profiler_backend_present, 1,
                      __ATOMIC_SEQ_CST);
-    if(vdPmuProfilerTransportInit(&pmu_profiler_transport) != 0)
+    int pmu_transport_result =
+        vdPmuProfilerTransportInit(&pmu_profiler_transport);
+#if VD_PMU_PROFILER_SAFE_REARM_COMPILED
+    if(pmu_transport_result == 0)
+        pmu_transport_result = vdPmuProfilerTransportSetOwnerBackend(
+            &pmu_profiler_transport, &pmu_profiler_owner_backend);
+#endif
+    if(pmu_transport_result != 0)
     {
         if(vdPmuBackendStop() < 0)
             return SCE_KERNEL_START_SUCCESS;

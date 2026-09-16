@@ -187,40 +187,21 @@ status includes:
   bounded name dictionary. All 13 on-device checks pass, including live
   resolution of every captured custom and built-in event ID, without calling
   the kernel plugin.
-- A hardware-tested profiler capture pipeline: an allocation-free callback
-  drain, caller-owned Vita TCP sink, bounded PC receiver, named text summaries,
-  complete decoded JSON, and Chrome Trace/Perfetto export. Two real retail-3.65
-  captures delivered and independently decoded all 13 expected events with
-  clean EOF; pre-connect cancellation, forced peer disconnect, and a successful
-  recovery relaunch also passed. Cooperative CPU-side VitaGL/SceGxm hook points and a
-  fail-closed PMU provider/lease boundary are implemented. Retail 3.65 hardware
-  rejected both user-mode `ScePerf` loading paths, so the direct adapter now
-  returns unsupported instead of calling an unresolved stub. Optional kernel
-  ABI v1.13 safely reads a same-core Cortex-A9 PMU inventory, reports six event
-  counters, and leaves all observed control state unchanged. A separate
-  disposable kernel gate then passed the first bounded counter mutation on all
-  three application cores: fixed lane 5, software-increment event `0x00`,
-  `17/17` read-back, and byte-exact gate-snapshot restoration with no retained
-  obligation. A host-tested bridge and separately versioned, default-off kernel
-  transport now connect that session to VitaProfiler's exact-restore provider
-  ABI with fixed core 0/lane 5, an owner-bound lease, watchdog, and orphan
-  cleanup. Its ordinary experimental build remains event `0x00`; a second
-  compile gate plus request acknowledgement admits only `0x01`, `0x03`, and
-  `0x10`. Separate durable-journal hardware gates then passed all three events
-  on retail 3.65: fixed core-0/lane-5 samples returned 56, 23, and 97
-  respectively, and every close proved exact restoration. Timeout,
-  disconnect, process-exit, ownership-conflict, and safe re-arm gates remain,
-  so this does not enable unrestricted production PMU sampling.
-  A first 300-frame Render96EX TCP capture also completed with zero ring or
-  transport loss. It measured the stable Mario-head workload at roughly
-  82--84 ms/frame and 814--852 draw calls/frame while the two CPU-observed
-  swaps totaled only about 0.38 ms/frame, localizing the main cost ahead of the
-  instrumented swap calls. A follow-up combined capture then passed the coarse
-  Goddard zones and 75 bounded `0x01` PMU reads with balanced scopes, zero
-  transport loss, and a clean exact-restoring close. Its 3.917 ms median
-  Goddard callback inside an 83.373 ms median head frame moves the next split
-  into VitaGL submission/synchronization or true GPU work. Binary graphics
-  interposition is intentionally not planned.
+- A hardware-tested profiler capture pipeline with an allocation-free drain,
+  caller-owned Vita TCP sink, bounded PC receiver, named summaries, decoded
+  JSON, and Chrome Trace/Perfetto export. Cooperative VitaGL/SceGxm hooks and a
+  default-off, exact-restoring PMU transport are implemented. Retail 3.65 gates
+  passed allowlisted events `0x01`, `0x03`, and `0x10`. The safe-rearm candidate
+  also restored the PMU after its owning worker exited without closing and
+  admitted a fresh lease in the same process and boot: polling completed in
+  251 us and the replacement Open succeeded 3,951 us after the original Open,
+  well before its 5-second lease could expire. Process-exit, crash, disconnect,
+  timeout, and competing-owner recovery remain separate gates.
+  Two 300-frame captures from a real-world VitaGL-based 3D application completed
+  with zero ring or transport loss. The follow-up resolved 25 names, balanced
+  2,321 scope pairs, recorded 75 bounded event-`0x01` samples, and closed with
+  exact restoration. This validates practical application integration without
+  tying the profiler to one game or engine.
 - A read-only external-attach protocol and allocation-free broker core with
   exact-title discovery, kernel-ABI/capability negotiation, short-lived identity
   tickets, bounded host tooling, native tests, and a passing Vita cross-build.
@@ -274,7 +255,8 @@ Vita screenshots and structured records capture the completed probe results:
 | Profiler live TCP | [Two validated captures and recovery evidence](docs/hardware/profiler-tcp-stream-retail-3.65.md) | Caller-owned SceNet connection, sealed dictionary plus 13-event stream, PC-side validation/decoding/Perfetto export, clean EOF and teardown, pre-connect cancellation, forced peer reset, and successful recovery relaunch; no kernel calls |
 | PMU session gate | [Per-core write/restore evidence](docs/hardware/profiler-pmu-session-gate-3.65.md) | The isolated lane-5 software-increment transaction passed application cores 0, 1, and 2 with `17/17` read-back, zero operation/restore errors, exact gate-snapshot restoration, and no retained obligation; arbitrary real-event continuous profiling remains disabled |
 | PMU real event `0x01` | [Durable journal and screenshots](kernel/pmu-profiler-gate/hardware-results/2026-09-15-event-01/README.md) | One owner-attended core-0/lane-5 L1 instruction-cache miss/refill sample returned 56; all transport calls succeeded and the completion journal proves exact restoration |
-| Render96EX profiler | [Two 300-frame Mario-head captures](docs/hardware/profiler-render96ex-head-baseline-2026-09-15.md) | The CPU/VitaGL baseline and follow-up Goddard+PMU capture both closed with zero loss; the latter resolved 25 names, balanced 2,321 scope pairs, sampled `0x01` 75 times, and localized only about 3.9 ms of an 83.4 ms median head frame inside Goddard |
+| Real-world profiler integration | [Two 300-frame VitaGL captures](docs/hardware/profiler-real-world-vitagl-2026-09-15.md) | A graphics-heavy 3D application completed both captures with zero loss; the follow-up resolved 25 names, balanced 2,321 scope pairs, sampled `0x01` 75 times, and closed with exact restoration |
+| PMU dormant-thread safe re-arm | [Checksummed journal and screenshot](kernel/pmu-profiler-thread-exit-gate/hardware-results/2026-09-15-first-attempt/README.md) | The owner exited without Close; the same live process restored core 0/lane 5 and admitted a fresh real-event lease in 3,951 us, before the abandoned 5-second lease could expire |
 | VitaDevDeploy direct TCP | [Signed transfer/install evidence](docs/hardware/vitadevdeploy-direct-tcp-retail-3.65.md) | Verification-only and disposable install-and-launch jobs returned durable success, installed-EBOOT readback matched, recovery status was clean, and the guarded agent completed twelve launch/Circle-exit cycles without a new GPU dump |
 | VS Code direct-TCP F5 | [Build/deploy/debug evidence](docs/hardware/vscode-debug-demo-direct-tcp-3.65.json) | The immediate full retry passed build, signed install, launch, EBOOT identity, ASLR symbols, source breakpoint, live mutation, resume, detach, and exact-title cleanup; the first attempt's recoverable SceShell launch race remains open |
 | VitaDevDeploy UI | [Retail 3.65 lifecycle evidence](docs/hardware/vitadevdeploy-ui-3.65.md) | Two old launch-time GPU faults led to a wait-before-pool-reuse guard; its replacement passed twelve automated launch/Circle-exit cycles without a new dump, while broader lifecycle and interruption stress keeps the interface opt-in |
@@ -1284,16 +1266,15 @@ exact matching unstripped ELF on the development computer.
   pass the double-gated fake-PMU build, and the matching disposable Vita client
   cross-builds with a durable attempted/completion journal. All three
   allowlisted events (`0x01`, `0x03`, and `0x10`) have passed separate bounded
-  retail-3.65 normal-close samples with exact restoration. Vita
-  timeout/disconnect/process-exit recovery and ownership-conflict gates remain
-  pending. Two Render96EX 300-frame TCP
-  captures pass with zero loss; the second validates the Goddard zones and 75
-  bounded `0x01` PMU samples with clean close/restoration. Arbitrary thread PC/call-stack
-  sampling, true GPU timestamps, and a bespoke desktop GUI also remain pending.
-  Real-event admission is still latched to one attempt per boot. Any future
-  re-arm must require no active lease, independently verified exact restore,
-  matching owner/generation state, and either explicit close or proof that the
-  owner process/thread is gone; that re-arm is not implemented.
+  retail-3.65 normal-close samples with exact restoration. The default-off
+  safe-rearm candidate also passed the narrower dormant-owner-thread gate: a
+  fresh real-event session opened 3,951 us after the abandoned owner Open,
+  before its 5-second lease expired, and then closed with exact restoration.
+  Vita timeout, disconnect, whole-process exit/crash, and ownership-conflict
+  gates remain pending. Two 300-frame captures from a real-world VitaGL-based
+  3D application passed with zero loss; the second recorded 75 bounded `0x01`
+  samples with clean close/restoration. Arbitrary thread PC/call-stack sampling,
+  true GPU timestamps, and a bespoke desktop GUI also remain pending.
   Graphics integration uses explicit application/library source call sites
   rather than binary interposition.
   The public ScePerf imports are unresolved in the tested retail runtime and the
@@ -1360,23 +1341,15 @@ exact matching unstripped ELF on the development computer.
    A recoverable initial SceShell launch race remains a hardening item. This is
    dynamic-module and IDE convenience work; the ASLR, verified-build, live edit,
    detach, and source-step milestones are complete.
-7. Hardware-gate the newly versioned, default-off PMU/provider transport. The
-   fixed lane-5 software-increment transaction already proves exact
-   gate-snapshot restoration on application cores 0 through 2; the narrow
-   transport, fake-kernel matrix, and durable-journal disposable client now
-   build with real events limited to `0x01`, `0x03`, and `0x10`. All three
-   events have passed their separate core-0 normal-close samples with exact
-   restoration on retail 3.65. Next test timeout/error/disconnect/process-exit
-   cleanup and ownership conflicts.
-   Bounded repeated `0x01` sampling has passed in Render96EX. The caller-owned Vita TCP sink and PC receiver pass
-   live retail capture, disconnect, and recovery gates. The first 300-frame
-   Render96EX CPU/VitaGL baseline and combined Goddard+PMU capture also pass;
-   next add deeper VitaGL-owned/SceGxm timing where source hooks can do so
-   safely, then build a dedicated desktop GUI on top of the working receiver,
-   analyzer, and Perfetto export.
-   Only after those recovery gates pass, design a safe post-restore real-event
-   re-arm which requires an idle lease, independently verified exact restore,
-   matching owner/generation, and explicit close or confirmed owner exit.
+7. Finish the default-off PMU/provider recovery matrix. Normal close for events
+   `0x01`, `0x03`, and `0x10` and dormant-owner-thread safe re-arm now pass on
+   retail 3.65 with exact restoration. Next hardware-gate timeout/error,
+   receiver disconnect, whole-process exit/crash, and competing ownership, then
+   run repeated cross-application sessions. The caller-owned Vita TCP sink and
+   PC receiver already pass live capture, disconnect, and recovery gates, and
+   two 300-frame real-world VitaGL captures completed with zero loss. Add deeper
+   cooperative VitaGL/SceGxm timing where source hooks permit it, then build a
+   dedicated desktop GUI on the working receiver, analyzer, and Perfetto export.
 8. Complete protocol authentication/pairing and peer allowlists, isolated build
    directories, exported VitaSDK/CMake packages, CI and firmware coverage, and
    the project-wide licensing/release work.

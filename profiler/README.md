@@ -126,9 +126,9 @@ stream sink](docs/vita-tcp-stream.md) for the opt-in application-side SceNet
 adapter. The separate [Vita TCP hardware gate](docs/vita-tcp-hardware-gate.md)
 validates that path from an ordinary user-mode app without the kernel plugin.
 See [Cooperative graphics hooks](docs/graphics-hooks.md) for safe
-VitaGL/SceGxm call-site instrumentation, the [Render96EX VitaGL integration
-audit](docs/render96ex-vitagl-integration.md) for concrete default-off hook
-points, and [Guarded CPU/PMU provider
+VitaGL/SceGxm call-site instrumentation, the [real-world VitaGL integration
+record](../docs/hardware/profiler-real-world-vitagl-2026-09-15.md) for a
+default-off application example, and [Guarded CPU/PMU provider
 boundary](docs/pmu-provider.md) for the explicit exact-restore versus
 application-owned counter lifecycle.
 
@@ -231,7 +231,7 @@ built-in Vita sample names.
 | Renderer/audio/allocator metrics | Generic counters and zones are ready | Integration hooks in each subsystem |
 | All-process thread enumeration | Cooperative/known IDs only | Narrow process-owned enumeration |
 | Statistical PC/call-stack sampling | Not safely available | Tokenized, read-only sampler boundary |
-| PMU hardware counters | Provider boundary, named raw samples, and injected owned-reset adapter tests; direct ScePerf initialization fails closed on tested retail 3.65 | Read-only inventory and the isolated lane-5 software-increment transaction pass on application cores 0-2; the default-off transport also passed separate bounded core-0 `0x01`, `0x03`, and `0x10` samples with exact restoration. Lifecycle/conflict gates and a strictly proven post-restore re-arm remain required; today the real-event latch resets only on reboot |
+| PMU hardware counters | Provider boundary, named raw samples, and injected owned-reset adapter tests; direct ScePerf initialization fails closed on tested retail 3.65 | Read-only inventory and the isolated lane-5 software-increment transaction pass on application cores 0-2. The default-off transport passed bounded core-0 `0x01`, `0x03`, and `0x10` samples with exact restoration, plus same-boot re-arm after its owning worker exited. Process-exit/crash, disconnect, timeout, and ownership-conflict gates remain |
 | GPU workload timing | Explicit CPU-side VitaGL/SceGxm call-site hooks | GPU timestamps or automatic interposition are not implemented |
 
 `SceKernelThreadInfo.runClocks` is exported as a cumulative **raw** value because
@@ -352,14 +352,12 @@ forced peer disconnect, and a successful recovery relaunch. See the
 [TCP hardware journal](../docs/hardware/profiler-tcp-stream-retail-3.65.md) and
 its retained raw captures for exact results.
 
-The same transport then captured a clean 300-frame CPU/VitaGL baseline from
-Render96EX's Mario-head scene. It recorded zero ring/transport loss, roughly
-829 draw calls and 82--84 ms per stable head frame, but only about 0.38 ms per
-frame in the two instrumented swap calls. See the
-[Render96EX hardware record](../docs/hardware/profiler-render96ex-head-baseline-2026-09-15.md).
-That baseline predates the newer Goddard phase zones and contains no PMU sample.
-A follow-up 300-frame capture passed those zones plus 75 bounded event-`0x01`
-samples, with balanced scopes, zero loss, and a clean exact-restoring close.
+The same transport then completed two clean 300-frame captures from a
+graphics-heavy VitaGL-based 3D homebrew application. Both recorded zero
+ring/transport loss. The follow-up resolved 25 stable names, balanced 2,321
+scope pairs, and recorded 75 bounded event-`0x01` samples before a clean
+exact-restoring close. See the
+[real-world integration record](../docs/hardware/profiler-real-world-vitagl-2026-09-15.md).
 
 The probe link reserves `__sce_headroom=0x1000`. This uses the VitaSDK linker
 script's supported SCE-metadata headroom mechanism and avoids a Windows

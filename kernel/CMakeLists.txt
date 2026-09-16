@@ -27,6 +27,14 @@ option(VITADEBUG_EXPERIMENTAL_PMU_PROFILER_REAL_EVENTS
   "Admit the three reviewed real PMU events (requires PMU profiler)"
   OFF
 )
+option(VITADEBUG_EXPERIMENTAL_PMU_PROFILER_SAFE_REARM
+  "Re-arm real PMU events only after exact restore and owner termination proof"
+  OFF
+)
+option(VITADEBUG_EXPERIMENTAL_PMU_PROFILER_PROCESS_EXIT_GATE
+  "Build the unresolved owner-process-exit/relaunch PMU lifecycle gate"
+  OFF
+)
 set(VITADEBUG_PMU_PROFILER_GATE_EVENT "0x01" CACHE STRING
   "One real event compiled into the disposable PMU profiler gate"
 )
@@ -35,6 +43,16 @@ if(VITADEBUG_EXPERIMENTAL_PMU_PROFILER_REAL_EVENTS AND
    NOT VITADEBUG_EXPERIMENTAL_PMU_PROFILER)
   message(FATAL_ERROR
     "VITADEBUG_EXPERIMENTAL_PMU_PROFILER_REAL_EVENTS requires VITADEBUG_EXPERIMENTAL_PMU_PROFILER")
+endif()
+if(VITADEBUG_EXPERIMENTAL_PMU_PROFILER_SAFE_REARM AND
+   NOT VITADEBUG_EXPERIMENTAL_PMU_PROFILER_REAL_EVENTS)
+  message(FATAL_ERROR
+    "VITADEBUG_EXPERIMENTAL_PMU_PROFILER_SAFE_REARM requires VITADEBUG_EXPERIMENTAL_PMU_PROFILER_REAL_EVENTS")
+endif()
+if(VITADEBUG_EXPERIMENTAL_PMU_PROFILER_PROCESS_EXIT_GATE AND
+   NOT VITADEBUG_EXPERIMENTAL_PMU_PROFILER_SAFE_REARM)
+  message(FATAL_ERROR
+    "VITADEBUG_EXPERIMENTAL_PMU_PROFILER_PROCESS_EXIT_GATE requires VITADEBUG_EXPERIMENTAL_PMU_PROFILER_SAFE_REARM")
 endif()
 if(VITADEBUG_EXPERIMENTAL_PMU_PROFILER_REAL_EVENTS AND
    NOT (VITADEBUG_PMU_PROFILER_GATE_EVENT STREQUAL "0x01" OR
@@ -89,6 +107,11 @@ if(VITADEBUG_EXPERIMENTAL_PMU_PROFILER_REAL_EVENTS)
     VD_KERNEL_ENABLE_EXPERIMENTAL_PMU_PROFILER_REAL_EVENTS=1
   )
 endif()
+if(VITADEBUG_EXPERIMENTAL_PMU_PROFILER_SAFE_REARM)
+  target_compile_definitions(vitadebug_kernel PRIVATE
+    VD_KERNEL_ENABLE_EXPERIMENTAL_PMU_PROFILER_SAFE_REARM=1
+  )
+endif()
 target_link_options(vitadebug_kernel PRIVATE -Wl,-q -nostdlib)
 
 target_include_directories(vitadebug_kernel PRIVATE
@@ -107,9 +130,8 @@ vita_create_self(vitadebug.skprx vitadebug_kernel CONFIG exports.yml UNSAFE)
 vita_create_stubs(vitadebug_stubs vitadebug_kernel ${CMAKE_CURRENT_SOURCE_DIR}/exports.yml KERNEL)
 
 add_custom_target(vitadebug_kernel_all ALL
-  DEPENDS vitadebug.skprx
-  DEPENDS libvitadebug_kernel_stub.a
-  DEPENDS libvitadebug_kernel_stub_weak.a
+  DEPENDS vitadebug.skprx-self
+  DEPENDS vitadebug_stubs
 )
 
 add_executable(vitadebug_probe
@@ -196,6 +218,68 @@ if(VITADEBUG_EXPERIMENTAL_PMU_PROFILER_REAL_EVENTS)
     VERSION "01.00"
     NAME "VD PMU profiler gate"
   )
+
+  if(VITADEBUG_EXPERIMENTAL_PMU_PROFILER_SAFE_REARM)
+    if(VITADEBUG_EXPERIMENTAL_PMU_PROFILER_PROCESS_EXIT_GATE)
+      add_executable(vitadebug_pmu_profiler_lifecycle_gate
+        pmu-profiler-lifecycle-gate/main.c
+        ${VITASDK}/share/gcc-arm-vita-eabi/samples/common/debugScreen.c
+      )
+      target_compile_options(vitadebug_pmu_profiler_lifecycle_gate PRIVATE
+        -Wall -Wextra -Werror -O2
+      )
+      add_dependencies(vitadebug_pmu_profiler_lifecycle_gate vitadebug_stubs)
+      target_include_directories(vitadebug_pmu_profiler_lifecycle_gate PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${VITASDK}/share/gcc-arm-vita-eabi/samples/common
+      )
+      target_link_libraries(vitadebug_pmu_profiler_lifecycle_gate
+        ${CMAKE_BINARY_DIR}/vitadebug_stubs/libvitadebug_kernel_stub.a
+        SceCtrl_stub
+        SceDisplay_stub
+        SceIofilemgr_stub
+        SceKernelThreadMgr_stub
+      )
+      vita_create_self(vitadebug-pmu-profiler-lifecycle-gate-eboot.bin
+        vitadebug_pmu_profiler_lifecycle_gate UNSAFE)
+      vita_create_vpk(vitadebug-pmu-profiler-lifecycle-gate.vpk "VDCP00011"
+        vitadebug-pmu-profiler-lifecycle-gate-eboot.bin
+        VERSION "01.00"
+        NAME "VD PMU lifecycle gate"
+      )
+    endif()
+
+    # Deliberately narrower than the lifecycle gate: this one-shot target
+    # proves only dormant owner-thread recovery while the process stays alive.
+    # It contains no owner-process-exit/relaunch stage.
+    add_executable(vitadebug_pmu_profiler_thread_exit_gate
+      pmu-profiler-thread-exit-gate/main.c
+      ${VITASDK}/share/gcc-arm-vita-eabi/samples/common/debugScreen.c
+    )
+    target_compile_options(vitadebug_pmu_profiler_thread_exit_gate PRIVATE
+      -Wall -Wextra -Werror -O2
+    )
+    add_dependencies(vitadebug_pmu_profiler_thread_exit_gate
+      vitadebug_stubs)
+    target_include_directories(vitadebug_pmu_profiler_thread_exit_gate PRIVATE
+      ${CMAKE_CURRENT_SOURCE_DIR}/include
+      ${VITASDK}/share/gcc-arm-vita-eabi/samples/common
+    )
+    target_link_libraries(vitadebug_pmu_profiler_thread_exit_gate
+      ${CMAKE_BINARY_DIR}/vitadebug_stubs/libvitadebug_kernel_stub.a
+      SceCtrl_stub
+      SceDisplay_stub
+      SceIofilemgr_stub
+      SceKernelThreadMgr_stub
+    )
+    vita_create_self(vitadebug-pmu-profiler-thread-exit-gate-eboot.bin
+      vitadebug_pmu_profiler_thread_exit_gate UNSAFE)
+    vita_create_vpk(vitadebug-pmu-profiler-thread-exit-gate.vpk "VDCP00012"
+      vitadebug-pmu-profiler-thread-exit-gate-eboot.bin
+      VERSION "01.00"
+      NAME "VD PMU thread-exit gate"
+    )
+  endif()
 endif()
 
 install(DIRECTORY ${CMAKE_BINARY_DIR}/vitadebug_stubs/

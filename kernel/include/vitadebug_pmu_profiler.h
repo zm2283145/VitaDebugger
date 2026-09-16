@@ -27,6 +27,11 @@ enum vd_kernel_pmu_profiler_capability {
     VD_KERNEL_PMU_PROFILER_CAP_SOFTWARE_INCREMENT = 1u << 2,
     VD_KERNEL_PMU_PROFILER_CAP_REAL_EVENTS = 1u << 3,
     VD_KERNEL_PMU_PROFILER_CAP_SINGLE_REAL_EVENT_PER_BOOT = 1u << 4,
+    /* Advertised only by a separately enabled candidate that can re-arm after
+     * independently verified exact restore. Explicit close and dormant-owner-
+     * thread recovery are hardware-gated separately; process-exit/crash and
+     * other terminal-owner classes remain disabled until their own gates pass. */
+    VD_KERNEL_PMU_PROFILER_CAP_SAFE_POST_RESTORE_REARM = 1u << 5,
 };
 
 /* A real counter selection requires an explicit caller acknowledgement in

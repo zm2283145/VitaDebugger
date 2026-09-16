@@ -13,6 +13,13 @@
     VD_TEST_EXPECT_REAL_EVENTS_COMPILED
 #error "real-event compile gate does not match the requested host-test mode"
 #endif
+#if !defined(VD_TEST_EXPECT_SAFE_REARM_COMPILED)
+#define VD_TEST_EXPECT_SAFE_REARM_COMPILED 0
+#endif
+#if VD_PMU_PROFILER_SAFE_REARM_COMPILED != \
+    VD_TEST_EXPECT_SAFE_REARM_COMPILED
+#error "safe-rearm compile gate does not match the requested host-test mode"
+#endif
 
 #define TEST_MIDR UINT32_C(0x412fc09a)
 #define TEST_COUNTERS 6u
@@ -50,6 +57,116 @@ struct fake_pmu
     uint32_t increment_real_event_on_enable;
     uint32_t fail_selector_write_ordinal;
 };
+
+#if VD_PMU_PROFILER_SAFE_REARM_COMPILED
+struct fake_owner
+{
+    struct vd_pmu_profiler_owner_identity current;
+    int capture_result;
+    int query_override;
+    int release_result;
+    int terminal;
+    int derive_identity_from_thread;
+    uint32_t capture_calls;
+    uint32_t query_calls;
+    uint32_t release_calls;
+    uint32_t terminal_query_calls;
+};
+
+#define FAKE_OWNER_COMPARE 2
+
+static void fake_owner_init(struct fake_owner* owner)
+{
+    memset(owner, 0, sizeof(*owner));
+    owner->current.retained_thread_object =
+        (uintptr_t)UINT32_C(0x83003000);
+    owner->current.thread_entry = (uintptr_t)UINT32_C(0x81001000);
+    owner->current.thread_stack = (uintptr_t)UINT32_C(0x82002000);
+    owner->current.thread_stack_size = UINT32_C(0x4000);
+    owner->current.initial_priority = 0x40;
+    owner->current.initial_affinity = 1;
+    owner->current.thread_attributes = UINT32_C(0x10000000);
+    owner->query_override = FAKE_OWNER_COMPARE;
+}
+
+static int fake_owner_capture(
+    void* context, int32_t owner_pid, int32_t owner_thread,
+    struct vd_pmu_profiler_owner_identity* identity)
+{
+    struct fake_owner* owner = (struct fake_owner*)context;
+    ++owner->capture_calls;
+    if(owner->capture_result != 0)
+        return owner->capture_result;
+    *identity = owner->current;
+    if(owner->derive_identity_from_thread != 0)
+    {
+        const uintptr_t thread_offset =
+            ((uintptr_t)(uint32_t)owner_thread & UINT32_C(0xffff)) << 8;
+        identity->retained_thread_object =
+            (uintptr_t)UINT32_C(0x83000000) + thread_offset;
+        identity->thread_entry =
+            (uintptr_t)UINT32_C(0x81000000) + thread_offset;
+        identity->thread_stack =
+            (uintptr_t)UINT32_C(0x82000000) + thread_offset;
+    }
+    identity->process_id = owner_pid;
+    identity->thread_id = owner_thread;
+    owner->current = *identity;
+    owner->terminal = 0;
+    return 0;
+}
+
+static int fake_owner_query(
+    void* context, int32_t owner_pid, int32_t owner_thread,
+    const struct vd_pmu_profiler_owner_identity* identity)
+{
+    struct fake_owner* owner = (struct fake_owner*)context;
+    ++owner->query_calls;
+    if(owner->query_override != FAKE_OWNER_COMPARE)
+        return owner->query_override;
+    struct vd_pmu_profiler_owner_identity current = owner->current;
+    current.process_id = owner_pid;
+    current.thread_id = owner_thread;
+    if(current.retained_thread_object !=
+       identity->retained_thread_object)
+        return VD_PMU_PROFILER_OWNER_QUARANTINE;
+    if(owner->terminal != 0)
+    {
+        ++owner->terminal_query_calls;
+        return VD_PMU_PROFILER_OWNER_GONE;
+    }
+    return memcmp(&current, identity, sizeof(current)) == 0 ?
+        VD_PMU_PROFILER_OWNER_ALIVE : VD_PMU_PROFILER_OWNER_UNKNOWN;
+}
+
+static int fake_owner_release(
+    void* context, int32_t owner_pid, int32_t owner_thread,
+    const struct vd_pmu_profiler_owner_identity* identity)
+{
+    struct fake_owner* owner = (struct fake_owner*)context;
+    ++owner->release_calls;
+    if(!identity || identity->process_id != owner_pid ||
+       identity->thread_id != owner_thread ||
+       identity->retained_thread_object == (uintptr_t)0)
+        return -1;
+    if(owner->current.retained_thread_object !=
+       identity->retained_thread_object)
+        return -1;
+    return owner->release_result;
+}
+
+static struct vd_pmu_profiler_owner_backend fake_owner_backend(
+    struct fake_owner* owner)
+{
+    const struct vd_pmu_profiler_owner_backend backend = {
+        .context = owner,
+        .capture = fake_owner_capture,
+        .query = fake_owner_query,
+        .release = fake_owner_release,
+    };
+    return backend;
+}
+#endif
 
 static int failures;
 
@@ -1021,6 +1138,10 @@ static void test_transport_watchdog_recovers_idle_snapshot_failure(void)
 {
     struct fake_pmu fake;
     struct vd_pmu_profiler_transport transport;
+#if VD_PMU_PROFILER_SAFE_REARM_COMPILED
+    struct fake_owner owner;
+    struct vd_pmu_profiler_owner_backend owner_backend;
+#endif
 #if VD_PMU_PROFILER_REAL_EVENTS_COMPILED
     struct vd_kernel_pmu_profiler_open_request request =
         transport_request(VD_KERNEL_PMU_PROFILER_EVENT_ICACHE_MISS);
@@ -1038,6 +1159,13 @@ static void test_transport_watchdog_recovers_idle_snapshot_failure(void)
     memset(&transport, 0, sizeof(transport));
     CHECK(vdPmuProfilerTransportInit(&transport) == 0,
           "idle-recovery transport initializes");
+#if VD_PMU_PROFILER_SAFE_REARM_COMPILED
+    fake_owner_init(&owner);
+    owner_backend = fake_owner_backend(&owner);
+    CHECK(vdPmuProfilerTransportSetOwnerBackend(
+              &transport, &owner_backend) == 0,
+          "idle-recovery fixture installs trusted owner identity");
+#endif
 
     /* Snapshot selects lane 5, then its attempt to restore the caller's
      * original selector is ignored.  There is no session lease yet, so the
@@ -1207,6 +1335,10 @@ static void test_transport_real_event_gate(void)
 {
     struct fake_pmu fake;
     struct vd_pmu_profiler_transport transport;
+#if VD_PMU_PROFILER_SAFE_REARM_COMPILED
+    struct fake_owner owner;
+    struct vd_pmu_profiler_owner_backend owner_backend;
+#endif
     struct vd_kernel_pmu_profiler_open_request request =
         transport_request(VD_KERNEL_PMU_PROFILER_EVENT_ICACHE_MISS);
     struct vd_kernel_pmu_profiler_handle handle;
@@ -1221,6 +1353,13 @@ static void test_transport_real_event_gate(void)
     memset(&transport, 0, sizeof(transport));
     CHECK(vdPmuProfilerTransportInit(&transport) == 0,
           "real-event transport initializes without PMU access");
+#if VD_PMU_PROFILER_SAFE_REARM_COMPILED
+    fake_owner_init(&owner);
+    owner_backend = fake_owner_backend(&owner);
+    CHECK(vdPmuProfilerTransportSetOwnerBackend(
+              &transport, &owner_backend) == 0,
+          "real-event fixture installs trusted owner identity");
+#endif
 #if VD_PMU_PROFILER_REAL_EVENTS_COMPILED
     CHECK(vdPmuProfilerTransportOpen(
               &transport, owner_pid, owner_thread, &request, &handle) == 0,
@@ -1234,6 +1373,19 @@ static void test_transport_real_event_gate(void)
           "real-event sample closes with exact restoration");
     request = transport_request(
         VD_KERNEL_PMU_PROFILER_EVENT_DCACHE_MISS);
+#if VD_PMU_PROFILER_SAFE_REARM_COMPILED
+    CHECK(vdPmuProfilerTransportOpen(
+              &transport, owner_pid, owner_thread, &request, &handle) == 0 &&
+              vdPmuProfilerTransportClose(
+                  &transport, owner_pid, owner_thread, &handle) == 0 &&
+              transport.rearm_count == 2 &&
+              transport.real_event_attempted == 0 &&
+              memcmp(&fake.state, &before, sizeof(before)) == 0,
+          "matching explicit close safely re-arms the next real event");
+    CHECK(vdPmuProfilerTransportInit(&transport) == 0 &&
+              vdPmuProfilerTransportShutdown(&transport) == 0,
+          "idempotent initialization preserves a clean re-armed transport");
+#else
     CHECK(vdPmuProfilerTransportOpen(
               &transport, owner_pid, owner_thread, &request, &handle) ==
               VD_KERNEL_ERROR_PMU_PROFILER_REBOOT_REQUIRED &&
@@ -1247,6 +1399,7 @@ static void test_transport_real_event_gate(void)
     CHECK(vdPmuProfilerTransportShutdown(&transport) ==
               VD_KERNEL_ERROR_PMU_PROFILER_REBOOT_REQUIRED,
           "module unload cannot bypass the per-boot latch");
+#endif
 #else
     (void)sample;
     CHECK(vdPmuProfilerTransportOpen(
@@ -1257,6 +1410,568 @@ static void test_transport_real_event_gate(void)
 #endif
     vdPmuBackendHostTestReset();
 }
+
+#if VD_PMU_PROFILER_SAFE_REARM_COMPILED
+static void test_fake_owner_terminal_precedes_metadata_compare(void)
+{
+    struct fake_owner owner;
+    struct vd_pmu_profiler_owner_identity captured;
+    const int32_t owner_pid = 293;
+    const int32_t owner_thread = 307;
+
+    fake_owner_init(&owner);
+    CHECK(fake_owner_capture(
+              &owner, owner_pid, owner_thread, &captured) == 0,
+          "fake owner terminal-order fixture captures one identity");
+    const uintptr_t retained_object = captured.retained_thread_object;
+    owner.current.thread_entry += UINT32_C(4);
+    owner.current.thread_stack += UINT32_C(0x20);
+    ++owner.current.initial_priority;
+    owner.current.thread_attributes ^= UINT32_C(0x10);
+    owner.terminal = 1;
+    CHECK(owner.current.retained_thread_object == retained_object &&
+              fake_owner_query(
+                  &owner, owner_pid, owner_thread, &captured) ==
+                  VD_PMU_PROFILER_OWNER_GONE &&
+              owner.terminal_query_calls == 1,
+          "fake owner classifies a retained terminal object as GONE before comparing mutable terminal metadata");
+    owner.current.retained_thread_object += UINT32_C(0x10000);
+    CHECK(fake_owner_query(
+              &owner, owner_pid, owner_thread, &captured) ==
+                  VD_PMU_PROFILER_OWNER_QUARANTINE &&
+              owner.terminal_query_calls == 1,
+          "fake owner still quarantines a different retained object before terminal classification");
+}
+
+static void test_transport_safe_rearm_lifecycle(void)
+{
+    struct fake_pmu fake;
+    struct fake_owner owner;
+    struct vd_pmu_profiler_transport transport;
+    struct vd_pmu_profiler_owner_backend owner_backend;
+    struct vd_kernel_pmu_profiler_info info = transport_info_query();
+    struct vd_kernel_pmu_profiler_open_request request =
+        transport_request(VD_KERNEL_PMU_PROFILER_EVENT_ICACHE_MISS);
+    struct vd_kernel_pmu_profiler_handle handle;
+    struct vd_kernel_pmu_profiler_handle stale_handle;
+    const int32_t owner_pid = 101;
+    const int32_t owner_thread = 103;
+
+    fake_init(&fake, VD_KERNEL_PMU_PROFILER_FIXED_CORE);
+    const struct fake_pmu_state before = fake.state;
+    fake.increment_real_event_on_enable = 1;
+    fake_owner_init(&owner);
+    owner_backend = fake_owner_backend(&owner);
+    start_backend(&fake);
+    memset(&transport, 0, sizeof(transport));
+    struct vd_pmu_profiler_owner_backend incomplete_backend =
+        owner_backend;
+    incomplete_backend.query = NULL;
+    CHECK(vdPmuProfilerTransportInit(&transport) == 0 &&
+              vdPmuProfilerTransportSetOwnerBackend(
+                  &transport, &incomplete_backend) ==
+                  VD_KERNEL_ERROR_PMU_PROFILER_INVALID,
+          "owner identity provider requires capture and query together");
+    owner.capture_result = -1;
+    CHECK(vdPmuProfilerTransportSetOwnerBackend(
+              &transport, &owner_backend) == 0 &&
+              vdPmuProfilerTransportOpen(
+                  &transport, owner_pid, owner_thread,
+                  &request, &handle) ==
+                  VD_KERNEL_ERROR_PMU_PROFILER_PLATFORM &&
+              transport.state == VD_PMU_PROFILER_TRANSPORT_IDLE &&
+              transport.real_event_attempted == 0 &&
+              memcmp(&fake.state, &before, sizeof(before)) == 0,
+          "failed identity capture rejects a real event before PMU access or latch mutation");
+    owner.capture_result = 0;
+    CHECK(
+              vdPmuProfilerTransportSetOwnerBackend(
+                  &transport, &owner_backend) == 0 &&
+              vdPmuProfilerTransportGetInfo(&transport, &info) == 0 &&
+              (info.capabilities &
+               VD_KERNEL_PMU_PROFILER_CAP_SAFE_POST_RESTORE_REARM) != 0 &&
+              (info.capabilities &
+               VD_KERNEL_PMU_PROFILER_CAP_SINGLE_REAL_EVENT_PER_BOOT) == 0,
+          "safe-rearm candidate advertises its distinct gated capability");
+
+    CHECK(vdPmuProfilerTransportOpen(
+              &transport, owner_pid, owner_thread, &request, &handle) == 0 &&
+              owner.capture_calls == 2 &&
+              transport.owner_identity_valid == 1,
+          "real-event lease captures a trusted immutable owner identity");
+    stale_handle = handle;
+    struct vd_kernel_pmu_profiler_handle wrong = handle;
+    ++wrong.generation;
+    CHECK(vdPmuProfilerTransportClose(
+              &transport, owner_pid, owner_thread, &wrong) ==
+              VD_KERNEL_ERROR_PMU_PROFILER_OWNER &&
+              vdPmuProfilerTransportOpen(
+                  &transport, owner_pid + 1, owner_thread + 1,
+                  &request, &wrong) == VD_KERNEL_ERROR_PMU_PROFILER_BUSY &&
+              vdPmuProfilerTransportSetOwnerBackend(
+                  &transport, &owner_backend) ==
+                  VD_KERNEL_ERROR_PMU_PROFILER_BUSY,
+          "wrong generation and competing owners cannot release or steal a lease");
+
+    vdPmuBackendHostTestAdvanceTimeUs(
+        ((uint64_t)VD_KERNEL_PMU_PROFILER_MIN_LEASE_MS + 1u) * 1000u);
+    CHECK(vdPmuProfilerTransportWatchdog(&transport) == 1 &&
+              transport.state ==
+                  VD_PMU_PROFILER_TRANSPORT_RESTORED_AWAITING_OWNER &&
+              transport.exact_restore_proven == 1 &&
+              transport.real_event_attempted == 1 &&
+              memcmp(&fake.state, &before, sizeof(before)) == 0,
+          "lease timeout restores exactly but does not itself authorize re-arm");
+    CHECK(vdPmuProfilerTransportOpen(
+              &transport, owner_pid, owner_thread, &request, &wrong) ==
+              VD_KERNEL_ERROR_PMU_PROFILER_BUSY &&
+              vdPmuProfilerTransportClose(
+                  &transport, owner_pid + 1, owner_thread,
+                  &stale_handle) == VD_KERNEL_ERROR_PMU_PROFILER_OWNER,
+          "restored lease remains quarantined from opens and foreign close acknowledgements");
+    CHECK(vdPmuProfilerTransportClose(
+              &transport, owner_pid, owner_thread, &stale_handle) == 0 &&
+              transport.state == VD_PMU_PROFILER_TRANSPORT_IDLE &&
+              transport.real_event_attempted == 0 &&
+              transport.rearm_count == 1,
+          "matching post-timeout close acknowledges exact restore and re-arms");
+
+    request = transport_request(
+        VD_KERNEL_PMU_PROFILER_EVENT_DCACHE_MISS);
+    CHECK(vdPmuProfilerTransportOpen(
+              &transport, owner_pid, owner_thread, &request, &handle) == 0,
+          "re-armed transport admits the next reviewed event");
+    owner.query_override = VD_PMU_PROFILER_OWNER_UNKNOWN;
+    vdPmuBackendHostTestAdvanceTimeUs(
+        ((uint64_t)VD_KERNEL_PMU_PROFILER_MIN_LEASE_MS + 1u) * 1000u);
+    CHECK(vdPmuProfilerTransportWatchdog(&transport) == 1 &&
+              transport.state ==
+                  VD_PMU_PROFILER_TRANSPORT_RESTORED_AWAITING_OWNER &&
+              transport.real_event_attempted == 1,
+          "unknown owner state restores hardware but fails closed for re-arm");
+    CHECK(vdPmuProfilerTransportWatchdog(&transport) == 0 &&
+              transport.state ==
+                  VD_PMU_PROFILER_TRANSPORT_RESTORED_AWAITING_OWNER,
+          "repeated unknown liveness cannot clear the restored-owner quarantine");
+    owner.query_override = VD_PMU_PROFILER_OWNER_GONE;
+    CHECK(vdPmuProfilerTransportWatchdog(&transport) == 1 &&
+              transport.state == VD_PMU_PROFILER_TRANSPORT_IDLE &&
+              transport.real_event_attempted == 0 &&
+              transport.rearm_count == 2,
+          "proven process/thread exit authorizes re-arm after exact restore");
+
+    request = transport_request(
+        VD_KERNEL_PMU_PROFILER_EVENT_BRANCH_MISPREDICT);
+    owner.query_override = FAKE_OWNER_COMPARE;
+    CHECK(vdPmuProfilerTransportOpen(
+              &transport, owner_pid, owner_thread, &request, &handle) == 0,
+          "owner-exit re-arm admits a third reviewed event");
+    CHECK(vdPmuProfilerTransportClose(
+              &transport, owner_pid, owner_thread, &handle) == 0 &&
+              transport.state == VD_PMU_PROFILER_TRANSPORT_IDLE &&
+              transport.real_event_attempted == 0 &&
+              transport.rearm_count == 3 &&
+              memcmp(&fake.state, &before, sizeof(before)) == 0,
+          "third reviewed event explicitly restores and re-arms");
+    CHECK(vdPmuProfilerTransportClose(
+              &transport, owner_pid, owner_thread, &handle) ==
+              VD_KERNEL_ERROR_PMU_PROFILER_OWNER,
+          "retired handle cannot close a later transport state");
+
+    request = transport_request(
+        VD_KERNEL_PMU_PROFILER_EVENT_ICACHE_MISS);
+    CHECK(vdPmuProfilerTransportOpen(
+              &transport, owner_pid, owner_thread, &request, &handle) == 0 &&
+              vdPmuProfilerTransportClose(
+                  &transport, owner_pid, owner_thread, &handle) == 0 &&
+              transport.rearm_count == 4,
+          "receiver-disconnect cleanup uses the same authenticated explicit-close path");
+
+    request = transport_request(
+        VD_KERNEL_PMU_PROFILER_EVENT_DCACHE_MISS);
+    CHECK(vdPmuProfilerTransportOpen(
+              &transport, owner_pid, owner_thread, &request, &handle) == 0,
+          "restore-error lifecycle fixture acquires a fresh real event");
+    vdPmuBackendHostTestSetDispatchMode(
+        VD_PMU_BACKEND_HOST_DISPATCH_TIMEOUT);
+    CHECK(vdPmuProfilerTransportClose(
+              &transport, owner_pid, owner_thread, &handle) ==
+              VD_KERNEL_ERROR_PMU_PROFILER_RESTORE_REQUIRED &&
+              transport.state ==
+                  VD_PMU_PROFILER_TRANSPORT_CLEANUP_REQUIRED &&
+              transport.real_event_attempted == 1,
+          "ambiguous explicit close retains the real-event restoration obligation");
+    vdPmuBackendHostTestSetDispatchMode(
+        VD_PMU_BACKEND_HOST_DISPATCH_INLINE);
+    CHECK(vdPmuBackendHostTestCompleteInflight() == 0,
+          "late real-event restore completes in the fake kernel");
+    CHECK(vdPmuProfilerTransportWatchdog(&transport) == 1 &&
+              transport.state ==
+                  VD_PMU_PROFILER_TRANSPORT_RESTORED_AWAITING_OWNER &&
+              transport.exact_restore_proven == 1 &&
+              transport.real_event_attempted == 1 &&
+              memcmp(&fake.state, &before, sizeof(before)) == 0,
+          "watchdog independently verifies late restore without granting re-arm");
+    CHECK(vdPmuProfilerTransportClose(
+              &transport, owner_pid, owner_thread, &handle) == 0 &&
+              transport.rearm_count == 5 &&
+              transport.real_event_attempted == 0,
+          "the original owner/generation can acknowledge late exact restoration");
+    CHECK(vdPmuProfilerTransportShutdown(&transport) == 0,
+          "fully acknowledged re-arm state permits clean module shutdown");
+
+    request = transport_request(
+        VD_KERNEL_PMU_PROFILER_EVENT_ICACHE_MISS);
+    const uint32_t releases_before_uncertain = owner.release_calls;
+    owner.release_result = -77;
+    CHECK(vdPmuProfilerTransportOpen(
+              &transport, owner_pid, owner_thread, &request, &handle) == 0 &&
+              vdPmuProfilerTransportClose(
+                  &transport, owner_pid, owner_thread, &handle) ==
+                  VD_KERNEL_ERROR_PMU_PROFILER_RESTORE_REQUIRED &&
+              transport.exact_restore_proven == 1 &&
+              transport.owner_identity_release_uncertain == 1 &&
+              transport.state ==
+                  VD_PMU_PROFILER_TRANSPORT_RESTORED_AWAITING_OWNER &&
+              memcmp(&fake.state, &before, sizeof(before)) == 0,
+          "uncertain retained-object release quarantines an exactly restored lease");
+    owner.release_result = 0;
+    CHECK(vdPmuProfilerTransportWatchdog(&transport) ==
+              VD_KERNEL_ERROR_PMU_PROFILER_RESTORE_REQUIRED &&
+              vdPmuProfilerTransportShutdown(&transport) ==
+              VD_KERNEL_ERROR_PMU_PROFILER_RESTORE_REQUIRED &&
+              owner.release_calls == releases_before_uncertain + 1,
+          "uncertain object release is never retried and blocks unload/re-arm");
+    vdPmuBackendHostTestReset();
+}
+
+static void test_transport_open_services_terminal_owner(void)
+{
+    struct fake_pmu fake;
+    struct fake_owner owner;
+    struct vd_pmu_profiler_transport transport;
+    struct vd_pmu_profiler_owner_backend owner_backend;
+    struct vd_kernel_pmu_profiler_open_request request =
+        transport_request(VD_KERNEL_PMU_PROFILER_EVENT_ICACHE_MISS);
+    struct vd_kernel_pmu_profiler_handle first_handle;
+    struct vd_kernel_pmu_profiler_handle next_handle;
+    struct vd_kernel_pmu_profiler_sample sample;
+    const int32_t first_pid = 307;
+    const int32_t first_thread = 311;
+    const int32_t next_pid = 313;
+    const int32_t next_thread = 317;
+
+    fake_init(&fake, VD_KERNEL_PMU_PROFILER_FIXED_CORE);
+    const struct fake_pmu_state before = fake.state;
+    fake.increment_real_event_on_enable = 1;
+    fake_owner_init(&owner);
+    owner.derive_identity_from_thread = 1;
+    owner_backend = fake_owner_backend(&owner);
+    start_backend(&fake);
+    memset(&transport, 0, sizeof(transport));
+    CHECK(vdPmuProfilerTransportInit(&transport) == 0 &&
+              vdPmuProfilerTransportSetOwnerBackend(
+                  &transport, &owner_backend) == 0 &&
+              vdPmuProfilerTransportOpen(
+                  &transport, first_pid, first_thread,
+                  &request, &first_handle) == 0,
+          "Open-recovery fixture acquires its initial retained owner");
+
+    const struct fake_pmu_state active_before_contender = fake.state;
+    const uint32_t first_owner_token = transport.owner_token;
+    const uint32_t first_generation = transport.generation;
+    const uint64_t first_lease_token = transport.lease_token;
+    const uint32_t queries_before_contender = owner.query_calls;
+    memset(&next_handle, 0xa5, sizeof(next_handle));
+    CHECK(vdPmuProfilerTransportOpen(
+              &transport, next_pid, next_thread,
+              &request, &next_handle) ==
+                  VD_KERNEL_ERROR_PMU_PROFILER_BUSY &&
+              owner.query_calls == queries_before_contender + 1 &&
+              owner.capture_calls == 1 && owner.release_calls == 0 &&
+              transport.state == VD_PMU_PROFILER_TRANSPORT_ACTIVE &&
+              transport.owner_pid == first_pid &&
+              transport.owner_thread == first_thread &&
+              transport.owner_token == first_owner_token &&
+              transport.generation == first_generation &&
+              transport.lease_token == first_lease_token &&
+              memcmp(&fake.state, &active_before_contender,
+                     sizeof(fake.state)) == 0,
+          "a live contender stays BUSY after one bounded owner check without mutating the active lease");
+
+    const uintptr_t retained_object =
+        owner.current.retained_thread_object;
+    owner.current.thread_entry += UINT32_C(4);
+    owner.current.thread_stack += UINT32_C(0x20);
+    ++owner.current.initial_priority;
+    owner.current.thread_attributes ^= UINT32_C(0x10);
+    owner.terminal = 1;
+    request = transport_request(
+        VD_KERNEL_PMU_PROFILER_EVENT_DCACHE_MISS);
+    const uint32_t queries_before_rearm = owner.query_calls;
+    CHECK(owner.current.retained_thread_object == retained_object &&
+              vdPmuProfilerTransportOpen(
+                  &transport, next_pid, next_thread,
+                  &request, &next_handle) == 0 &&
+              owner.query_calls == queries_before_rearm + 1 &&
+              owner.terminal_query_calls == 1 &&
+              owner.capture_calls == 2 && owner.release_calls == 1 &&
+              owner.current.retained_thread_object != retained_object &&
+              transport.state == VD_PMU_PROFILER_TRANSPORT_ACTIVE &&
+              transport.owner_pid == next_pid &&
+              transport.owner_thread == next_thread &&
+              transport.rearm_count == 1 &&
+              transport.owner_token != first_handle.owner_token &&
+              transport.generation != first_handle.generation &&
+              next_handle.owner_token == transport.owner_token &&
+              next_handle.generation == transport.generation,
+          "a new Open recognizes the same retained object as terminal despite changed terminal metadata and safely re-arms");
+
+    const struct fake_pmu_state active_after_rearm = fake.state;
+    const uint32_t next_owner_token = transport.owner_token;
+    const uint32_t next_generation = transport.generation;
+    const uint64_t next_lease_token = transport.lease_token;
+    const uint32_t captures_before_stale = owner.capture_calls;
+    const uint32_t queries_before_stale = owner.query_calls;
+    const uint32_t releases_before_stale = owner.release_calls;
+    memset(&sample, 0xa5, sizeof(sample));
+    CHECK(vdPmuProfilerTransportRead(
+              &transport, next_pid, next_thread,
+              &first_handle, &sample) ==
+                  VD_KERNEL_ERROR_PMU_PROFILER_OWNER &&
+              vdPmuProfilerTransportClose(
+                  &transport, next_pid, next_thread,
+                  &first_handle) ==
+                  VD_KERNEL_ERROR_PMU_PROFILER_OWNER &&
+              owner.capture_calls == captures_before_stale &&
+              owner.query_calls == queries_before_stale &&
+              owner.release_calls == releases_before_stale &&
+              transport.state == VD_PMU_PROFILER_TRANSPORT_ACTIVE &&
+              transport.owner_token == next_owner_token &&
+              transport.generation == next_generation &&
+              transport.lease_token == next_lease_token &&
+              memcmp(&fake.state, &active_after_rearm,
+                     sizeof(fake.state)) == 0,
+          "the retired pre-rearm handle cannot read or close the replacement lease");
+    CHECK(vdPmuProfilerTransportClose(
+              &transport, next_pid, next_thread,
+              &next_handle) == 0 &&
+              transport.state == VD_PMU_PROFILER_TRANSPORT_IDLE &&
+              transport.rearm_count == 2 &&
+              memcmp(&fake.state, &before, sizeof(before)) == 0 &&
+              vdPmuProfilerTransportShutdown(&transport) == 0,
+          "the replacement lease closes with exact restoration after stale-handle rejection");
+    vdPmuBackendHostTestReset();
+}
+
+static void test_transport_open_quarantines_terminal_release_failure(void)
+{
+    struct fake_pmu fake;
+    struct fake_owner owner;
+    struct vd_pmu_profiler_transport transport;
+    struct vd_pmu_profiler_owner_backend owner_backend;
+    struct vd_kernel_pmu_profiler_open_request request =
+        transport_request(VD_KERNEL_PMU_PROFILER_EVENT_ICACHE_MISS);
+    struct vd_kernel_pmu_profiler_handle first_handle;
+    struct vd_kernel_pmu_profiler_handle rejected_handle;
+    struct vd_kernel_pmu_profiler_handle zero_handle;
+    const int32_t first_pid = 331;
+    const int32_t first_thread = 337;
+    const int32_t next_pid = 347;
+    const int32_t next_thread = 349;
+
+    fake_init(&fake, VD_KERNEL_PMU_PROFILER_FIXED_CORE);
+    const struct fake_pmu_state before = fake.state;
+    fake.increment_real_event_on_enable = 1;
+    fake_owner_init(&owner);
+    owner.derive_identity_from_thread = 1;
+    owner_backend = fake_owner_backend(&owner);
+    start_backend(&fake);
+    memset(&transport, 0, sizeof(transport));
+    memset(&zero_handle, 0, sizeof(zero_handle));
+    CHECK(vdPmuProfilerTransportInit(&transport) == 0 &&
+              vdPmuProfilerTransportSetOwnerBackend(
+                  &transport, &owner_backend) == 0 &&
+              vdPmuProfilerTransportOpen(
+                  &transport, first_pid, first_thread,
+                  &request, &first_handle) == 0,
+          "terminal-release fixture acquires its retained owner");
+
+    owner.current.thread_entry += UINT32_C(4);
+    owner.current.initial_affinity ^= 1;
+    owner.terminal = 1;
+    owner.release_result = -77;
+    memset(&rejected_handle, 0xa5, sizeof(rejected_handle));
+    CHECK(vdPmuProfilerTransportOpen(
+              &transport, next_pid, next_thread,
+              &request, &rejected_handle) ==
+                  VD_KERNEL_ERROR_PMU_PROFILER_RESTORE_REQUIRED &&
+              memcmp(&rejected_handle, &zero_handle,
+                     sizeof(rejected_handle)) == 0 &&
+              owner.terminal_query_calls == 1 &&
+              owner.query_calls == 1 && owner.capture_calls == 1 &&
+              owner.release_calls == 1 &&
+              transport.state ==
+                  VD_PMU_PROFILER_TRANSPORT_RESTORED_AWAITING_OWNER &&
+              transport.exact_restore_proven == 1 &&
+              transport.owner_identity_release_uncertain == 1 &&
+              transport.real_event_attempted == 1 &&
+              transport.rearm_count == 0 &&
+              memcmp(&fake.state, &before, sizeof(before)) == 0,
+          "a failed retained-object release during Open recovery returns RESTORE_REQUIRED and quarantines re-arm");
+
+    owner.release_result = 0;
+    const uint32_t query_calls = owner.query_calls;
+    const uint32_t capture_calls = owner.capture_calls;
+    const uint32_t release_calls = owner.release_calls;
+    memset(&rejected_handle, 0xa5, sizeof(rejected_handle));
+    CHECK(vdPmuProfilerTransportOpen(
+              &transport, next_pid, next_thread,
+              &request, &rejected_handle) ==
+                  VD_KERNEL_ERROR_PMU_PROFILER_RESTORE_REQUIRED &&
+              memcmp(&rejected_handle, &zero_handle,
+                     sizeof(rejected_handle)) == 0 &&
+              owner.query_calls == query_calls &&
+              owner.capture_calls == capture_calls &&
+              owner.release_calls == release_calls &&
+              transport.owner_identity_release_uncertain == 1 &&
+              transport.state ==
+                  VD_PMU_PROFILER_TRANSPORT_RESTORED_AWAITING_OWNER &&
+              vdPmuProfilerTransportShutdown(&transport) ==
+                  VD_KERNEL_ERROR_PMU_PROFILER_RESTORE_REQUIRED,
+          "a quarantined release failure is never retried or bypassed by another Open");
+    vdPmuBackendHostTestReset();
+}
+
+static void test_transport_uid_reuse_quarantines(void)
+{
+    struct fake_pmu fake;
+    struct fake_owner owner;
+    struct vd_pmu_profiler_transport transport;
+    struct vd_pmu_profiler_owner_backend owner_backend;
+    struct vd_kernel_pmu_profiler_open_request request =
+        transport_request(VD_KERNEL_PMU_PROFILER_EVENT_ICACHE_MISS);
+    struct vd_kernel_pmu_profiler_handle handle;
+    const int32_t owner_pid = 211;
+    const int32_t owner_thread = 223;
+
+    fake_init(&fake, VD_KERNEL_PMU_PROFILER_FIXED_CORE);
+    const struct fake_pmu_state before = fake.state;
+    fake.increment_real_event_on_enable = 1;
+    fake_owner_init(&owner);
+    owner_backend = fake_owner_backend(&owner);
+    start_backend(&fake);
+    memset(&transport, 0, sizeof(transport));
+    CHECK(vdPmuProfilerTransportInit(&transport) == 0 &&
+              vdPmuProfilerTransportSetOwnerBackend(
+                  &transport, &owner_backend) == 0 &&
+              vdPmuProfilerTransportOpen(
+                  &transport, owner_pid, owner_thread,
+                  &request, &handle) == 0,
+          "UID-reuse fixture acquires one retained owner");
+    const uint32_t release_calls = owner.release_calls;
+    owner.current.retained_thread_object += UINT32_C(0x10000);
+    CHECK(vdPmuProfilerTransportWatchdog(&transport) ==
+              VD_KERNEL_ERROR_PMU_PROFILER_RESTORE_REQUIRED &&
+              transport.owner_identity_release_uncertain == 1 &&
+              transport.state ==
+                  VD_PMU_PROFILER_TRANSPORT_RESTORED_AWAITING_OWNER &&
+              transport.exact_restore_proven == 1 &&
+              transport.real_event_attempted == 1 &&
+              owner.release_calls == release_calls &&
+              memcmp(&fake.state, &before, sizeof(before)) == 0,
+          "UID/object mismatch restores PMU state but permanently quarantines re-arm");
+    const uint32_t query_calls = owner.query_calls;
+    CHECK(vdPmuProfilerTransportWatchdog(&transport) ==
+              VD_KERNEL_ERROR_PMU_PROFILER_RESTORE_REQUIRED &&
+              vdPmuProfilerTransportShutdown(&transport) ==
+              VD_KERNEL_ERROR_PMU_PROFILER_RESTORE_REQUIRED &&
+              owner.query_calls == query_calls &&
+              owner.release_calls == release_calls,
+          "UID-reuse quarantine never re-queries or releases by recycled numeric UID");
+    vdPmuBackendHostTestReset();
+}
+
+static void test_transport_close_revalidates_retained_object(void)
+{
+    struct fake_pmu fake;
+    struct fake_owner owner;
+    struct vd_pmu_profiler_transport transport;
+    struct vd_pmu_profiler_owner_backend owner_backend;
+    struct vd_kernel_pmu_profiler_open_request request =
+        transport_request(VD_KERNEL_PMU_PROFILER_EVENT_ICACHE_MISS);
+    struct vd_kernel_pmu_profiler_handle handle;
+    const int32_t owner_pid = 227;
+    const int32_t owner_thread = 229;
+
+    fake_init(&fake, VD_KERNEL_PMU_PROFILER_FIXED_CORE);
+    const struct fake_pmu_state before = fake.state;
+    fake.increment_real_event_on_enable = 1;
+    fake_owner_init(&owner);
+    owner_backend = fake_owner_backend(&owner);
+    start_backend(&fake);
+    memset(&transport, 0, sizeof(transport));
+    CHECK(vdPmuProfilerTransportInit(&transport) == 0 &&
+              vdPmuProfilerTransportSetOwnerBackend(
+                  &transport, &owner_backend) == 0 &&
+              vdPmuProfilerTransportOpen(
+                  &transport, owner_pid, owner_thread,
+                  &request, &handle) == 0,
+          "close-time UID-reuse fixture acquires one retained owner");
+
+    owner.current.retained_thread_object += UINT32_C(0x20000);
+    CHECK(vdPmuProfilerTransportClose(
+              &transport, owner_pid, owner_thread, &handle) ==
+              VD_KERNEL_ERROR_PMU_PROFILER_RESTORE_REQUIRED &&
+              transport.owner_identity_release_uncertain == 1 &&
+              transport.state ==
+                  VD_PMU_PROFILER_TRANSPORT_RESTORED_AWAITING_OWNER &&
+              transport.exact_restore_proven == 1 &&
+              transport.real_event_attempted == 1 &&
+              owner.release_calls == 1 &&
+              memcmp(&fake.state, &before, sizeof(before)) == 0,
+          "explicit Close restores PMU state but refuses to release a replacement UID object");
+    const uint32_t query_calls = owner.query_calls;
+    CHECK(vdPmuProfilerTransportWatchdog(&transport) ==
+              VD_KERNEL_ERROR_PMU_PROFILER_RESTORE_REQUIRED &&
+              vdPmuProfilerTransportShutdown(&transport) ==
+              VD_KERNEL_ERROR_PMU_PROFILER_RESTORE_REQUIRED &&
+              owner.query_calls == query_calls &&
+              owner.release_calls == 1,
+          "close-time UID collision remains permanently quarantined without retry");
+
+    vdPmuBackendHostTestReset();
+    fake_init(&fake, VD_KERNEL_PMU_PROFILER_FIXED_CORE);
+    fake.increment_real_event_on_enable = 1;
+    fake_owner_init(&owner);
+    owner_backend = fake_owner_backend(&owner);
+    start_backend(&fake);
+    memset(&transport, 0, sizeof(transport));
+    CHECK(vdPmuProfilerTransportInit(&transport) == 0 &&
+              vdPmuProfilerTransportSetOwnerBackend(
+                  &transport, &owner_backend) == 0 &&
+              vdPmuProfilerTransportOpen(
+                  &transport, owner_pid, owner_thread,
+                  &request, &handle) == 0,
+          "shutdown-time UID-reuse fixture acquires one retained owner");
+    vdPmuBackendHostTestAdvanceTimeUs(
+        ((uint64_t)VD_KERNEL_PMU_PROFILER_MIN_LEASE_MS + 1u) * 1000u);
+    CHECK(vdPmuProfilerTransportWatchdog(&transport) == 1 &&
+              transport.state ==
+                  VD_PMU_PROFILER_TRANSPORT_RESTORED_AWAITING_OWNER &&
+              memcmp(&fake.state, &before, sizeof(before)) == 0,
+          "shutdown-time fixture reaches independently restored owner quarantine");
+    owner.current.retained_thread_object += UINT32_C(0x30000);
+    const uint32_t shutdown_query_calls = owner.query_calls;
+    CHECK(vdPmuProfilerTransportShutdown(&transport) ==
+              VD_KERNEL_ERROR_PMU_PROFILER_RESTORE_REQUIRED &&
+              transport.owner_identity_release_uncertain == 1 &&
+              owner.query_calls == shutdown_query_calls + 1 &&
+              owner.release_calls == 0,
+          "shutdown observes UID collision once and refuses unload without blind release");
+    vdPmuBackendHostTestReset();
+}
+#endif
 
 int main(void)
 {
@@ -1277,6 +1992,14 @@ int main(void)
     test_transport_watchdog_reaps_idle_snapshot_timeout();
     test_transport_watchdog_keeps_negative_late_snapshot_disabled();
     test_transport_real_event_gate();
+#if VD_PMU_PROFILER_SAFE_REARM_COMPILED
+    test_fake_owner_terminal_precedes_metadata_compare();
+    test_transport_safe_rearm_lifecycle();
+    test_transport_open_services_terminal_owner();
+    test_transport_open_quarantines_terminal_release_failure();
+    test_transport_uid_reuse_quarantines();
+    test_transport_close_revalidates_retained_object();
+#endif
     vdPmuBackendHostTestReset();
 
     if(failures != 0)

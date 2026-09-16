@@ -123,12 +123,18 @@ concurrent owners, another firmware, Vita TV, or production use.
 After all three normal-close gates pass, separate disposable tests are still
 required for lease-expiry/watchdog restoration, process exit, client
 disconnect, competing ownership, and safe repeated leases/re-arm. Bounded
-multi-read `0x01` sampling has separately passed in Render96EX. The remaining tests must keep
-the same fixed core/lane, durable journal, one-attempt-per-reboot rule, and
-fail-closed recovery procedure.
+multi-read `0x01` sampling has separately passed in a real-world VitaGL-based
+3D application. The remaining tests must keep the same fixed core/lane,
+durable journal, one-attempt-per-reboot rule, and fail-closed recovery
+procedure.
 
-The boot-scoped latch is not a production session-rearm design. A later re-arm
-may be considered only when no lease is active, exact restoration has been
-independently verified, the owner token/generation still match, and the owner
-has either explicitly closed or its process/thread is proven gone. None of
-those conditions currently clears the latch without a reboot.
+The hardware-tested build deliberately retains its boot-scoped latch. A
+separate default-off safe-rearm candidate now implements the stricter design:
+no active lease, independently verified exact restoration, matching owner and
+generation, plus either matching explicit close or positive retained-owner
+exit proof. It permanently quarantines unknown liveness, UID/object mismatch,
+or uncertain reference release. Its narrower dormant-owner-thread gate now
+passes on retail 3.65; process-exit/crash and the remaining lifecycle paths are
+still pending. See the
+[thread-exit result](../pmu-profiler-thread-exit-gate/hardware-results/2026-09-15-first-attempt/README.md)
+and [two-launch lifecycle gate](../pmu-profiler-lifecycle-gate/README.md).

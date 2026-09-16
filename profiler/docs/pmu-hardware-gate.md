@@ -113,11 +113,16 @@ gate is intentionally bounded as follows:
    regression, journal ambiguity, or restore mismatch is a hard stop. Retain
    the resident recovery path and do not clear or unload an unresolved record.
 
-The present real-event latch is intentionally boot-scoped. A future production
-re-arm must not merely clear that latch after a successful return code. It must
-require no active lease, independently verified exact restoration, a matching
-owner token and generation, and either an explicit close from that owner or
-proof that its process/thread no longer exists. That re-arm is not implemented.
+The hardware-tested candidate keeps its real-event latch boot-scoped. A
+separate, default-off safe-rearm candidate is now implemented and host-tested.
+It clears the latch only with no active lease, independently verified exact
+restoration, a matching owner token and generation, and either a matching
+explicit close or positive proof that the retained owner thread object is
+dormant/gone. Unknown liveness, UID/object mismatch, or any reference-release
+uncertainty restores the PMU state and permanently quarantines re-arm and
+unload. This candidate is not promoted until the disposable
+[two-launch lifecycle gate](../../kernel/pmu-profiler-lifecycle-gate/README.md)
+passes on hardware.
 
 The three owner-attended retail-3.65 runs passed events `0x01`, `0x03`, and
 `0x10`: all transport calls succeeded, sample values were 56, 23, and 97 on
@@ -126,16 +131,18 @@ The reviewed artifacts, journal slots, and screenshots are in the
 [event-0x01](../../kernel/pmu-profiler-gate/hardware-results/2026-09-15-event-01/README.md),
 [event-0x03](../../kernel/pmu-profiler-gate/hardware-results/2026-09-15-event-03/README.md),
 and [event-0x10](../../kernel/pmu-profiler-gate/hardware-results/2026-09-15-event-10/README.md)
-records. These are bounded samples, not approval for continuous sampling;
-disconnect and process-exit cleanup still require their own gates. This plan
+records. These are bounded samples, not approval for continuous sampling. The
+narrower dormant-owner-thread safe-rearm gate now passes; disconnect and
+whole-process exit/crash cleanup still require their hardware gates. This plan
 does not use or claim support for the unavailable public `ScePerf` route.
 
 ## Remaining promotion gates for live counters
 
 The transport remains separate from the read-only discovery call. Event `0x01`
-now has both one durable immediate-close sample and a 75-read Render96EX lease.
-Before unrestricted production PMU sampling, the complete stack must still
-prove all of the following on hardware:
+now has both one durable immediate-close sample and a 75-read lease from a
+real-world VitaGL-based 3D application.
+Before unrestricted production PMU sampling, the new lifecycle candidate must
+still prove the following on hardware:
 
 1. retain the already-proved exact snapshot/restore scope for every field the
    selected lane changes;
@@ -148,8 +155,17 @@ prove all of the following on hardware:
 6. retain restoration obligations until cleanup succeeds; and
 7. refuse coexistence when ownership cannot be established safely.
 
-The Render96EX gate proves that bounded samples can enter the existing named
-event ring and VitaProfiler TCP transport. Sony's unavailable
+The host/fake-kernel matrix now covers all seven conditions, including timeout,
+read/config/restore errors, late completion, receiver-send failure mapped to
+authenticated close, process/thread exit, ownership conflict, UID/object
+mismatch, and one-shot quarantine after uncertain reference release. The
+original `VDCP00011` multi-stage lifecycle attempt exposed a process-exit
+safety problem and was stopped. Its replacement `VDCP00012` thread-only gate
+passed dormant-owner recovery and same-boot re-arm with a fresh identity and
+exact-restoring close. Whole-process exit/crash remains disabled and unproved.
+
+The real-world application gate proves that bounded samples can enter the
+existing named event ring and VitaProfiler TCP transport. Sony's unavailable
 `usbhostfs`/trace-host pipeline is not required and is not a project target.
 
 ## Firmware scope

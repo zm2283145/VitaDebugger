@@ -4,6 +4,8 @@
 *.velf
 *.vpk
 *.psp2dmp
+*.skprx
+*.part
 eboot.bin
 param.sfo
 /build*/
@@ -30,3 +32,8 @@ uvdb-symbols.gdb.state.json
 /kernel/dipsw-read-probe/test-record
 /kernel/dipsw-set-restore-probe/test-record
 /kernel/dipsw-dbgvcr-probe/test-record
+/kernel/hardware-backups/
+/kernel/pmu-profiler-gate/hardware-results/*/*/
+/kernel/pmu-profiler-lifecycle-gate/hardware-results/*/recovery/
+/deploy/hardware-temp/
+/deploy/hardware-results/

@@ -41,13 +41,16 @@ foreign thread, a legacy FPA register, D0-D31, or FPSCR receives an error. The
 stub never reports `OK` for a discarded floating-point tail.
 
 Foreign core and VFP mutation need a kernel contract rather than a parser
-change. A separately versioned transaction scaffold now implements the bounded
+change. A separately versioned transaction scaffold implements the bounded
 snapshot, one-bank stage, exact read-back, commit-or-restore, retained-target
-lifetime, and lease-cleanup rules under native tests. The Vita backend still
-advertises zero writable banks: it cannot be promoted until a supported setter
-and durable exact process/thread-object provider pass the corresponding hardware
-failure gates. The transaction also requires a fully stopped process with no
-additional exempt thread.
+lifetime, and lease-cleanup rules. A host-only provider now adds an
+authenticated setter-binding gate, exact opaque process/thread references,
+UID-reuse resistance, and quarantined release retry. It deliberately has no
+firmware adapter. The Vita backend still advertises zero writable banks: no
+setter or durable object-lifetime contract has passed the retail 3.65 hardware
+gates described in [the provider note](foreign-thread-mutation-provider.md).
+The transaction also requires a fully stopped process with no additional
+exempt thread.
 
 ## Validation status
 
