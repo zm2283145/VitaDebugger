@@ -217,3 +217,17 @@ Before any live injection work, a separate review must supply and validate:
    exit/relaunch, partial start, disconnect, lease expiry, and failed unload.
 
 Until those gates pass, this API must be treated as a host-tested model only.
+
+## Exact-title identity composition
+
+`VdAttachIdentityProvider` supplies the shared `discover_exact` callback shape
+used by the read-only broker, authenticated control core, and fixed loader. It
+accepts only copied-in title IDs, performs title-to-PID and PID-to-title checks,
+asks a trusted callback for kernel-owned main-module and launch-generation
+identity, then repeats the complete observation. A PID, title, module,
+fingerprint, or generation change fails with `CHANGED` and no identity escapes.
+
+This is not the trusted Vita implementation. The remaining kernel export must
+derive a generation that changes on every target lifetime and populate the
+snapshot without accepting PID, module, fingerprint, or generation fields from
+the host protocol.

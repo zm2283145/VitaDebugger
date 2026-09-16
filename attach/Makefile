@@ -15,14 +15,16 @@ BROKER_SOURCES := broker/src/vitadebug_attach_broker.c broker/src/vitadebug_atta
 CONTROL_SOURCES := broker/src/vitadebug_attach_control.c broker/src/vitadebug_attach_control_wire.c
 LISTENER_SOURCES := $(CONTROL_SOURCES) broker/src/vitadebug_attach_listener.c
 LOADER_SOURCES := $(CONTROL_SOURCES) broker/src/vitadebug_attach_loader.c
+IDENTITY_SOURCES := broker/src/vitadebug_attach_identity.c
 BROKER_TEST := test-attach-broker$(HOST_EXEEXT)
 CONTROL_TEST := test-attach-control$(HOST_EXEEXT)
 LISTENER_TEST := test-attach-listener$(HOST_EXEEXT)
 LOADER_TEST := test-attach-loader$(HOST_EXEEXT)
+IDENTITY_TEST := test-attach-identity$(HOST_EXEEXT)
 
-.PHONY: host-test python-test broker-test control-test listener-test loader-test vita-lib clean
+.PHONY: host-test python-test broker-test control-test listener-test loader-test identity-test vita-lib clean
 
-host-test: broker-test control-test listener-test loader-test python-test
+host-test: broker-test control-test listener-test loader-test identity-test python-test
 
 python-test:
 	$(PYTHON) -m unittest discover -s tests -v
@@ -38,6 +40,9 @@ listener-test: $(LISTENER_TEST)
 
 loader-test: $(LOADER_TEST)
 	./$(LOADER_TEST)
+
+identity-test: $(IDENTITY_TEST)
+	./$(IDENTITY_TEST)
 
 $(BROKER_TEST): $(BROKER_SOURCES) broker/tests/test_broker.c \
 		broker/include/vitadebug_attach_broker.h \
@@ -69,10 +74,16 @@ $(LOADER_TEST): $(LOADER_SOURCES) broker/tests/test_loader.c \
 		include/vitadebug_attach_protocol.h
 	$(HOST_CC_RUN) $(HOST_CFLAGS) $(BROKER_INCLUDES) $(LOADER_SOURCES) broker/tests/test_loader.c -o $@
 
+$(IDENTITY_TEST): $(IDENTITY_SOURCES) broker/tests/test_identity.c \
+		broker/include/vitadebug_attach_identity.h \
+		broker/include/vitadebug_attach_broker.h
+	$(HOST_CC_RUN) $(HOST_CFLAGS) $(BROKER_INCLUDES) $(IDENTITY_SOURCES) broker/tests/test_identity.c -o $@
+
 # This proves the allocation-free read-only broker, authenticated-control and
-# framing models, fixed-loader journal adapter, and fail-closed Vita inventory
-# adapter compile for ARM. It intentionally does not build or install a
-# resident module, socket listener, crypto backend, or Vita lifecycle backend.
+# framing models, fixed-loader journal adapter, exact-title identity adapter,
+# and fail-closed Vita inventory adapter compile for ARM. It intentionally does
+# not build or install a resident module, socket listener, crypto backend,
+# trusted kernel snapshot export, or Vita lifecycle backend.
 vita-lib: libvitadebug_attach_broker.a
 
 broker-vita-core.o: broker/src/vitadebug_attach_broker.c broker/include/vitadebug_attach_broker.h include/vitadebug_attach_protocol.h
@@ -93,8 +104,11 @@ broker-vita-listener.o: broker/src/vitadebug_attach_listener.c broker/include/vi
 broker-vita-loader.o: broker/src/vitadebug_attach_loader.c broker/include/vitadebug_attach_loader.h broker/include/vitadebug_attach_control_wire.h broker/include/vitadebug_attach_control.h broker/include/vitadebug_attach_broker.h include/vitadebug_attach_protocol.h
 	arm-vita-eabi-gcc -std=c11 -O2 -Wall -Wextra -Werror $(BROKER_INCLUDES) -c $< -o $@
 
-libvitadebug_attach_broker.a: broker-vita-core.o broker-vita-adapter.o broker-vita-control.o broker-vita-control-wire.o broker-vita-listener.o broker-vita-loader.o
+broker-vita-identity.o: broker/src/vitadebug_attach_identity.c broker/include/vitadebug_attach_identity.h broker/include/vitadebug_attach_broker.h
+	arm-vita-eabi-gcc -std=c11 -O2 -Wall -Wextra -Werror $(BROKER_INCLUDES) -c $< -o $@
+
+libvitadebug_attach_broker.a: broker-vita-core.o broker-vita-adapter.o broker-vita-control.o broker-vita-control-wire.o broker-vita-listener.o broker-vita-loader.o broker-vita-identity.o
 	arm-vita-eabi-ar rcs $@ $^
 
 clean:
-	rm -f test-attach-broker test-attach-broker.exe test-attach-control test-attach-control.exe test-attach-listener test-attach-listener.exe test-attach-loader test-attach-loader.exe broker-vita-core.o broker-vita-adapter.o broker-vita-control.o broker-vita-control-wire.o broker-vita-listener.o broker-vita-loader.o listener-check.o loader-check.o control-check.o libvitadebug_attach_broker.a
+	rm -f test-attach-broker test-attach-broker.exe test-attach-control test-attach-control.exe test-attach-listener test-attach-listener.exe test-attach-loader test-attach-loader.exe test-attach-identity test-attach-identity.exe broker-vita-core.o broker-vita-adapter.o broker-vita-control.o broker-vita-control-wire.o broker-vita-listener.o broker-vita-loader.o broker-vita-identity.o listener-check.o loader-check.o control-check.o libvitadebug_attach_broker.a

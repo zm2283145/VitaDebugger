@@ -14,6 +14,11 @@ strict binary framing/dispatch boundary, and `vitadebug_attach_loader.c` adds a
 fixed-catalog in-memory journal adapter. Protocol v1 has not gained a mutation
 record.
 
+`vitadebug_attach_identity.c` is the narrow bridge between shell-visible exact
+title lookup and a future trusted kernel snapshot export. It owns the copied
+title allowlist, reverse-checks each PID, and requires two identical trusted
+snapshots before returning an identity. It still has no Vita kernel backend.
+
 The core implements only:
 
 - `HELLO` and read-only capability/ABI reporting;
@@ -137,6 +142,10 @@ rejection without draining. The loader test covers copied-in title/module
 catalogs, independent signature and identity verification, privileged nonce
 and lease allocation, failed-start rollback, reverse stop/unload ordering,
 single-claim signed cleanup, and lease-expiry gating.
+
+The identity test covers copied-in allowlists, stable double observation,
+deadline and lookup failures, reverse-title mismatch, PID reuse, and
+launch-generation churn.
 
 `make vita-lib` is a compile gate only. It creates a static ARM library; it
 does not install, enable, or run anything on a Vita.

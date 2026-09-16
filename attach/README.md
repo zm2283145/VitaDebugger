@@ -81,6 +81,13 @@ signed-nonce and connection request-ID replay. A separate fixed-loader adapter
 copies a trusted startup title/module catalog and models the privileged replay
 and lease journal around load, rollback, stop, and unload callbacks.
 
+An exact-title identity adapter now composes a user-side title lookup and
+reverse lookup with a trusted snapshot callback. It copies in a fixed title
+allowlist and requires two identical PID/title/kernel-identity observations,
+rejecting PID reuse or launch-generation changes between them. The trusted
+snapshot callback is still unimplemented on Vita; it must obtain main-module
+identity and a launch-unique generation from kernel-owned state.
+
 Both additions remain host-testable boundaries. They contain no socket
 bind/accept code, production crypto/key store, production path or digest,
 Vita module-manager call, shell lifecycle wrapper, or deployment target.
@@ -126,7 +133,8 @@ prints the ticket, accepts a raw PID, or sends a module path.
 - `include/vitadebug_attach_protocol.h` contains constants for a future C
   broker without defining a mutating ABI.
 - `broker/` contains the read-only C broker, authenticated control/dispatcher,
-  fixed-loader journal adapter, fail-closed Vita adapter, and native tests.
+  fixed-loader journal and exact-title identity adapters, fail-closed Vita
+  adapter, and native tests.
 - `host/vdattach/` contains the strict codec and bounded stateful client.
 - `host/vdattach/control_signing.py` mirrors the canonical peer and operation
   signing transcripts for cross-language golden-vector verification.
@@ -150,7 +158,8 @@ prints the ticket, accepts a raw PID, or sends a module path.
 | Allocation-free Vita broker state machine | Implemented and host-tested; current control contract passes its ARM rebuild |
 | Authenticated listener-facing control state | Bounded binary dispatcher and replay rejection host-tested; no socket/crypto adapter |
 | Resident Vita listener/lifecycle wrapper | Not implemented or installed |
-| Trusted Vita foreign-target identity adapter | Fail-closed stub; provider required |
+| Exact-title/trusted-snapshot identity adapter | Implemented and host-tested with double-observation race rejection |
+| Trusted Vita foreign-target snapshot backend | Fail-closed stub; kernel provider required |
 | Read-only kernel target-identity/ticket export | Not implemented |
 | Broker authentication/pairing crypto | Callback boundary only; implementation required before shipping |
 | Fixed debugger-module loader request model | Host-tested fixed catalog and replay/lease journal adapter; no production mapping or Vita backend |
