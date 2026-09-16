@@ -28,11 +28,14 @@ cannot issue a ticket.
 
 ## Host-tested control-plane boundary
 
-`broker/src/vitadebug_attach_control.c` now models the authenticated and leased
-state needed by a future version without adding any command to protocol v1. It
-cannot listen on TCP or call a Vita module-manager API. All authentication,
-trusted target resolution, and fixed-module lifecycle callbacks are mandatory;
-initialization fails if any is absent.
+`broker/src/vitadebug_attach_control.c` models the authenticated and leased
+state needed by a future version without adding any command to protocol v1.
+The adjacent listener dispatcher adds strict fixed-size binary records and an
+injected framed-transport loop; it cannot bind or accept a TCP socket. The
+fixed-loader adapter adds a trusted startup catalog plus an in-memory
+privileged replay/lease journal; it cannot call a Vita module-manager API. All
+authentication, trusted target resolution, and fixed-module lifecycle
+callbacks are mandatory; initialization fails if any is absent.
 
 The model enforces these properties before a future hardware backend exists:
 
@@ -61,8 +64,9 @@ start, retarget, or synthesize a lease. Repeated shutdown calls retry retained
 recovery cleanup while continuing to reject new sessions.
 
 Operation replay history is scoped to the unique service-generation/session/
-challenge transcript. A connection is closed and reopened after 64 accepted
-operations after an explicit `ROLLOVER_REQUIRED` result. The replacement
+challenge transcript. The control API reports `ROLLOVER_REQUIRED` after 64
+accepted operations; the binary dispatcher treats replay or either replay-table
+exhaustion as connection-fatal and emits no further response. The replacement
 connection must authenticate again, and only a newly signed replacement-session
 transcript is accepted; an old-session proof remains invalid. A read-only
 privileged probe may terminally clear recovery
@@ -73,10 +77,12 @@ Recovery authorization may come from the same still-authenticated owner
 session, or after disconnect from a newly authenticated session for that same
 paired-host key. It always requires a fresh signed `RECOVER` transcript.
 
-The cryptographic verifier, persistent kernel replay journal, Vita-side title
-and module allowlists, fixed path/digest mapping, listener, and loader backend
-are intentionally absent. Host fakes prove state-machine behavior, not Vita
-authority or loader safety.
+The request parser, copied-in allowlist contract, and bounded journal behavior
+are host-tested. The production cryptographic verifier/key store,
+crash-persistent kernel replay/lease journal, reviewed Vita-side catalog
+values, socket listener, trusted identity provider, and Vita loader platform
+callbacks remain intentionally absent. Host fakes prove state-machine
+behavior, not Vita authority or loader safety.
 
 ## Mandatory rules for a future mutating version
 

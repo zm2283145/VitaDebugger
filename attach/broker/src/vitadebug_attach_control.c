@@ -15,6 +15,12 @@ static uint64_t vd_control_min_u64(uint64_t left, uint64_t right) {
     return left < right ? left : right;
 }
 
+static void *vd_control_loader_context(VdAttachControl *control) {
+    return control->config.loader_context != NULL
+               ? control->config.loader_context
+               : control->config.callback_context;
+}
+
 static uint64_t vd_control_bounded_deadline(VdAttachControl *control,
                                             uint64_t now_ms,
                                             uint64_t first_limit,
@@ -287,7 +293,7 @@ static int vd_control_reconcile_gone(VdAttachControl *control,
     }
     vd_control_make_action(control, &action, capability,
                            signed_authorization);
-    presence = control->config.probe_fixed(control->config.callback_context,
+    presence = control->config.probe_fixed(vd_control_loader_context(control),
                                             &action, deadline_ms);
     if (presence == VD_ATTACH_CONTROL_MODULE_GONE) {
         control->lease.module_started = 0;
@@ -352,7 +358,7 @@ static int vd_control_cleanup(
 
     if (control->lease.module_started) {
         action_result = control->config.stop_fixed(
-            control->config.callback_context, &action, deadline_ms);
+            vd_control_loader_context(control), &action, deadline_ms);
         if (action_result == 0) {
             control->lease.module_started = 0;
         }
@@ -381,7 +387,7 @@ static int vd_control_cleanup(
         return VD_ATTACH_CONTROL_RECOVERY_REQUIRED;
     }
     action_result = control->config.unload_fixed(
-        control->config.callback_context, &action, deadline_ms);
+        vd_control_loader_context(control), &action, deadline_ms);
     if (action_result == 0) {
         control->lease.module_loaded = 0;
     }
@@ -880,7 +886,7 @@ int vd_attach_control_begin_attach(
     }
 
     load_result = control->config.load_fixed(
-        control->config.callback_context, &load_request, &grant,
+        vd_control_loader_context(control), &load_request, &grant,
         deadline_ms);
     if (load_result != 0 && !vd_control_grant_present(&grant)) {
         memset(&authorization, 0, sizeof(authorization));
@@ -958,7 +964,7 @@ int vd_attach_control_begin_attach(
                            &authorization);
     /* A failed start may have run partially, so rollback includes stop. */
     control->lease.module_started = 1;
-    if (control->config.start_fixed(control->config.callback_context,
+    if (control->config.start_fixed(vd_control_loader_context(control),
                                     &action, deadline_ms) != 0) {
         control->lease.state = VD_ATTACH_CONTROL_LEASE_RECOVERY;
         result = vd_control_rollback_with_result(

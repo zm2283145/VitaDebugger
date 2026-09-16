@@ -2,8 +2,11 @@
 
 This document describes `VdAttachControl`, an allocation-free C state machine
 for the next external-attach milestone. It is a control-boundary model, not a
-wire protocol or a Vita injector. Version-1 discovery remains permanently
-read-only.
+Vita injector. The adjacent host-tested dispatcher now gives the model a
+strict version-2 binary framing contract, documented in
+[control-protocol-v2.md](control-protocol-v2.md). It still supplies no socket
+listener or Vita lifecycle implementation. Version-1 discovery remains
+permanently read-only.
 
 ## What is implemented
 
@@ -88,8 +91,17 @@ connection. At exhaustion the core returns
 the session (which attempts cleanup of any owned lease), reconnect, and
 authenticate again. A new monotonic session ID and random server nonce change
 the signed transcript. An old-session proof is rejected after rollover; only a
-new signature over the replacement session transcript can succeed. The future
-privileged backend still needs its own persistent replay journal.
+new signature over the replacement session transcript can succeed. The binary
+dispatcher turns replay and rollover into connection-fatal conditions without
+a response. The future privileged backend still needs its own persistent
+replay journal.
+
+At the dispatcher boundary, the 16-byte request ID is the first half of the
+signed client nonce (authentication) or operation nonce (all lifecycle
+requests). A separate 64-entry per-connection table rejects an exact framed
+replay before the control core is re-entered. Malformed framing and replay are
+connection-fatal. This does not replace the full 32-byte operation replay table
+here or the privileged journal below.
 
 The host-facing operation proof has no PID, main module ID, module UID, address,
 entry point, or path. The host supplies an exact title and a nonzero launch
@@ -128,8 +140,20 @@ must apply these rules:
   start, retarget, or synthesize a lease. `LEASE_EXPIRED` additionally requires
   the privileged clock to have reached the journaled expiry.
 
-No such adapter is present. The archive contains no canonical path and makes no
-module-manager call. The host test uses recording callbacks only.
+`VdAttachFixedLoader` is now present as a host-testable adapter for this
+contract. Trusted startup configuration supplies and is copied into the
+adapter: at most eight exact title IDs and one fixed slot/path/SHA-256
+descriptor. The adapter binds once to the control generation, re-verifies the
+operation authorization, revalidates target identity, rejects full-nonce and
+lease-ID reuse, and journals partial load/start/stop/unload progress. It uses a
+dedicated optional `loader_context` in `VdAttachControlConfig`, so the loader's
+private state need not be the shell control callback context.
+
+The included adapter remains intentionally non-production: its catalog values
+come only from test fixtures, its journal is in memory, and its platform calls
+are injected recorders. The archive contains no production canonical path or
+digest and makes no module-manager call. A Vita adapter must make the journal
+crash-persistent and make digest verification atomic with module use.
 
 ## Identity and lease lifecycle
 
@@ -179,13 +203,16 @@ future kernel journal) before deliberately replacing the state object.
 
 Before any live injection work, a separate review must supply and validate:
 
-1. a shell-resident TCP listener with bounded framing, cancellation, rate
-   limits, secure pairing/key storage, and the new authenticated wire format;
+1. a shell-resident TCP accept/lifecycle wrapper with cancellation, rate
+   limits, secure pairing/key storage, and reviewed response-channel policy
+   around the host-tested authenticated dispatcher;
 2. a trusted kernel identity provider with launch-generation semantics and a
    persistent replay journal;
-3. a compiled-in title allowlist and fixed debugger-module path plus digest;
-4. a privileged backend that independently verifies authorization and identity
-   before each per-PID lifecycle call; and
+3. reviewed compiled-in title catalog values and a fixed debugger-module path
+   plus digest;
+4. a crash-persistent privileged implementation of the host-tested backend
+   interface that independently verifies authorization and identity before
+   each per-PID lifecycle call; and
 5. failure-injection tests on a disposable purpose-built target across rapid
    exit/relaunch, partial start, disconnect, lease expiry, and failed unload.
 

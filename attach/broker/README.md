@@ -1,14 +1,17 @@
 # Vita attach broker cores
 
-This directory contains two allocation-free state machines. The compile-only
-target packages them into `libvitadebug_attach_broker.a`; the current control
-contract passes its serialized VitaSDK rebuild. That archive is **not** a
-resident Vita plugin, listener, VPK, crypto implementation, privileged loader,
-or external debugger injector.
+This directory contains allocation-free broker, authenticated-control,
+listener-dispatch, and fixed-loader-journal state machines. The compile-only
+target packages them into `libvitadebug_attach_broker.a`; the contracts pass a
+serialized VitaSDK rebuild. That archive is **not** a resident Vita plugin,
+socket listener, VPK, crypto implementation, production privileged loader, or
+external debugger injector.
 
 `vitadebug_attach_broker.c` remains the protocol-v1 read-only discovery core.
 `vitadebug_attach_control.c` is a host-tested lifecycle and authorization model
-for a future, separate mutating protocol. Protocol v1 has not gained a mutation
+for a future, separate mutating protocol. `vitadebug_attach_listener.c` adds a
+strict binary framing/dispatch boundary, and `vitadebug_attach_loader.c` adds a
+fixed-catalog in-memory journal adapter. Protocol v1 has not gained a mutation
 record.
 
 The core implements only:
@@ -28,7 +31,7 @@ path, module load, injection, or kernel call in this component.
 ## Authenticated control model
 
 The control core adds the state that a future shell-resident listener and
-privileged fixed-module backend need, without implementing either component:
+privileged fixed-module backend need:
 
 - a fresh service generation and monotonic per-generation session ID, plus a
   per-connection challenge that exposes its opaque transport binding and
@@ -53,15 +56,20 @@ privileged fixed-module backend need, without implementing either component:
   read-only privileged probe that may clear it only after proving the exact
   leased module resource is gone.
 
-No public request or backend callback contains a module path. The core fills
-`VD_ATTACH_CONTROL_FIXED_DEBUGGER_SLOT`; a future kernel adapter must map that
-slot to exactly one compiled-in, preinstalled, identity-checked debugger module
-and independently verify the forwarded host authorization and replay state.
+No public request contains a module path. The core fills
+`VD_ATTACH_CONTROL_FIXED_DEBUGGER_SLOT`. The host-only fixed-loader adapter maps
+that slot to one trusted startup descriptor, copies a bounded exact-title
+allowlist, verifies the forwarded authorization independently, rejects replay,
+and journals load/start/stop/unload state. No production path, digest, or Vita
+platform callback is supplied.
 
-The host test backend only records modeled load/start/stop/unload calls. No Vita
-adapter for those callbacks exists, so compiling this archive cannot inject a
-module. See [the control model](../docs/control-model.md) for the boundary and
-state transitions.
+The binary dispatcher sends a fixed challenge record, accepts only fixed-size
+authentication/attach/detach/recovery records, binds each 16-byte request ID to
+the signed nonce that contains it, and closes on framing replay. It uses an
+injected bounded transport but contains no network setup. No Vita adapter for
+the loader callbacks exists, so compiling this archive cannot inject a module.
+See [the control model](../docs/control-model.md) and
+[version-2 framing](../docs/control-protocol-v2.md).
 
 ## Integration boundary
 
@@ -121,6 +129,14 @@ stop/unload, disconnect cleanup, watchdog expiry, resumable unload failure,
 PID-reuse refusal and verified-gone reconciliation, privileged lease-grant and
 journal-capability enforcement, reinitialization refusal, and idempotent
 shutdown recovery retries.
+
+The listener test covers challenge/response encoding, signed request-ID
+binding, pre-dispatch replay rejection, malformed-record rejection, active
+lease cleanup on disconnect, partial transport I/O, and oversized-frame
+rejection without draining. The loader test covers copied-in title/module
+catalogs, independent signature and identity verification, privileged nonce
+and lease allocation, failed-start rollback, reverse stop/unload ordering,
+single-claim signed cleanup, and lease-expiry gating.
 
 `make vita-lib` is a compile gate only. It creates a static ARM library; it
 does not install, enable, or run anything on a Vita.

@@ -282,6 +282,8 @@ typedef struct VdAttachControlConfig {
     uint32_t min_lease_ms;
     uint32_t max_lease_ms;
     uint32_t callback_timeout_ms;
+    /* Optional dedicated context for the five fixed-loader callbacks. */
+    void *loader_context;
 } VdAttachControlConfig;
 
 typedef struct VdAttachControlSession {

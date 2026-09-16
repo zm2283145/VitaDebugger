@@ -75,10 +75,17 @@ The broker directory also contains a separate authenticated control-plane
 model for the next protocol version. It owns challenge/authentication state,
 operation replay protection, exact target-generation binding, one fixed
 debugger-module slot, privileged-allocated lease grants, independently
-authorized cleanup capabilities, and reverse-order leased rollback. It has no wire command,
-TCP listener, crypto implementation, Vita lifecycle adapter, or module path.
-Its lifecycle callbacks are exercised only by host fakes. Protocol v1 remains
-read-only. See [the control model](docs/control-model.md).
+authorized cleanup capabilities, and reverse-order leased rollback. A bounded
+binary dispatcher now frames those authenticated requests and rejects both
+signed-nonce and connection request-ID replay. A separate fixed-loader adapter
+copies a trusted startup title/module catalog and models the privileged replay
+and lease journal around load, rollback, stop, and unload callbacks.
+
+Both additions remain host-testable boundaries. They contain no socket
+bind/accept code, production crypto/key store, production path or digest,
+Vita module-manager call, shell lifecycle wrapper, or deployment target.
+Protocol v1 remains read-only. See [the control model](docs/control-model.md)
+and [authenticated framing contract](docs/control-protocol-v2.md).
 
 The ARM static-library target remains a compile-only gate. The current
 privileged-lease contract revision is host-tested and passes its serialized
@@ -118,8 +125,8 @@ prints the ticket, accepts a raw PID, or sends a module path.
 
 - `include/vitadebug_attach_protocol.h` contains constants for a future C
   broker without defining a mutating ABI.
-- `broker/` contains the read-only C broker core, fail-closed Vita adapter, and
-  native tests.
+- `broker/` contains the read-only C broker, authenticated control/dispatcher,
+  fixed-loader journal adapter, fail-closed Vita adapter, and native tests.
 - `host/vdattach/` contains the strict codec and bounded stateful client.
 - `host/vdattach/control_signing.py` mirrors the canonical peer and operation
   signing transcripts for cross-language golden-vector verification.
@@ -127,6 +134,8 @@ prints the ticket, accepts a raw PID, or sends a module path.
 - `tests/` covers canonical encoding, frame limits, capability/ABI gates,
   session binding, exact-title discovery, and ticket release.
 - `docs/protocol-v1.md` is the complete version-1 wire contract.
+- `docs/control-protocol-v2.md` defines the host-tested authenticated binary
+  framing and fixed-loader catalog/journal boundary.
 - `docs/api-audit.md` records the relevant current and VitaSDK APIs.
 - `SECURITY.md` defines promotion gates for any later loader implementation.
 
@@ -139,13 +148,13 @@ prints the ticket, accepts a raw PID, or sends a module path.
 | Capability/kernel-ABI handshake | Implemented and host-tested |
 | Ticket release and connection state machine | Implemented and host-tested |
 | Allocation-free Vita broker state machine | Implemented and host-tested; current control contract passes its ARM rebuild |
-| Authenticated listener-facing control state | Host-tested model; no TCP/crypto adapter |
+| Authenticated listener-facing control state | Bounded binary dispatcher and replay rejection host-tested; no socket/crypto adapter |
 | Resident Vita listener/lifecycle wrapper | Not implemented or installed |
 | Trusted Vita foreign-target identity adapter | Fail-closed stub; provider required |
 | Read-only kernel target-identity/ticket export | Not implemented |
 | Broker authentication/pairing crypto | Callback boundary only; implementation required before shipping |
-| Fixed debugger-module loader request model | Implemented and host-tested; privileged backend owns lease grant, no path input or Vita backend |
+| Fixed debugger-module loader request model | Host-tested fixed catalog and replay/lease journal adapter; no production mapping or Vita backend |
 | Foreign-process `.suprx` loader export | Not implemented or hardware-tested |
 | Injected debugger `.suprx` | Not implemented |
-| Loader rollback/unload lease model | Implemented and host-tested with signed host cleanup and release-only journal capabilities; hardware validation not started |
+| Loader rollback/unload lease model | Implemented and host-tested through the fixed adapter with partial-start rollback, signed cleanup, and release-only capabilities; hardware validation not started |
 | Live GDB attach to an unmodified application | Not available yet |
