@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 from pathlib import Path
-from typing import Callable, Iterable
+from typing import Callable, Generic, Iterable, TypeVar
 
 import vitaprofiler_trace as trace
 
@@ -15,6 +15,7 @@ SAMPLED_EVENT_TYPES = frozenset({
     trace.EVENT_THREAD_SAMPLE,
     trace.EVENT_PROCESS_SAMPLE,
 })
+Row = TypeVar("Row")
 
 
 @dataclasses.dataclass(frozen=True)
@@ -57,11 +58,22 @@ class ReceiveConfig:
 class LoadedCapture:
     capture: trace.TraceCapture
     source: str
-    peer: tuple[str, int] | None = None
+    peer: tuple[str, int] | None
+    view_model: "ProfilerViewModel"
 
-    @property
-    def view_model(self) -> "ProfilerViewModel":
-        return ProfilerViewModel(self.capture, self.source, self.peer)
+
+@dataclasses.dataclass(frozen=True)
+class FilteredRows(Generic[Row]):
+    rows: tuple[Row, ...]
+    truncated: bool
+
+
+@dataclasses.dataclass(frozen=True)
+class TableRows:
+    frames: FilteredRows[FrameRow]
+    zones: FilteredRows[trace.ZoneSpan]
+    counters: FilteredRows[CounterRow]
+    events: FilteredRows[trace.Event]
 
 
 class ProfilerViewModel:
@@ -135,8 +147,15 @@ class ProfilerViewModel:
             ("Source", self.source),
             ("Peer", peer),
             ("Wire version", str(self.capture.header.version)),
-            ("Clock", f"{self.capture.header.clock_hz:,} Hz"),
+            ("Timestamp frequency", f"{self.capture.header.clock_hz:,} Hz"),
+            ("Timestamp unit", "microseconds"),
             ("Stream start", f"{self.capture.header.stream_start_us:,} us"),
+            ("Raw timer source", "Unavailable (not encoded by VPRF v1)"),
+            ("Raw timer unit", "Unavailable (timestamps are normalized)"),
+            ("Session/process ID", "Unavailable (not encoded by VPRF v1)"),
+            ("Thread generations", "Unavailable (only thread IDs encoded)"),
+            ("Module ranges", "Unavailable (not encoded by VPRF v1)"),
+            ("ARM/Thumb state", "Unavailable (not encoded by VPRF v1)"),
             ("Capture bytes", f"{self.capture.raw_size:,}"),
             ("Capture span", f"{self.duration_us:,} us"),
             ("Events", f"{len(self.capture.events):,}"),
@@ -220,6 +239,51 @@ class ProfilerViewModel:
             ))
         )
 
+    def filter_tables(self, query: str, thread_id: int | None,
+                      limit: int) -> TableRows:
+        """Prepare bounded display rows without allocating full result sets."""
+        if limit < 1:
+            raise ValueError("limit must be positive")
+        return TableRows(
+            frames=_bounded_filter(
+                self.frames,
+                lambda frame: _thread_matches(frame.thread_id, thread_id) and
+                _text_matches(query, (
+                    frame.name, f"0x{frame.thread_id:08x}",
+                    str(frame.sequence), str(frame.event_index),
+                )),
+                limit),
+            zones=_bounded_filter(
+                self.zones,
+                lambda span: _thread_matches(span.thread_id, thread_id) and
+                _text_matches(query, (
+                    span.name, f"0x{span.name_id:08x}",
+                    f"0x{span.thread_id:08x}", str(span.correlation_id),
+                )),
+                limit),
+            counters=_bounded_filter(
+                self.counters,
+                lambda counter:
+                _thread_matches(counter.thread_id, thread_id) and
+                _text_matches(query, (
+                    counter.name, counter.sample_type,
+                    f"0x{counter.thread_id:08x}",
+                    str(counter.event_index),
+                )),
+                limit),
+            events=_bounded_filter(
+                self.capture.events,
+                lambda event:
+                _thread_matches(event.thread_id, thread_id) and
+                _text_matches(query, (
+                    self.capture.resolve_name(event.name_id),
+                    event.type_name, f"0x{event.name_id:08x}",
+                    f"0x{event.thread_id:08x}",
+                    str(event.correlation_id), str(event.index),
+                )),
+                limit),
+        )
+
     def details(self, row: object) -> tuple[tuple[str, str], ...]:
         if isinstance(row, trace.Event):
             values = dataclasses.asdict(row)
@@ -240,7 +304,9 @@ class ProfilerController:
     def open_capture(self, path: Path,
                      max_bytes: int = trace.DEFAULT_MAX_BYTES) -> LoadedCapture:
         capture = trace.read_capture(path, max_bytes)
-        return LoadedCapture(capture, str(path))
+        source = str(path)
+        return LoadedCapture(
+            capture, source, None, ProfilerViewModel(capture, source))
 
     def receive_capture(
             self, config: ReceiveConfig,
@@ -257,7 +323,9 @@ class ProfilerController:
             config.capture_timeout, cancelled, on_progress)
         capture = trace.decode_capture(raw)
         trace.write_capture(config.output, raw, config.force)
-        return LoadedCapture(capture, str(config.output), peer)
+        source = str(config.output)
+        return LoadedCapture(
+            capture, source, peer, ProfilerViewModel(capture, source, peer))
 
     def export_decoded(self, loaded: LoadedCapture, output: Path,
                        force: bool = False) -> None:
@@ -270,6 +338,18 @@ class ProfilerController:
 
 def _thread_matches(actual: int, selected: int | None) -> bool:
     return selected is None or actual == selected
+
+
+def _bounded_filter(values: Iterable[Row], matches: Callable[[Row], bool],
+                    limit: int) -> FilteredRows[Row]:
+    selected: list[Row] = []
+    for value in values:
+        if not matches(value):
+            continue
+        if len(selected) == limit:
+            return FilteredRows(tuple(selected), True)
+        selected.append(value)
+    return FilteredRows(tuple(selected), False)
 
 
 def _text_matches(query: str, values: Iterable[object]) -> bool:

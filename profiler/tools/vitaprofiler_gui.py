@@ -332,11 +332,11 @@ class ProfilerApp:
         ))
         self.thread_filter.set("All threads")
         self.filter_text.set("")
-        self._refresh_tables()
-        self._set_action_state()
         self.status.set(
             f"Loaded {loaded.source}: "
-            f"{len(loaded.capture.events):,} events.")
+            f"{len(loaded.capture.events):,} events. Preparing display...")
+        self._refresh_tables()
+        self._set_action_state()
 
     def _clear_filter(self) -> None:
         self.filter_text.set("")
@@ -352,51 +352,62 @@ class ProfilerApp:
             return
         query = self.filter_text.get()
         thread = self._selected_thread()
+        model = self.model
+        self._start_task(
+            lambda: model.filter_tables(query, thread, DISPLAY_ROW_LIMIT),
+            self._apply_table_rows, "Filtering bounded display rows...",
+            cancellable=False)
+
+    def _apply_table_rows(self, result: object) -> None:
+        if not isinstance(result, desktop.TableRows):
+            raise TypeError("background filter returned invalid rows")
         self.row_objects.clear()
-        truncated = 0
-        truncated += self._fill_rows(
+        self._fill_rows(
             "frames", self.frame_tree,
-            self.model.filter_frames(query, thread),
+            result.frames.rows,
             lambda row: (
                 row.event_index, f"{row.timestamp_us:,}",
                 "-" if row.duration_us is None else f"{row.duration_us:,}",
                 "-" if row.fps is None else f"{row.fps:.2f}",
                 row.name, f"0x{row.thread_id:08x}", row.sequence,
                 ", ".join(row.flags) or "-"))
-        truncated += self._fill_rows(
+        self._fill_rows(
             "zones", self.zone_tree,
-            self.model.filter_zones(query, thread),
+            result.zones.rows,
             lambda row: (
                 row.name, f"0x{row.thread_id:08x}", f"{row.begin_us:,}",
                 f"{row.duration_us:,}", row.correlation_id,
                 _flag_text(row.flags)))
-        truncated += self._fill_rows(
+        self._fill_rows(
             "counters", self.counter_tree,
-            self.model.filter_counters(query, thread),
+            result.counters.rows,
             lambda row: (
                 row.event_index, f"{row.timestamp_us:,}", row.name,
                 row.value, row.sample_type, f"0x{row.thread_id:08x}",
                 ", ".join(row.flags) or "-"))
-        truncated += self._fill_rows(
+        self._fill_rows(
             "events", self.event_tree,
-            self.model.filter_events(query, thread),
+            result.events.rows,
             lambda row: (
                 row.index, f"{row.timestamp_us:,}", row.type_name,
                 self.model.capture.resolve_name(row.name_id), row.value,
                 f"0x{row.thread_id:08x}", row.correlation_id,
                 ", ".join(row.flag_names) or "-"))
-        suffix = (f" ({truncated:,} additional matching rows hidden)"
+        truncated = any((
+            result.frames.truncated, result.zones.truncated,
+            result.counters.truncated, result.events.truncated,
+        ))
+        suffix = (" (additional matching rows hidden by the display limit)"
                   if truncated else "")
         self.status.set(f"Filter applied{suffix}.")
 
     def _fill_rows(self, key: str, tree: ttk.Treeview, rows: tuple,
-                   values: Callable[[object], tuple]) -> int:
+                   values: Callable[[object], tuple]) -> None:
         tree.delete(*tree.get_children())
-        for index, row in enumerate(rows[:DISPLAY_ROW_LIMIT]):
+        for index, row in enumerate(rows):
             item = f"{key}-{index}"
             tree.insert("", tk.END, iid=item, values=values(row))
             self.row_objects[(str(tree), item)] = row
-        return max(0, len(rows) - DISPLAY_ROW_LIMIT)
 
     def _show_selection(self, tree: ttk.Treeview) -> None:
         selection = tree.selection()

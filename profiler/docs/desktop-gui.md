@@ -28,9 +28,10 @@ environment are required.
 
 ## Workflows
 
-**Open a capture** loads and validates a bounded `.vptrace` file in a worker
-thread. The Overview tab shows wire metadata, capture size/span, dictionary and
-thread counts, and the structural indicators available from the capture.
+**Open a capture** loads, validates, analyzes, and prepares a bounded
+`.vptrace` file in a worker thread. The Overview tab shows wire metadata,
+capture size/span, dictionary and thread counts, and the structural indicators
+available from the capture.
 Frames, complete timing zones, counters/snapshots, and the underlying events
 have separate tables. A text filter matches names, types, IDs, sequences, and
 correlations; the thread selector narrows all tables. Selecting a row shows its
@@ -49,9 +50,13 @@ pipeline. The Perfetto result can be loaded into
 [ui.perfetto.dev](https://ui.perfetto.dev/) or Chrome's trace viewer. Existing
 files require an explicit replacement confirmation.
 
-File reads, network receiving, and exports run off the Tk event thread. Only UI
-updates run on the event thread. At most one background operation runs at a
-time, and closing the window requests receiver cancellation.
+File reads, network ingestion, decoding, analysis, filtering, and exports run
+off the Tk event thread. The receiver callback only publishes a small progress
+notification; it never parses, symbolizes, filters, or renders capture rows.
+Only bounded row insertion and other UI updates run on the event thread, so GUI
+rendering cannot apply backpressure to Vita-side profiler callbacks. At most
+one background operation runs at a time, and closing the window requests
+receiver cancellation.
 
 ## Loss reporting and limitations
 
@@ -66,13 +71,20 @@ VPRF wire version 1 does **not** encode the producer ring's lifetime
 values **Unavailable** rather than inferring zero loss. Applications should
 retain or display the Vita-side statistics when proving a loss-free run.
 
+VPRF v1 also has no session or process identity, thread-generation identity,
+raw timer source/unit, module ranges, or per-event ARM/Thumb execution state.
+The GUI labels those fields **Unavailable**; it does not infer them from
+addresses or invent placeholder values. Timestamps are the normalized
+microseconds and fixed frequency actually encoded by v1.
+
 Other current limits:
 
 - TCP captures appear after the sender cleanly closes because EOF frames wire
   version 1; there is no incremental live timeline.
 - The GUI accepts one sender and one capture per receiver start.
-- Tables show at most 3,000 matching rows each to keep Tk responsive; exports
-  always include the complete validated capture.
+- Filtering and tables retain at most 3,000 matching display rows each to keep
+  memory and Tk work bounded; exports always include the complete validated
+  capture.
 - The GUI does not embed Perfetto, plot charts, symbolize threads, or control
   profiler instrumentation inside the Vita application.
 - Automated tests cover the model, controller, receiver cancellation, and

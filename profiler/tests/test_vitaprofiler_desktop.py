@@ -29,6 +29,10 @@ class ViewModelTests(unittest.TestCase):
         self.assertEqual(metadata["Events"], "6")
         self.assertEqual(metadata["Peer"], "192.168.1.42:49152")
         self.assertEqual(metadata["Threads"], "1")
+        self.assertEqual(metadata["Timestamp unit"], "microseconds")
+        self.assertIn("VPRF v1", metadata["Session/process ID"])
+        self.assertIn("not encoded", metadata["Module ranges"])
+        self.assertIn("not encoded", metadata["ARM/Thumb state"])
         self.assertEqual(loss["Capture integrity"],
                          "No structural loss indicators")
         self.assertIn("VPRF v1", loss["Producer ring drops"])
@@ -51,6 +55,13 @@ class ViewModelTests(unittest.TestCase):
         self.assertEqual(len(self.model.filter_frames(thread_id=7)), 2)
         self.assertFalse(self.model.filter_frames(thread_id=8))
         self.assertEqual(len(self.model.filter_events("zone_end")), 1)
+        bounded = self.model.filter_tables("", None, 1)
+        self.assertEqual(len(bounded.events.rows), 1)
+        self.assertTrue(bounded.events.truncated)
+        self.assertEqual(len(bounded.zones.rows), 1)
+        self.assertFalse(bounded.zones.truncated)
+        with self.assertRaises(ValueError):
+            self.model.filter_tables("", None, 0)
 
         details = dict(self.model.details(self.capture.events[1]))
         self.assertEqual(details["Name"], "draw calls")
@@ -68,6 +79,8 @@ class ControllerTests(unittest.TestCase):
 
             controller = desktop.ProfilerController()
             loaded = controller.open_capture(capture_path)
+            self.assertIsInstance(loaded.view_model,
+                                  desktop.ProfilerViewModel)
             controller.export_decoded(loaded, decoded_path)
             controller.export_perfetto(loaded, perfetto_path)
 
