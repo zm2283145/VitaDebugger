@@ -6,6 +6,13 @@ contract passes its serialized VitaSDK rebuild. That archive is **not** a
 resident Vita plugin, listener, VPK, crypto implementation, privileged loader,
 or external debugger injector.
 
+It also contains the protocol-v2 authentication storage/crypto boundary.
+`vitadebug_attach_auth.c` validates exact active key records, signs only through
+an injected private-key callback, verifies Ed25519 with the repository's
+vendored Monocypher, and provides constant-time fixed-value comparison.
+`vitadebug_attach_auth_vita.c` deliberately supplies no storage callbacks, so
+device authentication remains unavailable until persistent storage is reviewed.
+
 `vitadebug_attach_broker.c` remains the protocol-v1 read-only discovery core.
 `vitadebug_attach_control.c` is a host-tested lifecycle and authorization model
 for a future, separate mutating protocol. Protocol v1 has not gained a mutation
