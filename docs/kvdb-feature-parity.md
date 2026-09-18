@@ -61,10 +61,10 @@ stacks remain unvalidated unless an individual result says otherwise.
    with exact restoration; a real-world application lease also passed 75
    bounded `0x01` reads and clean close. The dormant-owner-thread safe-rearm
    gate passes; next gate ownership conflicts and every remaining cleanup path.
-   The Vita TCP sink and both 300-frame real-world VitaGL captures pass; add
-   deeper source-owned graphics timing, then build
-   a dedicated desktop GUI on the working receiver/analyzer/Perfetto export
-   pipeline.
+   The Vita TCP sink and both 300-frame real-world VitaGL captures pass. The
+   dependency-free desktop GUI now uses the working receiver/analyzer/Perfetto
+   pipeline; next add deeper source-owned graphics timing and live timeline
+   framing beyond the EOF-delimited wire-v1 capture.
 8. Complete authentication/pairing, peer allowlists, packaging, CI/firmware
    coverage, licensing, and release hardening.
 9. Hardware-stress the VitaDevDeploy GPU lifecycle fix and finish interrupted-

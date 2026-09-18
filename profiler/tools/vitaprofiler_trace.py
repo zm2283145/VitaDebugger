@@ -61,6 +61,7 @@ MAX_DECODED_EVENTS = 262_144
 DEFAULT_ACCEPT_TIMEOUT = 30.0
 DEFAULT_IDLE_TIMEOUT = 5.0
 DEFAULT_CAPTURE_TIMEOUT = 300.0
+RECEIVER_CANCEL_POLL_SECONDS = 0.1
 
 BUILTIN_NAMES = {
     0xFFF00001: "vita.memory.free_user_bytes",
@@ -97,6 +98,10 @@ class TraceFormatError(ValueError):
 
 class TraceReceiveError(RuntimeError):
     """A bounded TCP capture could not be received completely."""
+
+
+class TraceReceiveCancelled(TraceReceiveError):
+    """A TCP capture was cancelled by its local controller."""
 
 
 @dataclasses.dataclass(frozen=True)
@@ -646,7 +651,9 @@ def capture_to_chrome_trace(capture: TraceCapture) -> dict[str, object]:
 
 def receive_socket(connection: socket.socket, max_bytes: int,
                    idle_timeout: float | None = None,
-                   total_timeout: float | None = DEFAULT_CAPTURE_TIMEOUT
+                   total_timeout: float | None = DEFAULT_CAPTURE_TIMEOUT,
+                   cancelled: Callable[[], bool] | None = None,
+                   on_progress: Callable[[int], None] | None = None,
                    ) -> bytes:
     """Read one capture through EOF with hard memory and time bounds."""
     if max_bytes < WIRE_HEADER_SIZE:
@@ -657,25 +664,42 @@ def receive_socket(connection: socket.socket, max_bytes: int,
     if total_timeout is not None:
         if not math.isfinite(total_timeout) or total_timeout <= 0:
             raise ValueError("total_timeout must be positive or None")
-    deadline = (time.monotonic() + total_timeout
-                if total_timeout is not None else None)
+    started = time.monotonic()
+    deadline = started + total_timeout if total_timeout is not None else None
+    idle_deadline = started + idle_timeout if idle_timeout is not None else None
     chunks: list[bytes] = []
     received = 0
     while True:
-        remaining = None if deadline is None else deadline - time.monotonic()
+        if cancelled is not None and cancelled():
+            raise TraceReceiveCancelled("capture cancelled")
+        now = time.monotonic()
+        remaining = None if deadline is None else deadline - now
         if remaining is not None and remaining <= 0:
             raise TraceReceiveError("capture exceeded its total time limit")
-        timeout = idle_timeout
+        idle_remaining = (None if idle_deadline is None else
+                          idle_deadline - now)
+        if idle_remaining is not None and idle_remaining <= 0:
+            raise TraceReceiveError("capture connection became idle")
+        timeout = idle_remaining
         if remaining is not None:
             timeout = remaining if timeout is None else min(timeout, remaining)
+        if cancelled is not None:
+            timeout = (RECEIVER_CANCEL_POLL_SECONDS if timeout is None else
+                       min(timeout, RECEIVER_CANCEL_POLL_SECONDS))
         connection.settimeout(timeout)
         try:
             chunk = connection.recv(min(64 * 1024, max_bytes - received + 1))
         except socket.timeout as error:
+            if cancelled is not None and cancelled():
+                raise TraceReceiveCancelled("capture cancelled") from error
             if deadline is not None and time.monotonic() >= deadline:
                 raise TraceReceiveError(
                     "capture exceeded its total time limit") from error
-            raise TraceReceiveError("capture connection became idle") from error
+            if (idle_deadline is not None and
+                    time.monotonic() >= idle_deadline):
+                raise TraceReceiveError(
+                    "capture connection became idle") from error
+            continue
         except OSError as error:
             raise TraceReceiveError(f"capture receive failed: {error}") from error
         if not chunk:
@@ -685,6 +709,10 @@ def receive_socket(connection: socket.socket, max_bytes: int,
             raise TraceReceiveError(
                 f"capture exceeded the {max_bytes}-byte safety limit")
         chunks.append(chunk)
+        if idle_timeout is not None:
+            idle_deadline = time.monotonic() + idle_timeout
+        if on_progress is not None:
+            on_progress(received)
     return b"".join(chunks)
 
 
@@ -693,6 +721,8 @@ def receive_tcp_once(bind: str, port: int, source: str | None,
                      idle_timeout: float | None,
                      on_listening: Callable[[tuple[str, int]], None] | None = None,
                      capture_timeout: float | None = DEFAULT_CAPTURE_TIMEOUT,
+                     cancelled: Callable[[], bool] | None = None,
+                     on_progress: Callable[[int], None] | None = None,
                      ) -> tuple[bytes, tuple[str, int]]:
     """Accept one allowlisted IPv4 sender and read until its clean EOF."""
     if accept_timeout is not None:
@@ -709,22 +739,37 @@ def receive_tcp_once(bind: str, port: int, source: str | None,
             host, actual_port = listener.getsockname()[:2]
             on_listening((str(host), int(actual_port)))
         while True:
+            if cancelled is not None and cancelled():
+                raise TraceReceiveCancelled("capture cancelled")
             if deadline is not None:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     raise TraceReceiveError("timed out waiting for a sender")
-                listener.settimeout(remaining)
+                timeout = remaining
+            else:
+                timeout = None
+            if cancelled is not None:
+                timeout = (RECEIVER_CANCEL_POLL_SECONDS if timeout is None else
+                           min(timeout, RECEIVER_CANCEL_POLL_SECONDS))
+            listener.settimeout(timeout)
             try:
                 connection, address = listener.accept()
             except socket.timeout as error:
-                raise TraceReceiveError("timed out waiting for a sender") from error
+                if cancelled is not None and cancelled():
+                    raise TraceReceiveCancelled(
+                        "capture cancelled") from error
+                if deadline is not None and time.monotonic() >= deadline:
+                    raise TraceReceiveError(
+                        "timed out waiting for a sender") from error
+                continue
             peer = (str(address[0]), int(address[1]))
             if allowed is not None and peer[0] != allowed:
                 connection.close()
                 continue
             with connection:
                 return receive_socket(connection, max_bytes, idle_timeout,
-                                      capture_timeout), peer
+                                      capture_timeout, cancelled,
+                                      on_progress), peer
 
 
 def _read_capture(path: Path, max_bytes: int = DEFAULT_MAX_BYTES) -> TraceCapture:
@@ -773,6 +818,28 @@ def _write_atomic(path: Path, data: bytes, force: bool = False) -> None:
 def _json_bytes(value: object) -> bytes:
     return (json.dumps(value, indent=2, sort_keys=False, ensure_ascii=False) +
             "\n").encode("utf-8")
+
+
+def read_capture(path: Path, max_bytes: int = DEFAULT_MAX_BYTES) -> TraceCapture:
+    """Read and validate one bounded capture file."""
+    return _read_capture(path, max_bytes)
+
+
+def write_capture(path: Path, data: bytes, force: bool = False) -> None:
+    """Atomically save an already validated raw capture."""
+    _write_atomic(path, data, force)
+
+
+def export_decoded_json(capture: TraceCapture, path: Path,
+                        force: bool = False) -> None:
+    """Atomically export the complete decoded representation."""
+    _write_atomic(path, _json_bytes(capture_to_json(capture)), force)
+
+
+def export_chrome_trace(capture: TraceCapture, path: Path,
+                        force: bool = False) -> None:
+    """Atomically export Chrome Trace Event JSON accepted by Perfetto."""
+    _write_atomic(path, _json_bytes(capture_to_chrome_trace(capture)), force)
 
 
 def _positive_int(value: str) -> int:
@@ -868,9 +935,10 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         if args.command in ("json", "chrome"):
             capture = _read_capture(args.capture, args.max_bytes)
-            value = (capture_to_json(capture) if args.command == "json" else
-                     capture_to_chrome_trace(capture))
-            _write_atomic(args.output, _json_bytes(value), args.force)
+            if args.command == "json":
+                export_decoded_json(capture, args.output, args.force)
+            else:
+                export_chrome_trace(capture, args.output, args.force)
             print(f"Wrote {args.output} ({len(capture.events)} events)")
             return 0
 

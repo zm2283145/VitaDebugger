@@ -77,7 +77,7 @@ VITA_TCP_GATE_LDLIBS := \
 	-lSceSysmem_stub \
 	-lSceLibKernel_stub
 
-.PHONY: all vita vita-check vita-probe vita-pmu-discovery vita-tcp-gate host-test check clean
+.PHONY: all vita vita-check vita-probe vita-pmu-discovery vita-tcp-gate desktop host-test check clean
 
 all: vita
 
@@ -90,6 +90,9 @@ vita-probe: $(VITA_PROBE_BUILD)/vitaprofiler-probe.vpk
 vita-pmu-discovery: $(VITA_PMU_DISCOVERY_BUILD)/vitaprofiler-pmu-discovery.vpk
 
 vita-tcp-gate: $(VITA_TCP_GATE_BUILD)/vitaprofiler-tcp-gate.vpk
+
+desktop:
+	$(PYTHON) tools/vitaprofiler_gui.py
 
 $(VITA_BUILD)/vitaprofiler.o: src/vitaprofiler.c include/vitaprofiler.h
 	mkdir -p $(VITA_BUILD)
@@ -243,6 +246,7 @@ host-test: $(HOST_BUILD)/test_vitaprofiler $(HOST_BUILD)/test_vitaprofiler_names
 	$(HOST_BUILD)/test_vitaprofiler_integrations
 	$(HOST_BUILD)/test_vitaprofiler_pmu_vita
 	$(PYTHON) tests/test_vitaprofiler_trace.py
+	$(PYTHON) tests/test_vitaprofiler_desktop.py
 
 check: host-test vita-check
 

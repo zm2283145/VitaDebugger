@@ -122,6 +122,18 @@ the Chrome Trace Event format and can be opened in Perfetto or Chrome's trace
 viewer. Matched zone records become complete-duration events, counters and
 Vita snapshots become counter tracks, and frames become global instants.
 
+For an interactive desktop workflow using these same APIs, launch:
+
+```sh
+python tools/vitaprofiler_gui.py
+```
+
+The dependency-free Tk viewer opens existing captures, controls one bounded TCP
+receive, displays metadata, structural loss indicators, frames, zones,
+counters, and events with filtering/selection, and invokes both existing JSON
+exporters in background tasks. See the
+[desktop GUI guide](desktop-gui.md) for setup and wire-version limitations.
+
 Name bytes are hash-validated exactly as they are on the C receiver. The PC
 viewer additionally rejects invalid UTF-8, terminal controls, and bidirectional
 format controls before any name can be printed. Applications should therefore

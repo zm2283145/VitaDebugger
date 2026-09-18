@@ -49,7 +49,7 @@ This distinction is important: “implemented” does not automatically mean
 | Application debugger | GDB over TCP, up to 32 ARM/Thumb software breakpoints (`Z0`), source/function breakpoints, faults, registers, stack/memory access, live variable changes, practical stepping, detach/reconnect, Ctrl-C, bounded console output, read-only monitor commands | Some uncommon PC-writing and privileged instructions fail closed; long fault/reconnect stress is still in progress |
 | Kernel-assisted debugger | Caller-process thread inventory, lease-protected all-stop, late-thread reconciliation, watchdog recovery, selected foreign-thread core-register reads, exception-thread R0/CPSR writes, optional read-only VFP snapshots | Foreign-thread core/VFP writes are disabled; VFP reads use an undocumented, opt-in boundary; arbitrary scheduler-locked foreign-thread stepping is not complete |
 | Breakpoint hardware | Read-only comparator inventory | **Hardware breakpoints and watchpoints are unavailable on the tested retail hardware.** GDB does not advertise `Z1`-`Z4`; guarded probes did not produce a safely returning comparator-access path |
-| User-mode profiler | Named zones/counters, frames, memory and known-thread snapshots, bounded name dictionary, loss accounting, TCP capture, decoded JSON, and Chrome Trace/Perfetto export | Arbitrary thread PC/call-stack sampling, true GPU timestamps, and a dedicated desktop GUI remain pending |
+| User-mode profiler | Named zones/counters, frames, memory and known-thread snapshots, bounded name dictionary, loss accounting, TCP capture, decoded JSON, Chrome Trace/Perfetto export, and a dependency-free desktop viewer | Arbitrary thread PC/call-stack sampling, true GPU timestamps, and embedded live timeline rendering remain unavailable |
 | Kernel PMU | Fixed core 0/lane 5 normal-close gates for events `0x01`, `0x03`, and `0x10`, each with exact restoration; same-boot dormant-owner-thread safe re-arm also passed | Process exit, crash, receiver disconnect, timeout, and competing-owner recovery are still pending; cycles, arbitrary events/cores/lanes, and unrestricted production sampling are disabled |
 | External application attach | Read-only protocol and broker boundaries have host tests and a Vita cross-build | No resident listener, trusted foreign-target identity provider, module injection, process mutation, or live GDB attach exists |
 
@@ -308,6 +308,18 @@ For a network trace, start the receiver first:
 python profiler/tools/vitaprofiler_trace.py receive capture.vptrace \
   --bind 0.0.0.0 --port 18195 --source VITA_IP
 ```
+
+For the desktop workflow, launch the standard-library Tk viewer instead:
+
+```sh
+python profiler/tools/vitaprofiler_gui.py
+```
+
+It opens existing captures or runs the same one-capture receiver, displays
+metadata, structural loss diagnostics, frames, zones, counters, and events,
+and exports through the existing decoded JSON and Perfetto pipeline. See the
+[desktop GUI guide](profiler/docs/desktop-gui.md) for Tcl/Tk setup and current
+wire-version limitations.
 
 Then inspect or export the finished capture:
 

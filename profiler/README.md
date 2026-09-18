@@ -29,6 +29,9 @@ The current increment provides:
   and transport statistics.
 - A bounded TCP receiver plus text, complete decoded JSON, and Chrome Trace/Perfetto
   viewer output with named zone, counter, frame, and built-in metric handling.
+- A dependency-free Tk desktop viewer over those same receiver, decoder,
+  analyzer, and export APIs, with background work, cancellation, filtering,
+  selection, and explicit wire-v1 loss-reporting limits.
 - Cooperative, header-independent CPU wall-time hook interfaces for VitaGL and
   SceGxm call sites.
 - A guarded PMU provider/lease abstraction plus an injectable owned-reset
@@ -125,6 +128,9 @@ receiver, validation rules, summaries, and Perfetto export, and [Vita TCP
 stream sink](docs/vita-tcp-stream.md) for the opt-in application-side SceNet
 adapter. The separate [Vita TCP hardware gate](docs/vita-tcp-hardware-gate.md)
 validates that path from an ordinary user-mode app without the kernel plugin.
+See [VitaProfiler desktop GUI](docs/desktop-gui.md) to open captures, control
+the receiver, inspect frames/zones/counters, and export through the same
+pipeline without additional Python packages.
 See [Cooperative graphics hooks](docs/graphics-hooks.md) for safe
 VitaGL/SceGxm call-site instrumentation, the [real-world VitaGL integration
 record](../docs/hardware/profiler-real-world-vitagl-2026-09-15.md) for a
