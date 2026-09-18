@@ -144,6 +144,12 @@ running, call `uvdb_start_server()` instead. Stop it with
 exception handler, and do not unload the linked debugger image after terminal
 shutdown.
 
+The listener does not treat a bare TCP connection as a debugger session. It
+keeps the target running until the peer supplies a complete checksum-valid RSP
+frame, then preserves that frame for the normal GDB handshake. Silent port
+checks and non-RSP probes are closed after a bounded admission window without
+using up the session.
+
 Library-only Ctrl-C stops the debugger service thread; it does not coherently
 suspend every application thread. Thread discovery is cooperative:
 

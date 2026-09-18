@@ -31,6 +31,16 @@ static unsigned int fake_lifecycle_sequence;
 static unsigned int fake_shutdown_sequence;
 static unsigned int fake_abort_sequence;
 static unsigned int fake_join_sequence;
+static unsigned int fake_join_timeout;
+static int fake_wait_failures;
+static int fake_delete_calls;
+static unsigned char fake_probe_receive[64];
+static size_t fake_probe_receive_size;
+static size_t fake_probe_receive_offset;
+static int fake_accept_calls;
+static int fake_epoll_socket;
+static int fake_probe_socket_closed;
+static int fake_probe_socket_shutdown;
 
 char __executable_start[1];
 
@@ -72,6 +82,16 @@ static void reset_core(void)
     fake_shutdown_sequence = 0;
     fake_abort_sequence = 0;
     fake_join_sequence = 0;
+    fake_join_timeout = 0;
+    fake_wait_failures = 0;
+    fake_delete_calls = 0;
+    memset(fake_probe_receive, 0, sizeof(fake_probe_receive));
+    fake_probe_receive_size = 0;
+    fake_probe_receive_offset = 0;
+    fake_accept_calls = 0;
+    fake_epoll_socket = -1;
+    fake_probe_socket_closed = 0;
+    fake_probe_socket_shutdown = 0;
     memset(&fake_predecessor_context, 0, sizeof(fake_predecessor_context));
 
     in_buf = (struct buffer){
@@ -85,6 +105,7 @@ static void reset_core(void)
         .cap = sizeof(output_storage),
     };
     uvdb_socket = FAKE_SOCKET;
+    uvdb_candidate_socket = -1;
     uvdb_listen_socket = -1;
     uvdb_socket_generation = 1u;
     uvdb_lock_owner = 0;
@@ -323,6 +344,80 @@ static void test_shutdown_does_not_synthesize_trap(void)
           "connected shutdown returns without synthesizing an exception");
 }
 
+static void test_server_join_timeout_is_bounded_and_retryable(void)
+{
+    reset_core();
+    uvdb_server_thread = 90;
+    uvdb_server_thread_ended = 0;
+    fake_wait_failures = 1;
+
+    check(uvdb_stop_server() < 0 &&
+              fake_join_timeout == UVDB_THREAD_JOIN_TIMEOUT_US,
+          "server stop bounds its worker join");
+    check(uvdb_server_thread == 90 && !uvdb_server_thread_ended &&
+              fake_delete_calls == 0,
+          "join timeout retains the live worker handle");
+
+    check(uvdb_stop_server() == 0 &&
+              uvdb_server_thread < 0 && fake_delete_calls == 1,
+          "later stop retries and completes retained worker cleanup");
+}
+
+static void test_non_rsp_probe_does_not_consume_session(void)
+{
+    reset_core();
+    uvdb_socket = -1;
+    uvdb_state = UVDB_STATE_IDLE;
+    memcpy(fake_probe_receive, "GET / HTTP/1.0\r\n\r\n", 18);
+    fake_probe_receive_size = 18;
+    queue_receive("$?#3f");
+
+    const uintptr_t resume = UINT32_C(0x8100789a);
+    const uint64_t no_trap = (uint64_t)resume << 32 | resume;
+    uint64_t result = real_uvdb_enter(resume);
+    check(result != no_trap && fake_accept_calls == 2,
+          "listener rejects a non-RSP probe then admits GDB");
+    check(fake_probe_socket_closed && uvdb_candidate_socket < 0 &&
+              uvdb_socket == FAKE_SOCKET &&
+              uvdb_state == UVDB_STATE_CONNECTED,
+          "probe closes without consuming the promoted debugger session");
+    check(fake_receive_offset == 0,
+          "admission leaves the first GDB packet queued for normal RSP");
+}
+
+static void test_silent_probe_timeout_is_bounded(void)
+{
+    reset_core();
+    uvdb_socket = -1;
+    check(uvdb_wait_for_gdb_admission(FAKE_SOCKET) == 0 &&
+              fake_delay_calls == UVDB_GDB_ADMISSION_POLLS,
+          "silent TCP probe expires at the fixed admission bound");
+
+    reset_core();
+    queue_receive("+$?#3f");
+    check(uvdb_wait_for_gdb_admission(FAKE_SOCKET) == 1 &&
+              fake_receive_offset == 0,
+          "initial ACK prefix plus valid RSP is admitted without consumption");
+}
+
+static void test_candidate_socket_cleanup(void)
+{
+    reset_core();
+    uvdb_socket = -1;
+    uvdb_candidate_socket = 9;
+    uvdb_listen_socket = 8;
+    uvdb_server_thread = 90;
+    uvdb_server_thread_ended = 0;
+    uvdb_state = UVDB_STATE_LISTENING;
+
+    check(uvdb_stop_server() == 0 &&
+              fake_probe_socket_shutdown &&
+              fake_probe_socket_closed &&
+              uvdb_candidate_socket < 0 &&
+              uvdb_listen_socket < 0,
+          "server stop cancels and retires a pending admission socket");
+}
+
 int main(void)
 {
     test_real_status_query_ordering();
@@ -330,6 +425,10 @@ int main(void)
     test_exception_lock_contention_handoff();
     test_stop_start_exception_quiescence();
     test_shutdown_does_not_synthesize_trap();
+    test_server_join_timeout_is_bounded_and_retryable();
+    test_non_rsp_probe_does_not_consume_session();
+    test_silent_probe_timeout_is_bounded();
+    test_candidate_socket_cleanup();
     if(failures)
         return 1;
     puts("PASS: integrated uvdb.c protocol, exception, and lifecycle ordering");
@@ -413,11 +512,22 @@ int sceKernelStartThread(SceUID uid, SceSize args, void* argp)
 { (void)uid; (void)args; (void)argp; return 0; }
 int sceKernelWaitThreadEnd(SceUID uid, int* status, void* timeout)
 {
-    (void)uid; (void)status; (void)timeout;
+    (void)uid; (void)status;
+    fake_join_timeout = timeout ? *(unsigned int*)timeout : 0;
     fake_join_sequence = ++fake_lifecycle_sequence;
+    if(fake_wait_failures > 0)
+    {
+        --fake_wait_failures;
+        return -1;
+    }
     return 0;
 }
-int sceKernelDeleteThread(SceUID uid) { (void)uid; return 0; }
+int sceKernelDeleteThread(SceUID uid)
+{
+    (void)uid;
+    ++fake_delete_calls;
+    return 0;
+}
 SceUID sceKernelGetModuleIdByAddr(const void* address)
 { (void)address; return -1; }
 int sceKernelGetModuleInfo(SceUID uid, SceKernelModuleInfo* info)
@@ -428,15 +538,34 @@ int sceKernelGetModuleList(int flags, SceUID* modules, SceSize* count)
 ssize_t sceNetSyscallRecvfrom(void* arguments)
 {
     uvdb_net_syscall_arg* args = arguments;
-    if(!args || (int)args[0] != FAKE_SOCKET ||
-       fake_receive_offset >= fake_receive_size)
+    if(!args)
         return -1;
-    size_t available = fake_receive_size - fake_receive_offset;
+    unsigned char* source;
+    size_t* offset;
+    size_t source_size;
+    if((int)args[0] == 9)
+    {
+        source = fake_probe_receive;
+        offset = &fake_probe_receive_offset;
+        source_size = fake_probe_receive_size;
+    }
+    else if((int)args[0] == FAKE_SOCKET)
+    {
+        source = fake_receive;
+        offset = &fake_receive_offset;
+        source_size = fake_receive_size;
+    }
+    else
+        return -1;
+    if(*offset >= source_size)
+        return -1;
+    size_t available = source_size - *offset;
     size_t requested = (size_t)args[2];
     size_t amount = available < requested ? available : requested;
     memcpy((void*)(uintptr_t)args[1],
-           fake_receive + fake_receive_offset, amount);
-    fake_receive_offset += amount;
+           source + *offset, amount);
+    if(!(args[3] & MSG_PEEK))
+        *offset += amount;
     return (ssize_t)amount;
 }
 
@@ -458,17 +587,22 @@ ssize_t sceNetSyscallSendto(void* arguments)
 }
 
 int sceNetSyscallSocket(const char* name, int domain, int type, int protocol)
-{ (void)name; (void)domain; (void)type; (void)protocol; return FAKE_SOCKET; }
+{ (void)name; (void)domain; (void)type; (void)protocol; return 8; }
 int sceNetSyscallSetsockopt(void* arguments) { (void)arguments; return 0; }
 int sceNetSyscallBind(int socket, const void* address, unsigned int size)
 { (void)socket; (void)address; (void)size; return 0; }
 int sceNetSyscallListen(int socket, int backlog)
 { (void)socket; (void)backlog; return 0; }
 int sceNetSyscallAccept(int socket, void* address, void* address_size)
-{ (void)socket; (void)address; (void)address_size; return FAKE_SOCKET; }
+{
+    (void)socket; (void)address; (void)address_size;
+    return fake_accept_calls++ == 0 ? 9 : FAKE_SOCKET;
+}
 int sceNetSyscallShutdown(int socket, int how)
 {
     (void)socket; (void)how;
+    if(socket == 9)
+        fake_probe_socket_shutdown = 1;
     ++fake_lifecycle_sequence;
     if(!fake_shutdown_sequence)
         fake_shutdown_sequence = fake_lifecycle_sequence;
@@ -480,7 +614,12 @@ int sceNetSyscallSocketAbort(int socket, int flags)
     fake_abort_sequence = ++fake_lifecycle_sequence;
     return 0;
 }
-int sceNetSyscallClose(int socket) { (void)socket; return 0; }
+int sceNetSyscallClose(int socket)
+{
+    if(socket == 9)
+        fake_probe_socket_closed = 1;
+    return 0;
+}
 int* sceNetErrnoLoc(void) { static int error; return &error; }
 int sceNetSend(int socket, const void* data, size_t size, int flags)
 { (void)socket; (void)data; (void)flags; return (int)size; }
@@ -488,10 +627,26 @@ int sceNetEpollCreate(const char* name, int flags)
 { (void)name; (void)flags; return 1; }
 int sceNetEpollControl(
     int epoll, int operation, int socket, SceNetEpollEvent* event)
-{ (void)epoll; (void)operation; (void)socket; (void)event; return 0; }
+{
+    (void)epoll; (void)operation; (void)event;
+    fake_epoll_socket = socket;
+    return 0;
+}
 int sceNetEpollWait(
     int epoll, SceNetEpollEvent* events, int maximum, int timeout)
-{ (void)epoll; (void)events; (void)maximum; (void)timeout; return 0; }
+{
+    (void)epoll; (void)maximum; (void)timeout;
+    size_t available = 0;
+    if(fake_epoll_socket == 9)
+        available = fake_probe_receive_size - fake_probe_receive_offset;
+    else if(fake_epoll_socket == FAKE_SOCKET)
+        available = fake_receive_size - fake_receive_offset;
+    if(!available)
+        return 0;
+    events[0].events = SCE_NET_EPOLLIN;
+    events[0].data.fd = fake_epoll_socket;
+    return 1;
+}
 int sceNetEpollDestroy(int epoll) { (void)epoll; return 0; }
 
 int kuKernelCpuUnrestrictedMemcpy(
