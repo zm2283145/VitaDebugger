@@ -268,6 +268,8 @@ static volatile int uvdb_io_failed;
 static struct uvdb_exception_handlers uvdb_handlers;
 static struct uvdb_exception_guard uvdb_exception_guard;
 static struct uvdb_protocol_gate uvdb_protocol_gate;
+static volatile uint32_t uvdb_resume_handoff_owner;
+static volatile uint32_t uvdb_exception_admissions;
 static struct uvdb_rsp_request_lifetime uvdb_request_lifetime;
 static volatile int uvdb_target_stopped;
 static volatile int uvdb_async_stop_pending;
@@ -387,6 +389,43 @@ static uint32_t uvdb_protocol_owner_for_thread(SceUID id)
      * fallback so an unexpected syscall failure cannot bypass serialization. */
     uint32_t owner = (uint32_t)id & UINT32_C(0x7fffffff);
     return owner ? owner : UINT32_C(0x7fffffff);
+}
+
+#define UVDB_RESUME_HANDOFF_WAIT_ATTEMPTS 5000u
+#define UVDB_RESUME_HANDOFF_WAIT_DELAY_US 1000u
+
+static void uvdb_resume_handoff_begin(uint32_t owner)
+{
+    if(owner)
+        __atomic_store_n(&uvdb_resume_handoff_owner, owner,
+                         __ATOMIC_RELEASE);
+}
+
+static void uvdb_resume_handoff_finish(uint32_t owner)
+{
+    uint32_t expected = owner;
+    if(owner)
+        (void)__atomic_compare_exchange_n(
+            &uvdb_resume_handoff_owner, &expected, 0u, 0,
+            __ATOMIC_RELEASE, __ATOMIC_RELAXED);
+}
+
+static int uvdb_resume_handoff_wait(uint32_t contender)
+{
+    /* EndStop can schedule a peer before the controller's exception callback
+     * has released its protocol and exception gates. Only that published,
+     * cross-thread resume tail may wait; same-thread nested faults retain the
+     * immediate fail-closed path. */
+    for(unsigned int attempt = 0;
+        attempt < UVDB_RESUME_HANDOFF_WAIT_ATTEMPTS; ++attempt)
+    {
+        uint32_t owner = __atomic_load_n(
+            &uvdb_resume_handoff_owner, __ATOMIC_ACQUIRE);
+        if(!owner || owner == contender)
+            return 0;
+        sceKernelDelayThread(UVDB_RESUME_HANDOFF_WAIT_DELAY_US);
+    }
+    return -1;
 }
 
 static void uvdb_note_io_failure(void)
@@ -1028,7 +1067,9 @@ static int uvdb_wait_for_exception_quiescence(void)
     enum { UVDB_EXCEPTION_QUIESCE_POLLS = 5000 };
     for(unsigned int poll = 0; poll < UVDB_EXCEPTION_QUIESCE_POLLS; ++poll)
     {
-        if(uvdb_exception_guard_is_idle(&uvdb_exception_guard))
+        if(!__atomic_load_n(&uvdb_exception_admissions,
+                            __ATOMIC_ACQUIRE) &&
+           uvdb_exception_guard_is_idle(&uvdb_exception_guard))
             return 0;
         sceKernelDelayThread(1000);
     }
@@ -3153,6 +3194,12 @@ static int uvdb_kernel_end_stop(void)
     return uvdb_kernel_recover_stop() >= 0 ? -1 : -2;
 }
 
+static int uvdb_kernel_end_stop_for_resume(uint32_t handoff_owner)
+{
+    uvdb_resume_handoff_begin(handoff_owner);
+    return uvdb_kernel_end_stop();
+}
+
 static void uvdb_kernel_abandon_stop(void)
 {
     uvdb_retire_stop_token();
@@ -3161,6 +3208,11 @@ static void uvdb_kernel_abandon_stop(void)
 #else
 static int uvdb_kernel_begin_stop(void) { return 0; }
 static int uvdb_kernel_end_stop(void) { return 0; }
+static int uvdb_kernel_end_stop_for_resume(uint32_t handoff_owner)
+{
+    uvdb_resume_handoff_begin(handoff_owner);
+    return 0;
+}
 #endif
 
 static void uvdb_note_target_running(void)
@@ -3699,7 +3751,8 @@ static int uvdb_apply_resume_plan(
     const struct uvdb_resume_plan* plan,
     KuKernelExceptionContext* ctx,
     int has_pc_override,
-    uint32_t pc_override)
+    uint32_t pc_override,
+    uint32_t resume_handoff_owner)
 {
     /* A prior partially failed patch/restore transaction is a hard execution
      * barrier. Retry its recorded originals first and never resume while any
@@ -3739,7 +3792,11 @@ static int uvdb_apply_resume_plan(
      * The temporary UDF exception reuses the same token and restores code. */
     if(hold_peers)
         return 0;
-    if(uvdb_kernel_end_stop() < 0)
+    /* Publish before EndStop makes a peer runnable. The exception callback
+     * clears this only after releasing its global, protocol, and guard
+     * ownership, so an immediate target trap cannot be misclassified as an
+     * unrelated simultaneous exception. */
+    if(uvdb_kernel_end_stop_for_resume(resume_handoff_owner) < 0)
         return -2;
     if(has_pc_override)
         ctx->pc = pc_override;
@@ -3768,7 +3825,8 @@ static int uvdb_finish_resume_packet(char* packet)
 static void uvdb_main_loop(
     KuKernelExceptionContext* ctx,
     int stop_signal,
-    enum uvdb_fileio_context fileio_context)
+    enum uvdb_fileio_context fileio_context,
+    uint32_t resume_handoff_owner)
 {
 #ifdef UVDB_KERNEL_VFP_READS
     // Negotiate the extended register shape only with the exact matching ABI
@@ -3948,7 +4006,8 @@ static void uvdb_main_loop(
             int parse_result = uvdb_rsp_parse_vcont(
                 pkt, sz, &uvdb_inventory, &plan);
             int resume_result = parse_result < 0 ? -1 :
-                uvdb_apply_resume_plan(&plan, ctx, 0, 0);
+                uvdb_apply_resume_plan(
+                    &plan, ctx, 0, 0, resume_handoff_owner);
             if(resume_result == -1)
             {
                 uvdb_end_stopped_operation();
@@ -4223,7 +4282,8 @@ static void uvdb_main_loop(
                 uvdb_fail_stopped_client_owned();
                 return;
             }
-            if(uvdb_kernel_end_stop() < 0)
+            if(uvdb_kernel_end_stop_for_resume(
+                   resume_handoff_owner) < 0)
             {
                 uvdb_fail_stopped_client_owned();
                 return;
@@ -4275,7 +4335,9 @@ static void uvdb_main_loop(
 #endif
 
             int resume_result = invalid ? -1 :
-                uvdb_apply_resume_plan(&plan, ctx, has_address, address);
+                uvdb_apply_resume_plan(
+                    &plan, ctx, has_address, address,
+                    resume_handoff_owner);
             if(resume_result == -1)
             {
                 uvdb_end_stopped_operation();
@@ -4363,7 +4425,8 @@ static void uvdb_main_loop(
             }
             out_buf.size--;
             buffer_flush(&out_buf);
-            if(uvdb_kernel_end_stop() < 0)
+            if(uvdb_kernel_end_stop_for_resume(
+                   resume_handoff_owner) < 0)
             {
                 uvdb_fail_stopped_client_owned();
                 return;
@@ -4434,7 +4497,8 @@ packet_complete:
 
 static void uvdb_remote_syscall_stopped(
     KuKernelExceptionContext* ctx,
-    struct uvdb_remote_syscall_request* request)
+    struct uvdb_remote_syscall_request* request,
+    uint32_t resume_handoff_owner)
 {
     request->result = -1;
     char* packet = NULL;
@@ -4467,6 +4531,8 @@ static void uvdb_remote_syscall_stopped(
 #else
         UVDB_FILEIO_CONTEXT_UNSTOPPED
 #endif
+        ,
+        resume_handoff_owner
     );
     if(!uvdb_has_io_failure())
         request->result = (int)ctx->r0;
@@ -4634,9 +4700,17 @@ static void exception_handler(KuKernelExceptionContext* ctx)
 {
     if(!ctx)
         return;
+    __atomic_add_fetch(&uvdb_exception_admissions, 1u,
+                       __ATOMIC_ACQ_REL);
+    SceUID exception_thread = sceKernelGetThreadId();
+    const uint32_t protocol_owner =
+        uvdb_protocol_owner_for_thread(exception_thread);
+    (void)uvdb_resume_handoff_wait(protocol_owner);
     const uint32_t exception_type = ctx->exceptionType;
     int guard_result = uvdb_exception_guard_enter(
         &uvdb_exception_guard, exception_type);
+    __atomic_sub_fetch(&uvdb_exception_admissions, 1u,
+                       __ATOMIC_RELEASE);
     if(guard_result == UVDB_EXCEPTION_GUARD_CLOSED)
     {
         /* Handler slots have already been restored, but a callback dispatched
@@ -4673,7 +4747,6 @@ static void exception_handler(KuKernelExceptionContext* ctx)
     uvdb_safety_gate_inject_nested_fault();
 #endif
 
-    SceUID exception_thread = sceKernelGetThreadId();
     /* A detached, closing, or not-yet-connected debugger has no protocol
      * peer that could claim this stop. Give the captured application handler
      * its one guarded opportunity before touching the exception context. */
@@ -4686,8 +4759,6 @@ static void exception_handler(KuKernelExceptionContext* ctx)
         return;
     }
 
-    const uint32_t protocol_owner =
-        uvdb_protocol_owner_for_thread(exception_thread);
     if(uvdb_protocol_gate_try_acquire(
            &uvdb_protocol_gate, protocol_owner) !=
        UVDB_PROTOCOL_GATE_ACQUIRED)
@@ -4840,16 +4911,18 @@ static void exception_handler(KuKernelExceptionContext* ctx)
     if(syscall_request &&
        syscall_request->owner == exception_thread &&
        synthetic_trap)
-        uvdb_remote_syscall_stopped(ctx, syscall_request);
+        uvdb_remote_syscall_stopped(
+            ctx, syscall_request, protocol_owner);
     else
         uvdb_main_loop(ctx, reported_signal,
-                       UVDB_FILEIO_CONTEXT_REAL_STOP);
+                       UVDB_FILEIO_CONTEXT_REAL_STOP, protocol_owner);
     uvdb_unlock();
 exception_done:
     (void)uvdb_protocol_gate_release(
         &uvdb_protocol_gate, protocol_owner);
     (void)uvdb_exception_guard_leave(
         &uvdb_exception_guard, exception_type, guard_result);
+    uvdb_resume_handoff_finish(protocol_owner);
 }
 
 int uvdb_remote_syscall(const char* name, int nargs, ...)

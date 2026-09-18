@@ -221,6 +221,19 @@ hardware proof that every foreign critical section is exception-safe and has a
 strict upper bound.
 Unlock is owner-checked and cannot clear a different thread's published lock.
 
+One bounded exception is the process-resume handoff. `EndStop` can make an
+application peer runnable before the controller exception callback has
+released its global, protocol, and exception-guard ownership. A peer that
+immediately reaches an already-armed software breakpoint would otherwise look
+like unrelated nested contention and be rejected. Before process resume, the
+controller now publishes its owner token; only a different thread that traps
+during that exact tail waits for the controller to release all three gates.
+Same-thread nested faults and contention outside a published resume tail still
+fail immediately. The integrated fake-kernel test deterministically interleaves
+a UDF callback into this window and verifies stop reporting, no predecessor
+handoff, exact breakpoint restoration on disconnect, and zero leaked gate or
+stop ownership. The bounded wait remains pending Vita timing validation.
+
 Terminal shutdown restores every kernel handler slot before closing callback
 admission. Captured predecessor tokens then remain immutable, the closed guard
 counts any late callback, and a bounded wait drains all callbacks visible in

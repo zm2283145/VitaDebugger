@@ -15,6 +15,7 @@ enum {
     FAKE_SOCKET = 7,
     FAKE_THREAD = 0x44,
     FAKE_OTHER_THREAD = 0x45,
+    FAKE_CODE_ADDRESS = 0x81010000,
 };
 
 static int failures;
@@ -30,6 +31,10 @@ static unsigned char fake_pipe_data[4096];
 static size_t fake_pipe_size;
 static unsigned int fake_delay_calls;
 static int fake_release_guard_on_delay;
+static int fake_complete_resume_handoff_on_delay;
+static uint32_t fake_resume_handoff_owner;
+static uint32_t fake_resume_handoff_guard_type;
+static int fake_resume_handoff_guard_entry;
 static uint32_t fake_guard_type;
 static int fake_guard_entry;
 static int fake_predecessor_calls;
@@ -79,6 +84,7 @@ static int fake_stress_console_attempts;
 static int fake_ku_copy_calls;
 static int fake_ku_copy_fail_call;
 static int fake_ku_copy_fail_from;
+static unsigned char fake_target_code[4];
 #ifdef UVDB_KERNEL_THREAD_CONTROL
 struct fake_stop_kernel {
     SceUID threads[8];
@@ -137,6 +143,19 @@ static void check(int condition, const char* name)
     }
 }
 
+static void* fake_resolve_address(uintptr_t address, size_t size)
+{
+    uintptr_t memory_base = UINT32_C(0x1000);
+    uintptr_t base = (uintptr_t)FAKE_CODE_ADDRESS;
+    if(address >= memory_base && size <= sizeof(fake_target_memory) &&
+       address - memory_base <= sizeof(fake_target_memory) - size)
+        return fake_target_memory + (address - memory_base);
+    if(address >= base && size <= sizeof(fake_target_code) &&
+       address - base <= sizeof(fake_target_code) - size)
+        return fake_target_code + (address - base);
+    return (void*)address;
+}
+
 static void fake_predecessor(KuKernelExceptionContext* context)
 {
     ++fake_predecessor_calls;
@@ -170,6 +189,10 @@ static void reset_core(void)
     fake_framed_send_while_borrowed = 0;
     fake_delay_calls = 0;
     fake_release_guard_on_delay = 0;
+    fake_complete_resume_handoff_on_delay = 0;
+    fake_resume_handoff_owner = 0;
+    fake_resume_handoff_guard_type = 0;
+    fake_resume_handoff_guard_entry = UVDB_EXCEPTION_GUARD_INVALID;
     fake_guard_type = 0;
     fake_guard_entry = UVDB_EXCEPTION_GUARD_INVALID;
     fake_predecessor_calls = 0;
@@ -217,6 +240,7 @@ static void reset_core(void)
     fake_ku_copy_calls = 0;
     fake_ku_copy_fail_call = 0;
     fake_ku_copy_fail_from = 0;
+    memset(fake_target_code, 0, sizeof(fake_target_code));
     memset(&fake_predecessor_context, 0, sizeof(fake_predecessor_context));
     __atomic_store_n(&uvdb_remote_syscall_pending, NULL, __ATOMIC_RELEASE);
     if(!uvdb_memory_write_has_pending())
@@ -255,6 +279,8 @@ static void reset_core(void)
     uvdb_rsp_request_lifetime_init(&uvdb_request_lifetime);
     uvdb_console_transport_init(&uvdb_console_transport);
     uvdb_protocol_gate_init(&uvdb_protocol_gate);
+    __atomic_store_n(&uvdb_resume_handoff_owner, 0u, __ATOMIC_RELEASE);
+    __atomic_store_n(&uvdb_exception_admissions, 0u, __ATOMIC_RELEASE);
     uvdb_exception_guard_init(&uvdb_exception_guard);
     memset(&uvdb_handlers, 0, sizeof(uvdb_handlers));
     memset(uvdb_breakpoints, 0, sizeof(uvdb_breakpoints));
@@ -374,7 +400,8 @@ static void test_real_status_query_ordering(void)
     queue_receive("$?#3f+");
     uvdb_lock();
     KuKernelExceptionContext context = {0};
-    uvdb_main_loop(&context, SIGTRAP, UVDB_FILEIO_CONTEXT_REAL_STOP);
+    uvdb_main_loop(
+        &context, SIGTRAP, UVDB_FILEIO_CONTEXT_REAL_STOP, 0u);
     check(!uvdb_rsp_request_lifetime_is_active(&uvdb_request_lifetime) &&
               !fake_framed_send_while_borrowed,
           "real main loop releases request before response ACK wait");
@@ -853,6 +880,16 @@ static void test_stop_start_exception_quiescence(void)
           "timed-out lifecycle fixture can be drained explicitly");
 
     reset_core();
+    uvdb_protocol_gate_close(&uvdb_protocol_gate);
+    __atomic_store_n(&uvdb_exception_admissions, 1u,
+                     __ATOMIC_RELEASE);
+    check(uvdb_prepare_protocol_restart() < 0 &&
+              fake_delay_calls == 5000u,
+          "restart waits for callbacks admitted before guard entry");
+    __atomic_store_n(&uvdb_exception_admissions, 0u,
+                     __ATOMIC_RELEASE);
+
+    reset_core();
     uvdb_server_thread = -1;
     uvdb_breakpoints[0].patch.state =
         UVDB_BREAKPOINT_PATCH_RESTORE_PENDING;
@@ -1017,7 +1054,8 @@ static void run_disconnect_during_command(
         .SPSR = UINT32_C(0x60000010),
     };
     uvdb_lock();
-    uvdb_main_loop(&context, SIGTRAP, UVDB_FILEIO_CONTEXT_REAL_STOP);
+    uvdb_main_loop(
+        &context, SIGTRAP, UVDB_FILEIO_CONTEXT_REAL_STOP, 0u);
     struct uvdb_rsp_frame response = {0};
     int response_result = fake_transmit_size > 1u
         ? uvdb_rsp_scan_frame(
@@ -1536,6 +1574,217 @@ static void test_unload_fails_without_kernel_callback_fence(void)
           "production unload fails closed without KuBridge callback fence");
 }
 #ifdef UVDB_KERNEL_THREAD_CONTROL
+static void test_detach_resume_publishes_handoff(void)
+{
+    reset_core();
+    fake_thread = FAKE_THREAD;
+    fake_resume_handoff_guard_type =
+        KU_KERNEL_EXCEPTION_TYPE_UNDEFINED_INSTRUCTION;
+    fake_resume_handoff_guard_entry = uvdb_exception_guard_enter(
+        &uvdb_exception_guard, fake_resume_handoff_guard_type);
+    fake_resume_handoff_owner =
+        uvdb_protocol_owner_for_thread(FAKE_THREAD);
+    check(fake_resume_handoff_guard_entry ==
+              UVDB_EXCEPTION_GUARD_PRIMARY &&
+              uvdb_protocol_gate_try_acquire(
+                  &uvdb_protocol_gate,
+                  fake_resume_handoff_owner) ==
+                  UVDB_PROTOCOL_GATE_ACQUIRED,
+          "detach controller owns exception and protocol gates");
+    uvdb_lock();
+    queue_receive("$D#44+");
+    KuKernelExceptionContext controller_context = {
+        .pc = UINT32_C(0x81002000),
+        .SPSR = UINT32_C(0x60000010),
+    };
+    uvdb_main_loop(
+        &controller_context, SIGTRAP,
+        UVDB_FILEIO_CONTEXT_REAL_STOP,
+        fake_resume_handoff_owner);
+    check(__atomic_load_n(&uvdb_resume_handoff_owner,
+                          __ATOMIC_ACQUIRE) ==
+              fake_resume_handoff_owner &&
+              !fake_stop.active && uvdb_socket < 0 &&
+              uvdb_state == UVDB_STATE_IDLE,
+          "detach publishes handoff before resuming and closing");
+
+    uvdb_unlock();
+    check(uvdb_protocol_gate_release(
+              &uvdb_protocol_gate,
+              fake_resume_handoff_owner) == 0 &&
+              uvdb_exception_guard_leave(
+                  &uvdb_exception_guard,
+                  fake_resume_handoff_guard_type,
+                  fake_resume_handoff_guard_entry) == 0,
+          "detach controller releases old callback ownership");
+    uvdb_resume_handoff_finish(fake_resume_handoff_owner);
+    check(!__atomic_load_n(&uvdb_resume_handoff_owner,
+                           __ATOMIC_ACQUIRE),
+          "detach handoff clears after callback release");
+}
+
+static void test_fileio_resume_publishes_handoff(void)
+{
+    const unsigned char original[sizeof(fake_target_code)] =
+        {0x51u, 0x52u, 0x53u, 0x54u};
+
+    reset_core();
+    memcpy(fake_target_code, original, sizeof(original));
+    check(breakpoint_insert_internal(
+              (uintptr_t)FAKE_CODE_ADDRESS,
+              sizeof(fake_target_code), 0) == 0,
+          "File-I/O handoff fixture arms a persistent breakpoint");
+
+    fake_thread = FAKE_THREAD;
+    fake_resume_handoff_guard_type =
+        KU_KERNEL_EXCEPTION_TYPE_UNDEFINED_INSTRUCTION;
+    fake_resume_handoff_guard_entry = uvdb_exception_guard_enter(
+        &uvdb_exception_guard, fake_resume_handoff_guard_type);
+    fake_resume_handoff_owner =
+        uvdb_protocol_owner_for_thread(FAKE_THREAD);
+    check(fake_resume_handoff_guard_entry ==
+              UVDB_EXCEPTION_GUARD_PRIMARY &&
+              uvdb_protocol_gate_try_acquire(
+                  &uvdb_protocol_gate,
+                  fake_resume_handoff_owner) ==
+                  UVDB_PROTOCOL_GATE_ACQUIRED,
+          "File-I/O controller owns exception and protocol gates");
+    uvdb_lock();
+    queue_receive("$F1#77");
+    KuKernelExceptionContext controller_context = {
+        .pc = UINT32_C(0x81002000),
+        .SPSR = UINT32_C(0x60000010),
+    };
+    uvdb_main_loop(
+        &controller_context, SIGTRAP,
+        UVDB_FILEIO_CONTEXT_REAL_STOP,
+        fake_resume_handoff_owner);
+    check(controller_context.r0 == 1u &&
+              __atomic_load_n(&uvdb_resume_handoff_owner,
+                              __ATOMIC_ACQUIRE) ==
+                  fake_resume_handoff_owner &&
+              !fake_stop.active &&
+              breakpoint_active_count() == 1,
+          "real-stop File-I/O resume preserves traps and publishes handoff");
+
+    uvdb_unlock();
+    check(uvdb_protocol_gate_release(
+              &uvdb_protocol_gate,
+              fake_resume_handoff_owner) == 0 &&
+              uvdb_exception_guard_leave(
+                  &uvdb_exception_guard,
+                  fake_resume_handoff_guard_type,
+                  fake_resume_handoff_guard_entry) == 0,
+          "File-I/O controller releases old callback ownership");
+    uvdb_resume_handoff_finish(fake_resume_handoff_owner);
+    check(!__atomic_load_n(&uvdb_resume_handoff_owner,
+                           __ATOMIC_ACQUIRE),
+          "File-I/O resume handoff clears after callback release");
+    uvdb_lock();
+    check(uvdb_kernel_begin_stop() == 0 &&
+              uvdb_begin_stopped_operation() == 0 &&
+              breakpoint_remove_all() == 0 &&
+              uvdb_kernel_end_stop() == 0,
+          "File-I/O fixture reacquires stop and restores its trap");
+    uvdb_end_stopped_operation();
+    uvdb_unlock();
+    check(memcmp(fake_target_code, original, sizeof(original)) == 0,
+          "File-I/O fixture retains and restores exact original bytes");
+}
+
+static void test_resume_handoff_accepts_immediate_breakpoint(void)
+{
+    const unsigned char original[sizeof(fake_target_code)] =
+        {0x11u, 0x22u, 0x33u, 0x44u};
+
+    reset_core();
+    memcpy(fake_target_code, original, sizeof(original));
+    check(breakpoint_insert_internal(
+              (uintptr_t)FAKE_CODE_ADDRESS,
+              sizeof(fake_target_code), 0) == 0 &&
+              memcmp(fake_target_code, original, sizeof(original)) != 0,
+          "resume handoff fixture arms a persistent breakpoint");
+
+    fake_thread = FAKE_THREAD;
+    fake_resume_handoff_guard_type =
+        KU_KERNEL_EXCEPTION_TYPE_UNDEFINED_INSTRUCTION;
+    fake_resume_handoff_guard_entry = uvdb_exception_guard_enter(
+        &uvdb_exception_guard, fake_resume_handoff_guard_type);
+    fake_resume_handoff_owner =
+        uvdb_protocol_owner_for_thread(FAKE_THREAD);
+    check(fake_resume_handoff_guard_entry ==
+              UVDB_EXCEPTION_GUARD_PRIMARY &&
+              uvdb_protocol_gate_try_acquire(
+                  &uvdb_protocol_gate,
+                  fake_resume_handoff_owner) ==
+                  UVDB_PROTOCOL_GATE_ACQUIRED,
+          "prior controller owns exception and protocol gates");
+    uvdb_lock();
+    queue_receive("$c#63");
+    KuKernelExceptionContext controller_context = {
+        .pc = UINT32_C(0x81002000),
+        .SPSR = UINT32_C(0x60000010),
+    };
+    uvdb_main_loop(
+        &controller_context, SIGTRAP,
+        UVDB_FILEIO_CONTEXT_REAL_STOP,
+        fake_resume_handoff_owner);
+    check(__atomic_load_n(&uvdb_resume_handoff_owner,
+                          __ATOMIC_ACQUIRE) ==
+              fake_resume_handoff_owner &&
+              !fake_stop.active &&
+              __atomic_load_n(&uvdb_stop_token,
+                              __ATOMIC_SEQ_CST) == 0,
+          "real continue publishes handoff before resuming peers");
+
+    fake_complete_resume_handoff_on_delay = 1;
+    fake_transmit_size = 0;
+    queue_receive("+");
+    fake_thread = FAKE_OTHER_THREAD;
+    KuKernelExceptionContext context = {
+        .pc = FAKE_CODE_ADDRESS,
+        .SPSR = UINT32_C(0x60000010),
+        .exceptionType = KU_KERNEL_EXCEPTION_TYPE_UNDEFINED_INSTRUCTION,
+    };
+    exception_handler(&context);
+
+    struct uvdb_rsp_frame frame = {0};
+    size_t frame_offset =
+        fake_transmit_size && fake_transmit[0] == '+' ? 1u : 0u;
+    check(fake_delay_calls > 0u,
+          "immediate peer breakpoint waits for resume tail");
+    check(fake_predecessor_calls == 0,
+          "resume-tail breakpoint is not handed to predecessor");
+    check(fake_transmit_size > frame_offset &&
+              uvdb_rsp_scan_frame(
+                  fake_transmit + frame_offset,
+                  fake_transmit_size - frame_offset,
+                  sizeof(fake_transmit), &frame) ==
+                  UVDB_RSP_FRAME_COMPLETE,
+          "resume-tail breakpoint emits a framed stop reply");
+    check(frame.payload_size == strlen("T05thread:45;") &&
+              !memcmp(fake_transmit + frame_offset +
+                          frame.payload_offset,
+                      "T05thread:45;", frame.payload_size),
+          "resume-tail breakpoint reports the selected T05 thread");
+    check(memcmp(fake_target_code, original, sizeof(original)) == 0 &&
+              breakpoint_active_count() == 0 &&
+              uvdb_exception_guard_is_idle(&uvdb_exception_guard) &&
+              uvdb_protocol_gate_is_idle(&uvdb_protocol_gate) &&
+              !__atomic_load_n(&uvdb_exception_admissions,
+                               __ATOMIC_ACQUIRE) &&
+              !__atomic_load_n(&uvdb_lock_owner,
+                               __ATOMIC_ACQUIRE) &&
+              __atomic_load_n(&uvdb_stop_owner,
+                              __ATOMIC_SEQ_CST) ==
+                  UVDB_STOP_OWNER_NONE &&
+              __atomic_load_n(&uvdb_stop_token,
+                              __ATOMIC_SEQ_CST) == 0 &&
+              __atomic_load_n(&uvdb_resume_handoff_owner,
+                              __ATOMIC_ACQUIRE) == 0u,
+          "handoff disconnect cleanup restores bytes and all ownership");
+}
+
 static void test_kernel_stop_failure_stress(void)
 {
     reset_core();
@@ -1707,6 +1956,9 @@ int main(void)
     test_deterministic_multithread_lifecycle_stress();
     test_unload_fails_without_kernel_callback_fence();
 #ifdef UVDB_KERNEL_THREAD_CONTROL
+    test_detach_resume_publishes_handoff();
+    test_fileio_resume_publishes_handoff();
+    test_resume_handoff_accepts_immediate_breakpoint();
     test_kernel_stop_failure_stress();
     test_stale_lease_generation_and_disconnect_cleanup();
 #endif
@@ -1765,6 +2017,21 @@ int sceKernelDelayThread(unsigned int microseconds)
         fake_release_guard_on_delay = 0;
         (void)uvdb_exception_guard_leave(
             &uvdb_exception_guard, fake_guard_type, fake_guard_entry);
+    }
+    if(fake_complete_resume_handoff_on_delay)
+    {
+        fake_complete_resume_handoff_on_delay = 0;
+        SceUID waiting_thread = fake_thread;
+        fake_thread = FAKE_THREAD;
+        uvdb_unlock();
+        (void)uvdb_protocol_gate_release(
+            &uvdb_protocol_gate, fake_resume_handoff_owner);
+        (void)uvdb_exception_guard_leave(
+            &uvdb_exception_guard,
+            fake_resume_handoff_guard_type,
+            fake_resume_handoff_guard_entry);
+        uvdb_resume_handoff_finish(fake_resume_handoff_owner);
+        fake_thread = waiting_thread;
     }
     return 0;
 }
@@ -2017,15 +2284,8 @@ int kuKernelCpuUnrestrictedMemcpy(
        (fake_ku_copy_fail_from &&
         fake_ku_copy_calls >= fake_ku_copy_fail_from))
         return -1;
-    uintptr_t address = (uintptr_t)destination;
-    if(size <= sizeof(fake_target_memory) &&
-       address >= UINT32_C(0x1000) &&
-       address - UINT32_C(0x1000) <=
-           sizeof(fake_target_memory) - size)
-        memcpy(fake_target_memory + address - UINT32_C(0x1000),
-               source, size);
-    else
-        memcpy(destination, source, size);
+    memcpy(fake_resolve_address((uintptr_t)destination, size),
+           fake_resolve_address((uintptr_t)source, size), size);
     return 0;
 }
 void kuKernelFlushCaches(const void* address, size_t size)
@@ -2050,17 +2310,10 @@ int _sceKernelSendMsgPipeVector(
     if(uid < 0 || !pairs || count != 1u || !rest ||
        pairs[0].length > sizeof(fake_pipe_data))
         return -1;
-    uintptr_t address = (uintptr_t)pairs[0].addr;
+    const void* source = fake_resolve_address(
+        pairs[0].addr, pairs[0].length);
     fake_pipe_size = pairs[0].length;
-    if(pairs[0].length <= sizeof(fake_target_memory) &&
-       address >= UINT32_C(0x1000) &&
-       address - UINT32_C(0x1000) <=
-           sizeof(fake_target_memory) - pairs[0].length)
-        memcpy(fake_pipe_data,
-               fake_target_memory + address - UINT32_C(0x1000),
-               fake_pipe_size);
-    else
-        memcpy(fake_pipe_data, (const void*)address, fake_pipe_size);
+    memcpy(fake_pipe_data, source, fake_pipe_size);
     *(size_t*)(uintptr_t)rest[1] = fake_pipe_size;
     return 0;
 }
@@ -2071,15 +2324,9 @@ int _sceKernelReceiveMsgPipeVector(
     if(uid < 0 || !pairs || count != 1u || !rest ||
        pairs[0].length > fake_pipe_size)
         return -1;
-    uintptr_t address = (uintptr_t)pairs[0].addr;
-    if(pairs[0].length <= sizeof(fake_target_memory) &&
-       address >= UINT32_C(0x1000) &&
-       address - UINT32_C(0x1000) <=
-           sizeof(fake_target_memory) - pairs[0].length)
-        memcpy(fake_target_memory + address - UINT32_C(0x1000),
-               fake_pipe_data, pairs[0].length);
-    else
-        memcpy((void*)address, fake_pipe_data, pairs[0].length);
+    void* destination = fake_resolve_address(
+        pairs[0].addr, pairs[0].length);
+    memcpy(destination, fake_pipe_data, pairs[0].length);
     memmove(fake_pipe_data, fake_pipe_data + pairs[0].length,
             fake_pipe_size - pairs[0].length);
     fake_pipe_size -= pairs[0].length;

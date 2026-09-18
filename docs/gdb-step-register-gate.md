@@ -113,3 +113,37 @@ step provider may run. Current VitaSDK declarations do not document a
 scheduler lock or atomic resume-one/resuspend contract, so no production
 provider is wired. Unsupported cases must continue to fail before changing
 memory/registers or acquiring trap/stop ownership.
+
+### ABI v1.14 rerun checkpoint
+
+The first retail 3.65 rerun of the ABI `0x0001000e` candidate on 2026-09-18
+passed plugin/config migration, exact artifact hashing, fixture-byte preflight,
+kernel compatibility, healthy stop-session, zero-breakpoint, and four-thread
+inventory checks. It then failed before the first breakpoint stop on three
+attempts: MI `-break-insert *step_target` completed at `0x81039ab0`,
+`-exec-continue` reported running, and GDB logged
+`warning: Exception condition detected on fd 380`; no `*stopped` arrived within
+15, 60, or diagnostic 30 seconds. The first two abandoned clients recovered
+with zero breakpoints and a healthy stop session. After the third attempt the
+TCP listener accepted but did not answer `qSupported`, so the title was killed.
+No renew/`EndStop` injection was attempted, and the verified prior config/plugin
+were restored.
+
+The deterministic failure exposed a resume-tail ownership race introduced by
+the later nonblocking exception-lifecycle hardening, not a fixture-byte or ABI
+failure. Process `EndStop` can schedule the main thread into `step_target`
+before the server controller's previous exception callback releases the
+protocol and exception gates. The immediate UDF was consequently classified
+as nested contention instead of the next primary stop. The corrected build
+publishes an owner-qualified resume handoff before `EndStop`; only a different
+thread trapping in that bounded tail waits for all old callback ownership to
+retire. A host integration test forces that exact ordering.
+
+For the next hardware attempt, repeat the same preflight and first
+`step_target` continue before running any later phase. Require the first
+`*stopped,reason="breakpoint-hit"` within the normal gate timeout, the expected
+thread and Thumb PC, a responsive `qSupported` after an intentional abandoned
+client, zero breakpoints, and a healthy stop session. Stop and restore the prior
+plugin/config on any timeout, predecessor/default fault behavior, unresponsive
+RSP handshake, residual trap byte, or failed cleanup; do not proceed to
+renew/`EndStop` injection until this regression gate passes.
