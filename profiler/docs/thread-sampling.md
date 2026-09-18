@@ -9,12 +9,15 @@ that arbitrary-thread sampling is ready on Vita hardware.
 `vitaprofiler_sampling.h` provides:
 
 - explicit capability bits for current-thread PC, current-thread stack,
-  foreign-thread PC, foreign-thread stack, and stable foreign identity;
+  foreign-thread PC, foreign-thread stack, bounded stack reads, stable foreign
+  identity, and confident foreign register-context selection;
 - a caller-owned sampler and caller-owned frame array with a hard maximum of
   64 frames;
 - separate current-thread and foreign-thread entry points, with no fallback
   from a foreign request to the calling thread;
 - an exact nonzero identity requirement for every foreign target;
+- a per-capture confidence marker before a foreign provider may publish one
+  selected register context;
 - begin/next/end provider leases, including quarantine and retry when release
   fails;
 - deterministic partial results when a bounded provider read or unwind fails
@@ -31,7 +34,8 @@ Providers must advertise only capabilities they can prove. A current-thread
 provider runs synchronously on the caller and may use an application-owned
 cooperative unwinder. A foreign provider must pin or otherwise retain the exact
 target represented by the supplied identity; a numeric thread ID alone is not
-enough.
+enough. Its identity must include a logical lifetime epoch: thread exit makes
+the identity stale even if the platform can retain a dormant/restartable object.
 
 ```c
 #include <vitaprofiler_sampling.h>
@@ -47,7 +51,8 @@ int start_sampling(const struct vp_sample_provider* app_provider)
         .max_depth = 16,
         .required_capabilities =
             VP_SAMPLE_CAP_CURRENT_THREAD_PC |
-            VP_SAMPLE_CAP_CURRENT_THREAD_STACK,
+            VP_SAMPLE_CAP_CURRENT_THREAD_STACK |
+            VP_SAMPLE_CAP_BOUNDED_STACK_READ,
     };
     return vp_sampler_init(&sampler, app_provider, &config);
 }
@@ -81,11 +86,28 @@ only acceptable foundation for a future adapter:
 
 - `vdKernelGetStatus()` exposes explicit thread-list, thread-control, register,
   and stop-reconciliation capabilities.
+- VitaSDK declares `ksceKernelGetThreadIdList(pid, ...)` and
+  `ksceKernelGetThreadCpuRegisters(thid, SceThreadCpuRegisters*)`; the latter
+  explicitly requires a suspended target. `SceThreadCpuRegisters` is two
+  0x48-byte `SceArmCpuRegisters` entries (0x90 bytes total).
 - `vdKernelBeginStop()` creates an owner-bound 250-5000 ms all-stop lease with
-  watchdog recovery; `vdKernelGetThreadRegisters()` reads only a process-owned
-  thread suspended by that exact lease.
-- The debugger has a host-tested selector for the two raw, state-dependent ARM
-  register banks and rejects banks without a valid user-mode PC and SP.
+  watchdog recovery; `vdKernelGetThreadRegisters()` preserves both raw banks
+  and reads only a process-owned thread suspended by that exact lease.
+- Current VitaSDK headers warn that the historical user/kernel names for those
+  banks are unreliable. The debugger's host-tested user-mode selector is a
+  policy, not proof that one bank may be silently discarded. A future provider
+  must preserve both entries until it can mark the selected context confident,
+  or fail the sample closed.
+- `SceKernelThreadInfo` is 0x80 bytes and exposes candidate `stack` and
+  `stackSize` values, but the header does not guarantee that `stack` is the low
+  allocation address. Those fields cannot become read bounds by assumption.
+- PID-aware module APIs expose segment ranges and ARM EHABI `exidx`/`extab`
+  metadata. They are a basis for a bounded unwinder only after module lifetime,
+  table bounds, and every target-memory read are validated.
+- `ksceGUIDReferObject`, `ksceGUIDReferObjectWithClass`, and
+  `ksceGUIDReleaseObject` can retain an object, but VitaSDK documents no UID
+  generation/non-reuse guarantee. Retention alone is not a stable sampling
+  identity, and logical thread exit must terminate its epoch.
 
 Those facts are not yet a complete profiler provider. The public read-only
 thread ABI does not expose a retained generation-stable identity to user mode,
@@ -97,9 +119,18 @@ and process-exit hardware gate. This increment therefore does **not** call
 addresses, or advertise foreign-thread capability.
 
 A future Vita adapter must reuse the existing stop token, process-owned thread
-inventory, raw-bank selector, and watchdog cleanup. Before it can enable
+inventory, both raw register banks, and watchdog cleanup. It must not invent
+suspend-status constants, resume suspension owned by another subsystem, or
+call the Dev Wiki-reported `ksceKernelBacktrace` while that symbol remains
+absent from current VitaSDK headers. Before it can enable
 foreign PC sampling it must add and hardware-gate an exact target identity
 contract. Before it can enable foreign stack sampling it must additionally
 provide a fault-contained bounded memory reader and validated ARM/Thumb unwind
-rules (or trustworthy unwind metadata). Until then, initialization without an
-audited provider returns `VP_ERROR_UNSUPPORTED`.
+rules, likely using validated EHABI metadata where available. Until then,
+initialization without an audited provider returns `VP_ERROR_UNSUPPORTED`.
+
+The primary declarations for these constraints are in VitaSDK's
+`psp2kern/kernel/threadmgr/thread.h`,
+`psp2kern/kernel/threadmgr/debugger.h`,
+`psp2kern/kernel/sysmem/uid_guid.h`, and
+`psp2kern/kernel/modulemgr.h`.

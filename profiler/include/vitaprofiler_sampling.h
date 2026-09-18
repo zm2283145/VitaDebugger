@@ -15,14 +15,19 @@ extern "C" {
 #define VP_SAMPLE_CAP_FOREIGN_THREAD_PC (UINT32_C(1) << 2)
 #define VP_SAMPLE_CAP_FOREIGN_THREAD_STACK (UINT32_C(1) << 3)
 #define VP_SAMPLE_CAP_STABLE_IDENTITY (UINT32_C(1) << 4)
+#define VP_SAMPLE_CAP_BOUNDED_STACK_READ (UINT32_C(1) << 5)
+#define VP_SAMPLE_CAP_FOREIGN_CONTEXT_CONFIDENCE (UINT32_C(1) << 6)
 #define VP_SAMPLE_CAP_ALL                                                   \
     (VP_SAMPLE_CAP_CURRENT_THREAD_PC | VP_SAMPLE_CAP_CURRENT_THREAD_STACK | \
      VP_SAMPLE_CAP_FOREIGN_THREAD_PC |                                     \
      VP_SAMPLE_CAP_FOREIGN_THREAD_STACK |                                  \
-     VP_SAMPLE_CAP_STABLE_IDENTITY)
+     VP_SAMPLE_CAP_STABLE_IDENTITY | VP_SAMPLE_CAP_BOUNDED_STACK_READ |     \
+     VP_SAMPLE_CAP_FOREIGN_CONTEXT_CONFIDENCE)
 
 #define VP_SAMPLE_FRAME_FLAG_THUMB (UINT32_C(1) << 0)
-#define VP_SAMPLE_FRAME_FLAG_ALL VP_SAMPLE_FRAME_FLAG_THUMB
+#define VP_SAMPLE_FRAME_FLAG_CONTEXT_CONFIDENT (UINT32_C(1) << 1)
+#define VP_SAMPLE_FRAME_FLAG_ALL                                           \
+    (VP_SAMPLE_FRAME_FLAG_THUMB | VP_SAMPLE_FRAME_FLAG_CONTEXT_CONFIDENT)
 
 enum vp_sample_target_kind {
     VP_SAMPLE_TARGET_CURRENT = 1,
@@ -72,12 +77,19 @@ struct vp_sample_frame {
  * memory lifetime needed by next_frame. A failed begin must return no token.
  * For foreign targets, capture must repeat the requested thread_id and exact
  * identity; a mismatch is treated as stale even if begin reported success.
+ * That identity must include a logical lifetime epoch and become stale after
+ * thread exit even if a retained platform object remains restartable.
+ * Foreign capture must also set CONTEXT_CONFIDENT only after resolving any
+ * architecture-specific register-bank ambiguity without relying on historical
+ * bank names.
  * PC-only providers may leave cursor.sp and cursor.frame_pointer zero.
  *
  * next_frame performs provider-specific unwinding. The portable core never
  * assumes an ARM frame layout or dereferences target memory. Return END only
  * for a clean end of stack. A read/unwind error after the initial PC produces
- * a bounded PARTIAL sample.
+ * a bounded PARTIAL sample. A provider advertising a stack capability must
+ * also advertise BOUNDED_STACK_READ and reject every read outside bounds it
+ * has independently validated for that target.
  *
  * end_sample releases the lease without changing target state. It must be
  * retryable after failure. The provider function table must not change while
@@ -150,7 +162,8 @@ struct vp_sampler_status {
 /*
  * required_capabilities is an explicit opt-in and must be a subset of the
  * provider's advertised capabilities. Stack capabilities require their PC
- * counterpart; foreign capabilities additionally require STABLE_IDENTITY.
+ * counterpart and BOUNDED_STACK_READ. Foreign capabilities additionally
+ * require STABLE_IDENTITY and FOREIGN_CONTEXT_CONFIDENCE.
  */
 int vp_sampler_init(struct vp_sampler* sampler,
                     const struct vp_sample_provider* provider,

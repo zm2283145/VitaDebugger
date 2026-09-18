@@ -138,10 +138,26 @@ static void test_validation_and_capabilities(void)
     fake.provider.abi_version = VP_SAMPLE_PROVIDER_ABI_VERSION;
     config.required_capabilities =
         VP_SAMPLE_CAP_FOREIGN_THREAD_PC |
-        VP_SAMPLE_CAP_STABLE_IDENTITY;
+        VP_SAMPLE_CAP_STABLE_IDENTITY |
+        VP_SAMPLE_CAP_FOREIGN_CONTEXT_CONFIDENCE;
     CHECK(vp_sampler_init(&sampler, &fake.provider, &config) ==
               VP_ERROR_UNSUPPORTED,
           "unadvertised foreign sampling is unsupported");
+    fake.provider.capabilities =
+        VP_SAMPLE_CAP_FOREIGN_THREAD_PC |
+        VP_SAMPLE_CAP_STABLE_IDENTITY;
+    config.required_capabilities = fake.provider.capabilities;
+    CHECK(vp_sampler_init(&sampler, &fake.provider, &config) ==
+              VP_ERROR_INVALID_ARGUMENT,
+          "foreign provider must advertise context confidence");
+    fake.provider.capabilities =
+        VP_SAMPLE_CAP_CURRENT_THREAD_PC |
+        VP_SAMPLE_CAP_CURRENT_THREAD_STACK;
+    config.required_capabilities = fake.provider.capabilities;
+    CHECK(vp_sampler_init(&sampler, &fake.provider, &config) ==
+              VP_ERROR_INVALID_ARGUMENT,
+          "stack provider must advertise bounded reads");
+    fake.provider.capabilities = VP_SAMPLE_CAP_CURRENT_THREAD_PC;
     config = make_config(frames, 4u, VP_SAMPLE_MAX_FRAMES + 1u,
                          VP_SAMPLE_CAP_CURRENT_THREAD_PC);
     CHECK(vp_sampler_init(&sampler, &fake.provider, &config) ==
@@ -186,12 +202,14 @@ static void test_depth_bound_and_canaries(void)
     struct vp_sample sample;
     struct fake_provider fake = make_fake(
         VP_SAMPLE_CAP_CURRENT_THREAD_PC |
-            VP_SAMPLE_CAP_CURRENT_THREAD_STACK,
+            VP_SAMPLE_CAP_CURRENT_THREAD_STACK |
+            VP_SAMPLE_CAP_BOUNDED_STACK_READ,
         8u);
     struct vp_sampler_config config = make_config(
         storage.frames, 3u, 3u,
         VP_SAMPLE_CAP_CURRENT_THREAD_PC |
-            VP_SAMPLE_CAP_CURRENT_THREAD_STACK);
+            VP_SAMPLE_CAP_CURRENT_THREAD_STACK |
+            VP_SAMPLE_CAP_BOUNDED_STACK_READ);
     memset(&sampler, 0, sizeof(sampler));
     memset(&storage, 0xa5, sizeof(storage));
     fix_fake_user(&fake);
@@ -225,12 +243,14 @@ static void test_partial_unwind_and_output_stability(void)
     struct vp_sample saved_sample;
     struct fake_provider fake = make_fake(
         VP_SAMPLE_CAP_CURRENT_THREAD_PC |
-            VP_SAMPLE_CAP_CURRENT_THREAD_STACK,
+            VP_SAMPLE_CAP_CURRENT_THREAD_STACK |
+            VP_SAMPLE_CAP_BOUNDED_STACK_READ,
         3u);
     struct vp_sampler_config config = make_config(
         frames, 4u, 4u,
         VP_SAMPLE_CAP_CURRENT_THREAD_PC |
-            VP_SAMPLE_CAP_CURRENT_THREAD_STACK);
+            VP_SAMPLE_CAP_CURRENT_THREAD_STACK |
+            VP_SAMPLE_CAP_BOUNDED_STACK_READ);
     memset(&sampler, 0, sizeof(sampler));
     fix_fake_user(&fake);
     fake.fail_next_call = 2u;
@@ -275,7 +295,9 @@ static void test_foreign_identity_and_release_quarantine(void)
     const uint32_t capabilities =
         VP_SAMPLE_CAP_FOREIGN_THREAD_PC |
         VP_SAMPLE_CAP_FOREIGN_THREAD_STACK |
-        VP_SAMPLE_CAP_STABLE_IDENTITY;
+        VP_SAMPLE_CAP_STABLE_IDENTITY |
+        VP_SAMPLE_CAP_BOUNDED_STACK_READ |
+        VP_SAMPLE_CAP_FOREIGN_CONTEXT_CONFIDENCE;
     struct vp_sampler sampler;
     struct vp_sample_frame frames[4];
     struct vp_sample sample;
@@ -289,11 +311,18 @@ static void test_foreign_identity_and_release_quarantine(void)
     CHECK(vp_sampler_init(&sampler, &fake.provider, &config) ==
               VP_RESULT_OK,
           "foreign sampler requires stable identity capability");
+    CHECK(vp_sampler_sample_foreign(
+              &sampler, 9, UINT64_C(0x1111), &sample) ==
+              VP_ERROR_UNSUPPORTED &&
+              sample.frame_count == 0u && fake.end_calls == 1u,
+          "foreign sample requires confident register context");
+    fake.cursors[0].flags |=
+        VP_SAMPLE_FRAME_FLAG_CONTEXT_CONFIDENT;
     fake.observed_identity = UINT64_C(0x2222);
     CHECK(vp_sampler_sample_foreign(
               &sampler, 9, UINT64_C(0x1111), &sample) ==
               VP_ERROR_STALE_IDENTITY &&
-              sample.frame_count == 0u && fake.end_calls == 1u,
+              sample.frame_count == 0u && fake.end_calls == 2u,
           "stale identity is rejected after releasing provider lease");
 
     fake.observed_identity = 0u;
@@ -338,12 +367,14 @@ static void test_malformed_unwind_progress(void)
     struct vp_sample sample;
     struct fake_provider fake = make_fake(
         VP_SAMPLE_CAP_CURRENT_THREAD_PC |
-            VP_SAMPLE_CAP_CURRENT_THREAD_STACK,
+            VP_SAMPLE_CAP_CURRENT_THREAD_STACK |
+            VP_SAMPLE_CAP_BOUNDED_STACK_READ,
         2u);
     struct vp_sampler_config config = make_config(
         frames, 3u, 3u,
         VP_SAMPLE_CAP_CURRENT_THREAD_PC |
-            VP_SAMPLE_CAP_CURRENT_THREAD_STACK);
+            VP_SAMPLE_CAP_CURRENT_THREAD_STACK |
+            VP_SAMPLE_CAP_BOUNDED_STACK_READ);
     memset(&sampler, 0, sizeof(sampler));
     fix_fake_user(&fake);
     fake.cursors[1].sp = fake.cursors[0].sp;

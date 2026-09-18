@@ -40,8 +40,9 @@ The current increment provides:
   compile-time no-op call-site macros.
 - An opt-in, allocation-free PC/call-stack sampling provider boundary with
   explicit current/foreign capabilities, exact foreign identities, bounded
-  caller-owned frame storage, deterministic partial results, and retained
-  release obligations. No built-in Vita foreign-thread provider is enabled.
+  caller-owned frame storage and reads, per-sample foreign register-context
+  confidence, deterministic partial results, and retained release obligations.
+  No built-in Vita foreign-thread provider is enabled.
 - A guarded PMU provider/lease abstraction plus an injectable owned-reset
   adapter for the public ScePerf semantics. The adapter retains failed cleanup
   obligations. Its direct Vita convenience initializer now fails closed
@@ -322,8 +323,9 @@ ownership/restoration policy, public-ScePerf
 adapter sequencing and cleanup, graphics hook ordering/nesting/bounds, and
 compile-time/runtime disabled behavior.
 The sampling suite additionally checks hard frame/storage bounds, unsupported
-capabilities, deterministic partial unwind results, stale foreign identities,
-release quarantine/retry, malformed frame progress, and stable output.
+capabilities, bounded-read opt-in, foreign register-context confidence,
+deterministic partial unwind results, stale foreign identities, release
+quarantine/retry, malformed frame progress, and stable output.
 The Python suite adds corrupt/truncated capture rejection, fragmented loopback
 TCP reception, byte bounds, named zone analysis, and graphics event
 JSON/Perfetto output.

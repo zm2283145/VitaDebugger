@@ -26,9 +26,16 @@ static int vp_capabilities_valid(uint32_t capabilities)
     if ((capabilities & VP_SAMPLE_CAP_FOREIGN_THREAD_STACK) != 0u &&
         (capabilities & VP_SAMPLE_CAP_FOREIGN_THREAD_PC) == 0u)
         return 0;
+    if ((capabilities & (VP_SAMPLE_CAP_CURRENT_THREAD_STACK |
+                         VP_SAMPLE_CAP_FOREIGN_THREAD_STACK)) != 0u &&
+        (capabilities & VP_SAMPLE_CAP_BOUNDED_STACK_READ) == 0u)
+        return 0;
     if ((capabilities & (VP_SAMPLE_CAP_FOREIGN_THREAD_PC |
                          VP_SAMPLE_CAP_FOREIGN_THREAD_STACK)) != 0u &&
-        (capabilities & VP_SAMPLE_CAP_STABLE_IDENTITY) == 0u)
+        (capabilities & (VP_SAMPLE_CAP_STABLE_IDENTITY |
+                         VP_SAMPLE_CAP_FOREIGN_CONTEXT_CONFIDENCE)) !=
+            (VP_SAMPLE_CAP_STABLE_IDENTITY |
+             VP_SAMPLE_CAP_FOREIGN_CONTEXT_CONFIDENCE))
         return 0;
     return 1;
 }
@@ -131,19 +138,21 @@ static int vp_sampler_sample(struct vp_sampler* sampler,
 
     sampler->active_token = lease_token;
     sampler->active = 1u;
+    result = VP_RESULT_OK;
     if (!vp_cursor_valid(&capture.cursor, stack_requested) ||
-        capture.thread_id <= 0 ||
-        capture.reserved != 0u ||
+        capture.thread_id <= 0 || capture.reserved != 0u ||
         (target->kind == VP_SAMPLE_TARGET_CURRENT &&
-         target->thread_id != 0) ||
-        (target->kind == VP_SAMPLE_TARGET_FOREIGN &&
-         (capture.thread_id != target->thread_id ||
-          capture.identity != target->identity))) {
-        result = target->kind == VP_SAMPLE_TARGET_FOREIGN &&
-                         (capture.thread_id != target->thread_id ||
-                          capture.identity != target->identity)
-                     ? VP_ERROR_STALE_IDENTITY
-                     : VP_ERROR_MALFORMED;
+         target->thread_id != 0))
+        result = VP_ERROR_MALFORMED;
+    else if (target->kind == VP_SAMPLE_TARGET_FOREIGN &&
+             (capture.thread_id != target->thread_id ||
+              capture.identity != target->identity))
+        result = VP_ERROR_STALE_IDENTITY;
+    else if (target->kind == VP_SAMPLE_TARGET_FOREIGN &&
+             (capture.cursor.flags &
+              VP_SAMPLE_FRAME_FLAG_CONTEXT_CONFIDENT) == 0u)
+        result = VP_ERROR_UNSUPPORTED;
+    if (result != VP_RESULT_OK) {
         vp_sample_reset(sampler, sample);
         if (vp_sampler_release_active(sampler) != VP_RESULT_OK) {
             sample->stop_reason = VP_SAMPLE_STOP_RELEASE_ERROR;
