@@ -124,6 +124,26 @@ at 8000 ms, keyed by opaque peer binding plus claimed host key ID. Successful
 authentication clears that key's failure state. The model holds at most 16
 outstanding challenges and eight authenticated sessions.
 
+The Vita listener implementation is deliberately stricter because it
+serializes one connection at a time. It binds one exact private IPv4 address,
+accepts peers only from one configured private subnet, and derives the signed
+transport binding from the peer IPv4 address plus a per-generation connection
+counter. TCP `18195` is the default; builds and runtime configuration accept
+only `18000` through `18999`. The handshake deadline is configured once from
+100 through 30000 milliseconds and is never extended by partial I/O.
+
+The listener stores 128 request nonces for its current service generation and
+32 `(peer IPv4, claimed host key ID)` backoff records. Neither table evicts an
+entry. Replay-table exhaustion and failure-table exhaustion reject new work
+until a controlled restart. Restart succeeds only after the key store durably
+advances both its revision floor and service generation, so a proof from the
+previous listener instance cannot authenticate.
+
+This first listener sends the signed `RESULT` and closes the connection. It
+does not accept a fifth record and does not expose a target-selection or
+privileged-operation dispatch. A successful result proves only the
+authentication exchange; it does not attach to anything.
+
 Future privileged operations, if separately approved, must use a fresh
 operation nonce and bind the exact service/session/key generations and target
 launch generation. The existing canonical control transcript models that
@@ -135,8 +155,9 @@ path, address, or entry point.
 
 Each handshake uses one absolute 0.1-to-30-second deadline; partial reads do not
 reset it. Host close performs socket shutdown and close and drops its session.
-The authority tracks accepted handshake sockets. Shutdown first rejects new
-work, clears pending challenges and authenticated sessions, then closes every
-tracked socket so blocked reads terminate. Repeated shutdown is idempotent.
-A production listener must serialize authority state transitions and call the
-same shutdown path before unloading.
+The Vita listener atomically registers its listening and accepted descriptors.
+Shutdown first rejects new work, then shuts down and closes both registered
+sockets so blocked accept/read/write calls terminate. A failed descriptor
+close remains a cleanup obligation and is retried before restart. Repeated
+shutdown is idempotent, and the worker must be joined and deleted before
+network teardown or code unload.

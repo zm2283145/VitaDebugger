@@ -29,6 +29,8 @@ uvdb-symbols.gdb.state.json
 /test-console-queue
 /test-console-transport
 /attach/test-attach-broker
+/attach/dist/
+/attach/vita-auth-test/build*/
 /kernel/dipsw-read-probe/test-record
 /kernel/dipsw-set-restore-probe/test-record
 /kernel/dipsw-dbgvcr-probe/test-record

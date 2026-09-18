@@ -154,8 +154,12 @@ not an advertised debugger capability.
 Authentication-only protocol version 2 now closes the host-side framing,
 mutual-peer, allowlist, nonce, generation, replay, backoff, and key-lifecycle
 model. Its C boundary reuses vendored Monocypher for Ed25519 verification.
-There is still no resident listener or reviewed persistent Vita key store; the
-device adapter is explicitly unavailable. See
+Layer 2 adds a serialized authentication-only listener, a foreground safe VPK,
+and a bounded persistent-store implementation. The Vita store adapter remains
+fail-closed until hardware-specific callbacks prove seed confidentiality and
+maintain an independent durable rollback floor; public `sceIo` APIs do not
+establish either property. The default VPK therefore exits before networking.
+No resident SceShell module is shipped. See
 [`protocol-v2-auth.md`](protocol-v2-auth.md),
 [`auth-provisioning.md`](auth-provisioning.md), and
 [`hardware-auth-gate.md`](hardware-auth-gate.md). These additions do not change

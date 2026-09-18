@@ -5,9 +5,11 @@ VitaDebugger to a Vita application that was not linked with `libuvdb.a`.
 
 It does **not** attach to a process today. It does not load a module, suspend a
 process, write memory, or start GDB. It now contains an allocation-free C broker
-core that cross-compiles for Vita, while its platform identity adapter remains
-fail-closed and no resident listener is shipped. This fixes the discovery and
-identity boundary before any privileged loader operation is added:
+core, an authentication-only protocol-v2 listener/lifecycle implementation,
+and a persistent key-store implementation. The Vita store remains fail-closed
+until hardware proves private-path confidentiality and an independent rollback
+floor. This fixes the identity and authentication boundary before any
+privileged loader operation is added:
 
 - a strict versioned wire format;
 - an exact-title discovery request with no host-selected PID;
@@ -72,24 +74,27 @@ cover wrong-peer/session requests, expiration, replay, partial I/O, oversized
 frames, identity changes, and shutdown.
 
 The broker directory also contains a separate authenticated control-plane
-model plus an authentication-only protocol version 2 foundation. It owns challenge/authentication state,
-operation replay protection, exact target-generation binding, one fixed
-debugger-module slot, privileged-allocated lease grants, independently
-authorized cleanup capabilities, and reverse-order leased rollback. It has no wire command,
-TCP listener, Vita lifecycle adapter, or module path. Version 2 currently
-defines only fixed `HELLO`, `CHALLENGE`, `PROOF`, and `RESULT` records. Its host
-model uses the repository's Ed25519 provider, and the C verifier reuses vendored
-Monocypher. The device key-store adapter remains deliberately unavailable.
-Its lifecycle callbacks are exercised only by host fakes. Protocol v1 remains
-read-only. See [the control model](docs/control-model.md).
+model plus an authentication-only protocol version 2 implementation. It owns
+challenge/authentication state, operation replay protection, exact
+target-generation binding, one fixed debugger-module slot,
+privileged-allocated lease grants, independently authorized cleanup
+capabilities, and reverse-order leased rollback. The version-2 listener has no
+target or control wire command and no module path. Version 2 currently defines
+only fixed `HELLO`, `CHALLENGE`, `PROOF`, and `RESULT` records. Its host model
+uses the repository's Ed25519 provider, and the C verifier reuses vendored
+Monocypher. The serialized Vita listener owns one worker and tracks its listen
+and accepted sockets for cancellation. The device key-store adapter requires
+external hardware assurance callbacks and otherwise refuses to open. Protocol
+v1 remains read-only. See [the control model](docs/control-model.md).
 
-The ARM static-library target remains a compile-only gate. The current
-privileged-lease contract revision is host-tested and passes its serialized
-VitaSDK rebuild. This is still not a running Vita service: no
-socket listener or shell-resident module is built, and the current Vita
-inventory adapter returns unavailable because public user APIs cannot provide
-the trusted foreign main-module identity required to issue a ticket. See
-[the broker boundary](broker/README.md).
+The ARM static-library target remains a compile-only gate. A safe disposable
+`VDAT00001` VPK now links the authentication listener and storage adapter, but
+its default build exits before networking because the required hardware storage
+proofs are absent. It is not shell-resident. The protocol-v1 Vita inventory
+adapter remains unavailable because public user APIs cannot provide the trusted
+foreign main-module identity required to issue a ticket. See
+[the broker boundary](broker/README.md) and
+[the hardware gate](docs/hardware-auth-gate.md).
 
 Run all broker and host-client tests from the repository root:
 
@@ -97,7 +102,7 @@ Run all broker and host-client tests from the repository root:
 make host-test-attach
 ```
 
-The standalone launcher exposes only `status` and `discover`:
+The protocol-v1 launcher exposes only `status` and `discover`:
 
 ```powershell
 py -3 attach/tools/vdattach.py --help
@@ -110,12 +115,25 @@ py -3 attach/tools/vdattach.py discover `
 `192.0.2.10` is a documentation-only address. There is intentionally no
 default broker port: a developer must select the endpoint explicitly. These
 commands cannot work against the current VitaDebugger installation because no
-resident listener or trusted Vita identity provider exists yet. They are usable
-against the bounded fake broker in the tests and will become the compatibility
-gate for a future service.
+resident v1 listener or trusted Vita identity provider exists yet. They are
+usable against the bounded fake broker in the tests and will become the
+compatibility gate for a future service.
 
 The discovery command releases its opaque ticket before printing. It never
 prints the ticket, accepts a raw PID, or sends a module path.
+
+Protocol v2 has separate authentication-only tools:
+
+```powershell
+py -3 attach/tools/vdattach_auth_provision.py --help
+py -3 attach/tools/vdattach_auth.py `
+  --host 10.1.1.217 --port 18195 `
+  --key-store .\private-host-key-store --json
+.\attach\tools\build_auth_gate.ps1
+```
+
+The build publishes a safe `VDAT00001` VPK and hash/source manifest under
+`attach/dist/auth-gate/`. Its transport is signed plaintext with no encryption.
 
 ## Layout
 
@@ -128,6 +146,9 @@ prints the ticket, accepts a raw PID, or sends a module path.
   signing transcripts for cross-language golden-vector verification.
 - `host/vdattach/auth_protocol.py`, `auth.py`, and `auth_keys.py` implement the
   bounded protocol-v2 authentication model and atomic host key store.
+- `host/vdattach/auth_cli.py` and `auth_provision.py` provide the separate
+  authentication and public-only provisioning tools.
+- `vita-auth-test/` builds the safe authentication-only gate VPK.
 - `tools/vdattach.py` runs the package without installation.
 - `tests/` covers canonical encoding, frame limits, capability/ABI gates,
   session binding, exact-title discovery, and ticket release.
@@ -148,10 +169,10 @@ prints the ticket, accepts a raw PID, or sends a module path.
 | Ticket release and connection state machine | Implemented and host-tested |
 | Allocation-free Vita broker state machine | Implemented and host-tested; current control contract passes its ARM rebuild |
 | Authenticated listener-facing control state | Host-tested model; no TCP/crypto adapter |
-| Resident Vita listener/lifecycle wrapper | Not implemented or installed |
+| Serialized Vita authentication listener/lifecycle wrapper | Implemented and host-tested; disposable VPK builds; hardware run blocked on storage proofs |
 | Trusted Vita foreign-target identity adapter | Fail-closed stub; provider required |
 | Read-only kernel target-identity/ticket export | Not implemented |
-| Broker authentication/pairing crypto | Host model and Monocypher verifier implemented; Vita persistent key storage and resident listener unavailable/fail closed |
+| Broker authentication/pairing crypto | Host model, Monocypher, persistent store, listener, and public-only provisioning implemented; Vita store remains fail-closed without hardware assurances |
 | Fixed debugger-module loader request model | Implemented and host-tested; privileged backend owns lease grant, no path input or Vita backend |
 | Foreign-process `.suprx` loader export | Not implemented or hardware-tested |
 | Injected debugger `.suprx` | Not implemented |

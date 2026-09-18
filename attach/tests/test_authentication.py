@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import contextlib
+import io
 import os
 import re
 import socket
+import struct
 import sys
 import tempfile
 import threading
@@ -23,6 +26,10 @@ from vdattach.auth import (  # noqa: E402
     receive_auth_record,
     serve_authentication,
 )
+from vdattach.auth_cli import (  # noqa: E402
+    DEFAULT_PORT as AUTH_DEFAULT_PORT,
+    build_parser as build_auth_parser,
+)
 from vdattach.auth_keys import JsonKeyStore, UnavailableKeyStore  # noqa: E402
 from vdattach.auth_protocol import (  # noqa: E402
     MAX_AUTH_FRAME_SIZE,
@@ -39,6 +46,7 @@ from vdattach.auth_protocol import (  # noqa: E402
     frame_record,
     parse_frame_prefix,
 )
+from vdattach.auth_provision import import_receipt, write_bundle  # noqa: E402
 from vdattach.cli import build_parser  # noqa: E402
 from vdattach.errors import (  # noqa: E402
     AuthenticationError,
@@ -128,6 +136,41 @@ def signed_proof(
 
 
 class AuthenticationProtocolTests(unittest.TestCase):
+    def test_authentication_cli_is_private_lan_and_auth_only(self):
+        parser = build_auth_parser()
+        args = parser.parse_args(
+            ["--host", "10.1.1.217", "--key-store", "keys"]
+        )
+        self.assertEqual(args.port, AUTH_DEFAULT_PORT)
+        self.assertEqual(args.port, 18195)
+        with contextlib.redirect_stderr(io.StringIO()):
+            for rejected in (
+                "0.0.0.0",
+                "8.8.8.8",
+                "10.1.1.217 ",
+                "127.0.0.1",
+                "169.254.1.1",
+                "192.0.2.1",
+                "224.0.0.1",
+                "2001:db8::1",
+            ):
+                with self.subTest(rejected=rejected):
+                    with self.assertRaises(SystemExit):
+                        parser.parse_args(
+                            ["--host", rejected, "--key-store", "keys"]
+                        )
+            with self.assertRaises(SystemExit):
+                parser.parse_args(
+                    [
+                        "--host",
+                        "10.1.1.217",
+                        "--port",
+                        "17999",
+                        "--key-store",
+                        "keys",
+                    ]
+                )
+
     def test_c_and_python_wire_contract_constants_match(self):
         header = (
             ATTACH_ROOT
@@ -598,6 +641,58 @@ class AuthenticationClientTests(unittest.TestCase):
 
 
 class KeyManagementTests(unittest.TestCase):
+    def test_public_only_vita_provisioning_bundle_and_receipt(self):
+        pair = StorePair()
+        try:
+            root = Path(pair.temporary.name)
+            bundle = root / "auth-provision-v1.bin"
+            details = write_bundle(
+                pair.host,
+                bundle,
+                device_key_id=0x2122232425262728,
+            )
+            data = bundle.read_bytes()
+            self.assertEqual(len(data), 72)
+            self.assertEqual(data[:8], b"VDAP\x00\x00\x00\x01")
+            self.assertFalse(details["contains_private_material"])
+            self.assertNotIn(
+                pair.host.local_identity().private_pem,
+                data,
+            )
+            with self.assertRaisesRegex(
+                ProtocolError, "generation must be exactly 1"
+            ):
+                write_bundle(
+                    pair.host,
+                    root / "bad-generation.bin",
+                    device_key_id=0x3132333435363738,
+                    device_generation=2,
+                )
+
+            device = pair.server.local_identity()
+            raw = pair.server._backend.public_raw(device.public_pem)
+            receipt = root / "auth-device-public-v1.bin"
+            receipt.write_bytes(
+                struct.pack(
+                    ">4sIQQ32s",
+                    b"VDAR",
+                    1,
+                    device.key_id + 1,
+                    device.generation,
+                    raw,
+                )
+            )
+            imported = import_receipt(pair.host, receipt)
+            self.assertFalse(imported["contains_private_material"])
+            self.assertEqual(
+                pair.host.trusted_peer(
+                    device.key_id + 1, device.generation
+                ).generation,
+                device.generation,
+            )
+        finally:
+            pair.close()
+
     def test_provision_rotation_revocation_and_tamper_fail_closed(self):
         pair = StorePair()
         try:

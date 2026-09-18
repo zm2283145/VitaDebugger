@@ -1,17 +1,25 @@
 # Vita attach broker cores
 
-This directory contains two allocation-free state machines. The compile-only
-target packages them into `libvitadebug_attach_broker.a`; the current control
-contract passes its serialized VitaSDK rebuild. That archive is **not** a
-resident Vita plugin, listener, VPK, crypto implementation, privileged loader,
-or external debugger injector.
+This directory contains allocation-free broker, control, authentication
+listener, and persistent-store state machines. The compile target packages
+them and their Vita adapters into `libvitadebug_attach_broker.a`.
 
-It also contains the protocol-v2 authentication storage/crypto boundary.
+The protocol-v2 authentication storage/crypto boundary
 `vitadebug_attach_auth.c` validates exact active key records, signs only through
 an injected private-key callback, verifies Ed25519 with the repository's
 vendored Monocypher, and provides constant-time fixed-value comparison.
-`vitadebug_attach_auth_vita.c` deliberately supplies no storage callbacks, so
-device authentication remains unavailable until persistent storage is reviewed.
+The persistent store records local identity, allowlist/revocation state,
+revision, and service generation without dynamic allocation. Its Vita adapter
+uses fixed `ur0:` paths but remains fail-closed until external hardware
+callbacks prove seed confidentiality and maintain an independent durable
+rollback floor.
+
+`vitadebug_attach_auth_listener.c` implements only the four protocol-v2
+authentication records. It uses one absolute deadline, exact frame sizes,
+private-subnet source policy, fixed replay/backoff tables, and one serialized
+connection. `vitadebug_attach_auth_listener_vita.c` owns the worker and
+registered sockets; shutdown cancels blocked I/O and requires the worker to be
+joined before network teardown.
 
 `vitadebug_attach_broker.c` remains the protocol-v1 read-only discovery core.
 `vitadebug_attach_control.c` is a host-tested lifecycle and authorization model
@@ -29,8 +37,9 @@ The core implements only:
 - request-ID replay rejection; and
 - ticket/session invalidation during connection close or broker shutdown.
 
-There is no PID request, memory/register access, process stop/resume, module
-path, module load, injection, or kernel call in this component.
+There is no PID request, target selection, memory/register access, process
+stop/resume, module path, module load, injection, kernel-loader call, or GDB
+attach in these components.
 
 ## Authenticated control model
 
@@ -84,7 +93,7 @@ title, reject system targets, and return a trusted snapshot containing the main
 module ID, fingerprint, and a nonzero target generation. The broker calls the
 same provider at release and compares every field.
 
-The current `vitadebug_attach_vita.c` adapter returns
+The protocol-v1 `vitadebug_attach_vita.c` adapter returns
 `VD_ATTACH_INVENTORY_UNAVAILABLE`. Public user-mode AppMgr lookup can perform
 the preliminary title/PID pair, but it cannot independently supply the trusted
 foreign main-module identity required by protocol v1. Integrators must report
@@ -92,11 +101,9 @@ the service as unavailable until a separately reviewed read-only identity
 provider is available. The broker never fabricates a fingerprint or issues a
 weaker ticket.
 
-The core does not provide internal locks. A service must serialize calls for a
-broker instance, and its transport callbacks must honor the supplied absolute
-deadline. Shutdown invalidates all in-memory state immediately; a listener is
-responsible for cancelling/closing any blocked transport so its callback can
-return by that deadline.
+The v2 listener serializes calls for its authentication authority and its
+transport callbacks honor one absolute deadline. Shutdown closes the listening
+and active descriptors before the Vita runtime joins its sole worker.
 
 Each connection accepts at most 64 unique request IDs (including `HELLO`). A
 client should reconnect before that fixed replay table is exhausted. Closing a
@@ -130,4 +137,6 @@ journal-capability enforcement, reinitialization refusal, and idempotent
 shutdown recovery retries.
 
 `make vita-lib` is a compile gate only. It creates a static ARM library; it
-does not install, enable, or run anything on a Vita.
+does not install, enable, or run anything on a Vita. The separate
+`vita-auth-test` VPK links the same sources and defaults to runtime fail-closed
+until the hardware storage proofs exist.

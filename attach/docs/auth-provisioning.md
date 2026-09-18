@@ -62,18 +62,50 @@ key must come from one persistent revision. Rotation must durably activate the
 replacement before retiring the old key. Revocation must survive reboot before
 returning success.
 
-No reviewed Vita implementation exists yet.
-`vd_attach_auth_vita_unavailable_storage()` returns a vtable with no callbacks;
-validation and every authentication attempt therefore fail closed. This layer
-does not prescribe a device path because choosing permissions, backup,
-anti-rollback behavior, and deletion semantics requires hardware review.
+`vitadebug_attach_auth_store.c` now implements the bounded device-store format
+behind injected file and rollback operations. The format has one active local
+seed/public identity, up to 16 exact peer ID/generation records, explicit
+active/revoked status, a monotonically increasing state revision, and a
+monotonically increasing service generation. It rejects links, non-regular
+files, short/trailing/oversized records, unsupported flags or schema, duplicate
+peers, stale revisions, public/seed mismatches, and a restored service
+generation. It never allocates from file-controlled lengths.
 
-The eventual device implementation must protect the 32-byte Ed25519 seed,
-prevent SceShell peers from reading or replacing it, authenticate state
-revisions against rollback, and zero temporary secret buffers with
-`crypto_wipe`. Signature verification already uses the vendored Monocypher
-`crypto_ed25519_check`; fixed authentication-value comparisons use the
-provided constant-time helper.
+Updates write the complete next revision to a fixed temporary file, sync the
+file, rename it over the fixed store, sync the parent, re-read and verify the
+committed bytes, then advance the independent rollback floor. Rotation makes
+the new seed active in that single revision; interruption before commit leaves
+the old complete revision active. A floor advancement failure is an error even
+if the file rename completed: the store cannot be used again until reload
+proves the committed revision is not stale.
+
+The Vita adapter fixes the paths:
+
+```text
+ur0:data/VitaDebugger/private/attach-auth.store
+ur0:data/VitaDebugger/private/attach-auth.store.new
+```
+
+Vita public `sceIo` APIs provide bounded I/O, regular-file metadata, file sync,
+rename, and parent-directory sync attempts. They do **not** prove that another
+SceShell-resident component cannot read/replace the seed, that links cannot be
+substituted between checks, that rename is power-loss atomic, or that an
+attacker cannot roll back both files. Therefore
+`vd_attach_auth_store_vita_init()` requires three reviewed hardware callbacks:
+`prove_private_storage`, `load_floor`, and `advance_floor`. Missing or failing
+callbacks keep initialization unavailable and the listener port closed.
+
+The bound `VdAttachAuthKeyStorage` can provision an unprovisioned store. The
+device seed must be generated locally from `sceKernelGetRandomNumber`; the
+caller supplies the matching derived public key and wipes the seed after the
+transaction. Peer provisioning accepts only the host public key plus its exact
+ID/generation. There is no network seed import, private-key export, unsigned
+mode, or fallback store.
+
+`vd_attach_auth_store_uninstall()` is the explicit destructive operation. It
+removes the committed and temporary store, syncs the parent directory, and
+advances the rollback floor so restoring a removed file cannot reactivate the
+old identity. Normal listener stop never calls uninstall.
 
 ## Revocation response
 
