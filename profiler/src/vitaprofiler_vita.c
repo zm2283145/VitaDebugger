@@ -44,6 +44,13 @@ static int vp_merge_record_result(int aggregate, int result)
     return aggregate;
 }
 
+static int64_t vp_raw_u64_as_i64(uint64_t value)
+{
+    int64_t result;
+    memcpy(&result, &value, sizeof(result));
+    return result;
+}
+
 int vp_vita_init(struct vp_context* context, struct vp_slot* slots,
                  uint32_t capacity)
 {
@@ -173,7 +180,7 @@ int vp_vita_record_thread(struct vp_context* context, uint32_t thread_id,
                               captured.thread_id, VP_EVENT_THREAD_SAMPLE,
                               VP_EVENT_FLAG_RAW_VALUE,
                               VP_METRIC_THREAD_RUN_CLOCKS,
-                              (int64_t)captured.run_clocks);
+                              vp_raw_u64_as_i64(captured.run_clocks));
     aggregate = vp_merge_record_result(aggregate, result);
     if (aggregate < 0)
         return aggregate;

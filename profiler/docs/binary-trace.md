@@ -96,6 +96,8 @@ python tools/vitaprofiler_trace.py receive game.vptrace \
 python tools/vitaprofiler_trace.py view game.vptrace --events 20
 python tools/vitaprofiler_trace.py json game.vptrace game.decoded.json
 python tools/vitaprofiler_trace.py chrome game.vptrace game.perfetto.json
+python tools/vitaprofiler_trace.py runclocks game.vptrace \
+  experiment.json game.runclocks.json
 ```
 
 `receive` accepts one IPv4 TCP sender, reads through clean EOF, enforces a
@@ -121,6 +123,17 @@ The `json` output is a complete decoded event listing. The `chrome` output uses
 the Chrome Trace Event format and can be opened in Perfetto or Chrome's trace
 viewer. Matched zone records become complete-duration events, counters and
 Vita snapshots become counter tracks, and frames become global instants.
+Both exports identify `SceKernelThreadInfo.runClocks` as a raw counter with an
+unknown unit. Decoded JSON includes unsigned raw values, generation-aware raw
+deltas, and discontinuity status. Perfetto uses explicit
+`raw_unknown_unit` tracks and never presents the metric as CPU utilization.
+
+The `runclocks` command creates the stricter, reproducible characterization
+artifact described in
+[`run-clocks-characterization.md`](run-clocks-characterization.md). It binds
+the source capture hash to bounded experiment metadata, explicit thread
+generations, raw values, raw deltas, and the wrap/reset policy. It does not
+alter or reinterpret the captured wire data.
 
 For an interactive desktop workflow using these same APIs, launch:
 

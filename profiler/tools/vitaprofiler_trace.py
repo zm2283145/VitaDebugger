@@ -6,6 +6,8 @@ from __future__ import annotations
 import argparse
 import collections
 import dataclasses
+import datetime
+import hashlib
 import ipaddress
 import json
 import math
@@ -62,6 +64,14 @@ DEFAULT_ACCEPT_TIMEOUT = 30.0
 DEFAULT_IDLE_TIMEOUT = 5.0
 DEFAULT_CAPTURE_TIMEOUT = 300.0
 RECEIVER_CANCEL_POLL_SECONDS = 0.1
+RUN_CLOCKS_METRIC_ID = 0xFFF00005
+RUN_CLOCKS_SOURCE = "SceKernelThreadInfo.runClocks"
+RUN_CLOCKS_UNIT = "unknown"
+RUN_CLOCKS_EXPERIMENT_FORMAT = "vitaprofiler-runclocks-experiment-v1"
+RUN_CLOCKS_REPORT_FORMAT = "vitaprofiler-runclocks-characterization-v1"
+MAX_EXPERIMENT_METADATA_BYTES = 64 * 1024
+MAX_EXPERIMENT_THREADS = 64
+MAX_METADATA_TEXT = 1024
 
 BUILTIN_NAMES = {
     0xFFF00001: "vita.memory.free_user_bytes",
@@ -185,6 +195,23 @@ class ZoneAnalysis:
     unmatched_ends: tuple[Event, ...]
     duplicate_begins: tuple[Event, ...]
     negative_durations: tuple[Event, ...]
+
+
+@dataclasses.dataclass(frozen=True)
+class ThreadGeneration:
+    thread_id: int
+    generation: int
+    label: str
+    first_event_index: int
+    last_event_index: int
+
+
+@dataclasses.dataclass(frozen=True)
+class RunClocksExperiment:
+    metadata: dict[str, object]
+    counter_bits: int | None
+    max_wrap_delta_raw: int | None
+    threads: tuple[ThreadGeneration, ...]
 
 
 _UNSAFE_BIDI_CLASSES = frozenset({
@@ -390,6 +417,163 @@ def analyze_zones(capture: TraceCapture) -> ZoneAnalysis:
                         tuple(negative_durations))
 
 
+def _run_clocks_raw_value(event: Event) -> int:
+    return event.value & 0xFFFFFFFFFFFFFFFF
+
+
+def _thread_generation_for_event(
+        event: Event,
+        threads: tuple[ThreadGeneration, ...],
+        ) -> ThreadGeneration | None:
+    matches = [
+        item for item in threads
+        if (item.thread_id == event.thread_id and
+            item.first_event_index <= event.index <= item.last_event_index)
+    ]
+    if len(matches) > 1:
+        raise TraceFormatError(
+            f"event {event.index} matches overlapping thread generations")
+    return matches[0] if matches else None
+
+
+def analyze_run_clocks(
+        capture: TraceCapture,
+        experiment: RunClocksExperiment | None = None,
+        ) -> dict[str, object]:
+    """Preserve runClocks as an unknown-unit raw counter and derive safe deltas."""
+    counter_bits = experiment.counter_bits if experiment else None
+    max_wrap_delta = experiment.max_wrap_delta_raw if experiment else None
+    threads = experiment.threads if experiment else ()
+    explicit_state: dict[
+        tuple[int, int], tuple[int, int, int, int, int]] = {}
+    inferred_state: dict[int, tuple[int, int, int, int, int]] = {}
+    samples: list[dict[str, object]] = []
+    status_counts: collections.Counter[str] = collections.Counter()
+    missing_raw_flags = 0
+
+    for event in capture.events:
+        if event.name_id != RUN_CLOCKS_METRIC_ID:
+            continue
+        if event.event_type != EVENT_THREAD_SAMPLE:
+            raise TraceFormatError(
+                f"runClocks event {event.index} is not a thread sample")
+        if not event.flags & EVENT_FLAG_RAW_VALUE:
+            missing_raw_flags += 1
+
+        raw_value = _run_clocks_raw_value(event)
+        if counter_bits is not None and raw_value >= (1 << counter_bits):
+            raise TraceFormatError(
+                f"runClocks event {event.index} does not fit the declared "
+                f"{counter_bits}-bit counter")
+        declared = _thread_generation_for_event(event, threads)
+        if declared is not None:
+            generation = declared.generation
+            label = declared.label
+            identity_source = "experiment_metadata"
+            state_key = (event.thread_id, generation)
+            previous = explicit_state.get(state_key)
+        else:
+            label = f"tid-0x{event.thread_id:08x}"
+            identity_source = "inferred_tid_continuity"
+            previous = inferred_state.get(event.thread_id)
+            generation = previous[2] if previous else 0
+
+        status = "first_observation"
+        delta_raw: int | None = None
+        elapsed_us: int | None = None
+        counter_epoch = previous[1] if previous else 0
+        previous_raw: int | None = None
+        previous_event_index: int | None = None
+        if previous is not None:
+            (previous_raw, counter_epoch, previous_generation,
+             previous_timestamp, previous_event_index) = previous
+            if declared is None:
+                generation = previous_generation
+            elapsed_us = event.timestamp_us - previous_timestamp
+            if elapsed_us < 0:
+                elapsed_us = None
+                status = "timestamp_regression"
+            elif raw_value >= previous_raw:
+                delta_raw = raw_value - previous_raw
+                status = "delta"
+            else:
+                wrapped_delta = None
+                if counter_bits is not None:
+                    modulus = 1 << counter_bits
+                    if raw_value < modulus and previous_raw < modulus:
+                        wrapped_delta = modulus - previous_raw + raw_value
+                if (wrapped_delta is not None and
+                        max_wrap_delta is not None and
+                        wrapped_delta <= max_wrap_delta):
+                    delta_raw = wrapped_delta
+                    status = "wrap"
+                else:
+                    counter_epoch += 1
+                    status = "reset_or_reuse"
+                    if declared is None:
+                        generation += 1
+
+        sample = {
+            "event_index": event.index,
+            "timestamp_us": event.timestamp_us,
+            "thread_id": event.thread_id,
+            "thread_id_hex": f"0x{event.thread_id:08x}",
+            "thread_generation": generation,
+            "thread_label": label,
+            "identity_source": identity_source,
+            "counter_epoch": counter_epoch,
+            "raw_value_u64": raw_value,
+            "raw_value_u64_decimal": str(raw_value),
+            "raw_value_u64_hex": f"0x{raw_value:016x}",
+            "previous_event_index": previous_event_index,
+            "previous_raw_value_u64": previous_raw,
+            "previous_raw_value_u64_decimal": (
+                str(previous_raw) if previous_raw is not None else None),
+            "elapsed_us": elapsed_us,
+            "delta_raw": delta_raw,
+            "delta_raw_decimal": (
+                str(delta_raw) if delta_raw is not None else None),
+            "delta_raw_hex": (
+                f"0x{delta_raw:x}" if delta_raw is not None else None),
+            "delta_status": status,
+            "unit": RUN_CLOCKS_UNIT,
+        }
+        samples.append(sample)
+        status_counts[status] += 1
+        state = (raw_value, counter_epoch, generation, event.timestamp_us,
+                 event.index)
+        if declared is not None:
+            explicit_state[state_key] = state
+        else:
+            inferred_state[event.thread_id] = state
+
+    return {
+        "semantics": {
+            "source": RUN_CLOCKS_SOURCE,
+            "capture_metric": BUILTIN_NAMES[RUN_CLOCKS_METRIC_ID],
+            "kind": "cumulative_raw_counter",
+            "unit": RUN_CLOCKS_UNIT,
+            "cpu_utilization": False,
+            "conversion_applied": False,
+        },
+        "policy": {
+            "counter_bits": counter_bits,
+            "max_wrap_delta_raw": max_wrap_delta,
+            "wraps_require_explicit_counter_bits_and_delta_bound": True,
+            "ambiguous_regressions": "reset_or_reuse",
+            "unmapped_identity": "thread ID plus observed counter continuity",
+        },
+        "summary": {
+            "samples": len(samples),
+            "derived_deltas": sum(
+                1 for sample in samples if sample["delta_raw"] is not None),
+            "statuses": dict(sorted(status_counts.items())),
+            "samples_missing_raw_flag": missing_raw_flags,
+        },
+        "samples": samples,
+    }
+
+
 def _format_table(rows: Sequence[Sequence[str]], headers: Sequence[str]) -> list[str]:
     all_rows = [tuple(headers), *(tuple(row) for row in rows)]
     widths = [max(len(row[index]) for row in all_rows)
@@ -476,6 +660,20 @@ def render_summary(capture: TraceCapture) -> str:
         lines.extend(_format_table(rows, ("name", "samples", "last", "min",
                                           "max")))
 
+    run_clocks = analyze_run_clocks(capture)
+    run_clocks_summary = run_clocks["summary"]
+    if run_clocks_summary["samples"]:
+        statuses = run_clocks_summary["statuses"]
+        lines.extend([
+            "",
+            "SceKernelThreadInfo.runClocks (raw counter; unit unknown):",
+            f"  samples: {run_clocks_summary['samples']}",
+            f"  safe raw deltas: {run_clocks_summary['derived_deltas']}",
+            "  delta status: " + ", ".join(
+                f"{name}={count}" for name, count in statuses.items()),
+            "  CPU utilization: not derived",
+        ])
+
     frame_count = 0
     frame_total = 0
     frame_minimum: int | None = None
@@ -521,10 +719,15 @@ def render_events(capture: TraceCapture, limit: int | None = None) -> str:
     lines = []
     for event in selected:
         flags = ",".join(event.flag_names) or "-"
+        value = f"value={event.value}"
+        if event.name_id == RUN_CLOCKS_METRIC_ID:
+            value = (
+                f"raw_u64={_run_clocks_raw_value(event)} "
+                f"unit={RUN_CLOCKS_UNIT} source={RUN_CLOCKS_SOURCE}")
         lines.append(
             f"{event.index:6d} {event.timestamp_us:14d} us "
             f"tid=0x{event.thread_id:08x} {event.type_name:16s} "
-            f"{capture.resolve_name(event.name_id)!r} value={event.value} "
+            f"{capture.resolve_name(event.name_id)!r} {value} "
             f"corr={event.correlation_id} flags={flags}")
     if limit is not None and len(capture.events) > limit:
         lines.append(f"... {len(capture.events) - limit} more events")
@@ -546,6 +749,7 @@ def capture_to_json(capture: TraceCapture) -> dict[str, object]:
             }
             for entry in capture.names.values()
         ],
+        "run_clocks_analysis": analyze_run_clocks(capture),
         "events": [
             {
                 "index": event.index,
@@ -560,6 +764,15 @@ def capture_to_json(capture: TraceCapture) -> dict[str, object]:
                 "type_name": event.type_name,
                 "flags": event.flags,
                 "flag_names": list(event.flag_names),
+                **({
+                    "raw_value_u64": _run_clocks_raw_value(event),
+                    "raw_value_u64_decimal": str(
+                        _run_clocks_raw_value(event)),
+                    "raw_value_u64_hex": (
+                        f"0x{_run_clocks_raw_value(event):016x}"),
+                    "value_unit": RUN_CLOCKS_UNIT,
+                    "value_source": RUN_CLOCKS_SOURCE,
+                } if event.name_id == RUN_CLOCKS_METRIC_ID else {}),
             }
             for event in capture.events
         ],
@@ -618,10 +831,25 @@ def capture_to_chrome_trace(capture: TraceCapture) -> dict[str, object]:
             })
         elif event.event_type in (EVENT_MEMORY_SAMPLE, EVENT_THREAD_SAMPLE,
                                   EVENT_PROCESS_SAMPLE):
+            args: dict[str, object] = {
+                "value": event.value,
+                "raw": bool(event.flags & EVENT_FLAG_RAW_VALUE),
+            }
+            category = event.type_name
+            if event.name_id == RUN_CLOCKS_METRIC_ID:
+                category = "thread_sample.raw_unknown_unit"
+                args = {
+                    "raw_value_u64": _run_clocks_raw_value(event),
+                    "raw_value_u64_decimal": str(
+                        _run_clocks_raw_value(event)),
+                    "raw_value_u64_hex": (
+                        f"0x{_run_clocks_raw_value(event):016x}"),
+                    "unit": RUN_CLOCKS_UNIT,
+                    "source": RUN_CLOCKS_SOURCE,
+                    "cpu_utilization": False,
+                }
             trace_events.append({
-                **base, "cat": event.type_name, "ph": "C",
-                "args": {"value": event.value,
-                          "raw": bool(event.flags & EVENT_FLAG_RAW_VALUE)},
+                **base, "cat": category, "ph": "C", "args": args,
             })
         else:
             trace_events.append({
@@ -629,6 +857,45 @@ def capture_to_chrome_trace(capture: TraceCapture) -> dict[str, object]:
                 "args": {"value": event.value,
                           "correlation_id": event.correlation_id,
                           "flags": list(event.flag_names)},
+            })
+
+    run_clocks = analyze_run_clocks(capture)
+    for sample in run_clocks["samples"]:
+        if sample["delta_raw"] is not None:
+            trace_events.append({
+                "name": "vita.thread.run_clocks.delta_raw",
+                "cat": "thread_sample.raw_unknown_unit",
+                "ph": "C",
+                "pid": 1,
+                "tid": sample["thread_id"],
+                "ts": sample["timestamp_us"],
+                "args": {
+                    "delta_raw": sample["delta_raw"],
+                    "delta_raw_decimal": sample["delta_raw_decimal"],
+                    "delta_raw_hex": sample["delta_raw_hex"],
+                    "unit": RUN_CLOCKS_UNIT,
+                    "source": RUN_CLOCKS_SOURCE,
+                    "delta_status": sample["delta_status"],
+                    "thread_generation": sample["thread_generation"],
+                    "counter_epoch": sample["counter_epoch"],
+                    "cpu_utilization": False,
+                },
+            })
+        elif sample["delta_status"] == "reset_or_reuse":
+            trace_events.append({
+                "name": "vita.thread.run_clocks discontinuity",
+                "cat": "diagnostic.run_clocks",
+                "ph": "i",
+                "s": "t",
+                "pid": 1,
+                "tid": sample["thread_id"],
+                "ts": sample["timestamp_us"],
+                "args": {
+                    "status": sample["delta_status"],
+                    "unit": RUN_CLOCKS_UNIT,
+                    "thread_generation": sample["thread_generation"],
+                    "counter_epoch": sample["counter_epoch"],
+                },
             })
 
     trace_events.sort(key=lambda item: (int(item.get("ts", -1)),
@@ -645,6 +912,8 @@ def capture_to_chrome_trace(capture: TraceCapture) -> dict[str, object]:
             "dictionary_entries": len(capture.names),
             "unmatched_zone_begins": len(zones.unmatched_begins),
             "unmatched_zone_ends": len(zones.unmatched_ends),
+            "run_clocks": run_clocks["semantics"],
+            "run_clocks_summary": run_clocks["summary"],
         },
     }
 
@@ -772,7 +1041,283 @@ def receive_tcp_once(bind: str, port: int, source: str | None,
                                       on_progress), peer
 
 
-def _read_capture(path: Path, max_bytes: int = DEFAULT_MAX_BYTES) -> TraceCapture:
+def _metadata_text(value: object, field: str) -> str:
+    if not isinstance(value, str) or not value or len(value) > MAX_METADATA_TEXT:
+        raise TraceFormatError(
+            f"runClocks metadata {field} must be 1..{MAX_METADATA_TEXT} chars")
+    if any(
+            unicodedata.category(character) in {"Cc", "Cf", "Cs", "Zl", "Zp"} or
+            unicodedata.bidirectional(character) in _UNSAFE_BIDI_CLASSES
+            for character in value):
+        raise TraceFormatError(
+            f"runClocks metadata {field} contains unsafe controls")
+    return value
+
+
+def _metadata_positive_int(value: object, field: str) -> int:
+    if (isinstance(value, bool) or not isinstance(value, int) or value <= 0 or
+            value > 0xFFFFFFFFFFFFFFFF):
+        raise TraceFormatError(
+            f"runClocks metadata {field} must be a positive uint64")
+    return value
+
+
+def _metadata_nonnegative_int(value: object, field: str) -> int:
+    if (isinstance(value, bool) or not isinstance(value, int) or value < 0 or
+            value > 0xFFFFFFFFFFFFFFFF):
+        raise TraceFormatError(
+            f"runClocks metadata {field} must be a nonnegative uint64")
+    return value
+
+
+def _metadata_thread_id(value: object, field: str) -> int:
+    try:
+        parsed = int(value, 0) if isinstance(value, str) else value
+    except ValueError as error:
+        raise TraceFormatError(
+            f"runClocks metadata {field} is not a thread ID") from error
+    if (isinstance(parsed, bool) or not isinstance(parsed, int) or
+            not 0 <= parsed <= 0xFFFFFFFF):
+        raise TraceFormatError(
+            f"runClocks metadata {field} must fit uint32")
+    return parsed
+
+
+def decode_run_clocks_experiment(data: bytes) -> RunClocksExperiment:
+    if len(data) > MAX_EXPERIMENT_METADATA_BYTES:
+        raise TraceFormatError(
+            "runClocks experiment metadata exceeds the 65536-byte limit")
+    try:
+        decoded = json.loads(data.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise TraceFormatError(
+            "runClocks experiment metadata is not valid UTF-8 JSON") from error
+    if not isinstance(decoded, dict):
+        raise TraceFormatError("runClocks experiment metadata must be an object")
+
+    required = {
+        "format", "experiment_id", "captured_at_utc", "device_model",
+        "firmware", "title_id", "build_id", "workload", "clock_profile",
+        "power_state", "sample_interval_us", "sample_count_limit",
+        "capture_duration_limit_us", "producer_dropped_events",
+        "sink_lost_events", "threads", "counter_bits", "max_wrap_delta_raw",
+    }
+    allowed = required | {"notes"}
+    missing = required - set(decoded)
+    unknown = set(decoded) - allowed
+    if missing:
+        raise TraceFormatError(
+            "runClocks metadata is missing: " + ", ".join(sorted(missing)))
+    if unknown:
+        raise TraceFormatError(
+            "runClocks metadata has unknown fields: " +
+            ", ".join(sorted(unknown)))
+    if decoded["format"] != RUN_CLOCKS_EXPERIMENT_FORMAT:
+        raise TraceFormatError("unsupported runClocks experiment format")
+
+    normalized: dict[str, object] = {
+        "format": RUN_CLOCKS_EXPERIMENT_FORMAT,
+    }
+    for field in (
+            "experiment_id", "captured_at_utc", "device_model", "firmware",
+            "title_id", "build_id", "workload", "clock_profile",
+            "power_state"):
+        normalized[field] = _metadata_text(decoded[field], field)
+    captured_at = str(normalized["captured_at_utc"])
+    if not captured_at.endswith("Z"):
+        raise TraceFormatError(
+            "runClocks metadata captured_at_utc must end in Z")
+    try:
+        datetime.datetime.fromisoformat(captured_at[:-1] + "+00:00")
+    except ValueError as error:
+        raise TraceFormatError(
+            "runClocks metadata captured_at_utc is not ISO 8601") from error
+    normalized["sample_interval_us"] = _metadata_positive_int(
+        decoded["sample_interval_us"], "sample_interval_us")
+    sample_count_limit = _metadata_positive_int(
+        decoded["sample_count_limit"], "sample_count_limit")
+    if not 2 <= sample_count_limit <= MAX_DECODED_EVENTS:
+        raise TraceFormatError(
+            "runClocks metadata sample_count_limit must be 2..262144")
+    normalized["sample_count_limit"] = sample_count_limit
+    normalized["capture_duration_limit_us"] = _metadata_positive_int(
+        decoded["capture_duration_limit_us"], "capture_duration_limit_us")
+    if (normalized["sample_interval_us"] >
+            normalized["capture_duration_limit_us"]):
+        raise TraceFormatError(
+            "runClocks metadata sample interval exceeds duration limit")
+    normalized["producer_dropped_events"] = _metadata_nonnegative_int(
+        decoded["producer_dropped_events"], "producer_dropped_events")
+    normalized["sink_lost_events"] = _metadata_nonnegative_int(
+        decoded["sink_lost_events"], "sink_lost_events")
+
+    counter_bits = decoded["counter_bits"]
+    if counter_bits not in (None, 32, 64):
+        raise TraceFormatError(
+            "runClocks metadata counter_bits must be null, 32, or 64")
+    max_wrap_delta = decoded["max_wrap_delta_raw"]
+    if max_wrap_delta is not None:
+        max_wrap_delta = _metadata_positive_int(
+            max_wrap_delta, "max_wrap_delta_raw")
+        if counter_bits is None or max_wrap_delta >= (1 << counter_bits):
+            raise TraceFormatError(
+                "max_wrap_delta_raw requires counter_bits and must be "
+                "smaller than its modulus")
+    normalized["counter_bits"] = counter_bits
+    normalized["max_wrap_delta_raw"] = max_wrap_delta
+
+    raw_threads = decoded["threads"]
+    if (not isinstance(raw_threads, list) or
+            not 1 <= len(raw_threads) <= MAX_EXPERIMENT_THREADS):
+        raise TraceFormatError(
+            "runClocks metadata threads must contain 1..64 entries")
+    threads: list[ThreadGeneration] = []
+    normalized_threads: list[dict[str, object]] = []
+    for index, raw_thread in enumerate(raw_threads):
+        if not isinstance(raw_thread, dict):
+            raise TraceFormatError(
+                f"runClocks metadata threads[{index}] must be an object")
+        expected = {
+            "thread_id", "generation", "label", "first_event_index",
+            "last_event_index",
+        }
+        if set(raw_thread) != expected:
+            raise TraceFormatError(
+                f"runClocks metadata threads[{index}] fields must be: " +
+                ", ".join(sorted(expected)))
+        thread_id = _metadata_thread_id(
+            raw_thread["thread_id"], f"threads[{index}].thread_id")
+        generation = raw_thread["generation"]
+        first = raw_thread["first_event_index"]
+        last = raw_thread["last_event_index"]
+        if (isinstance(generation, bool) or not isinstance(generation, int) or
+                generation < 0):
+            raise TraceFormatError(
+                f"runClocks metadata threads[{index}].generation must be "
+                "nonnegative")
+        if (isinstance(first, bool) or not isinstance(first, int) or first < 0 or
+                isinstance(last, bool) or not isinstance(last, int) or
+                last < first):
+            raise TraceFormatError(
+                f"runClocks metadata threads[{index}] has an invalid "
+                "event range")
+        label = _metadata_text(
+            raw_thread["label"], f"threads[{index}].label")
+        thread = ThreadGeneration(thread_id, generation, label, first, last)
+        threads.append(thread)
+        normalized_threads.append({
+            "thread_id": thread_id,
+            "thread_id_hex": f"0x{thread_id:08x}",
+            "generation": generation,
+            "label": label,
+            "first_event_index": first,
+            "last_event_index": last,
+        })
+    for index, thread in enumerate(threads):
+        for other in threads[index + 1:]:
+            if thread.thread_id != other.thread_id:
+                continue
+            if thread.generation == other.generation:
+                raise TraceFormatError(
+                    "runClocks metadata repeats generation "
+                    f"{thread.generation} for thread 0x{thread.thread_id:08x}")
+            if (thread.first_event_index <= other.last_event_index and
+                    other.first_event_index <= thread.last_event_index):
+                raise TraceFormatError(
+                    "runClocks metadata has overlapping ranges for thread "
+                    f"0x{thread.thread_id:08x}")
+    normalized["threads"] = normalized_threads
+    if "notes" in decoded:
+        normalized["notes"] = _metadata_text(decoded["notes"], "notes")
+    return RunClocksExperiment(
+        normalized, counter_bits, max_wrap_delta, tuple(threads))
+
+
+def run_clocks_characterization_report(
+        capture: TraceCapture,
+        capture_data: bytes,
+        experiment: RunClocksExperiment,
+        ) -> dict[str, object]:
+    analysis = analyze_run_clocks(capture, experiment)
+    samples = analysis["samples"]
+    summary = analysis["summary"]
+    if summary["samples_missing_raw_flag"]:
+        raise TraceFormatError(
+            "runClocks characterization requires raw_value flags")
+    if (experiment.metadata["producer_dropped_events"] or
+            experiment.metadata["sink_lost_events"]):
+        raise TraceFormatError(
+            "runClocks characterization requires zero producer and sink loss")
+    if len(samples) < 2:
+        raise TraceFormatError(
+            "runClocks characterization requires at least two samples")
+    limit = int(experiment.metadata["sample_count_limit"])
+    if len(samples) > limit:
+        raise TraceFormatError(
+            f"capture has {len(samples)} runClocks samples; metadata limit "
+            f"is {limit}")
+    unmapped = [
+        sample["event_index"] for sample in samples
+        if sample["identity_source"] != "experiment_metadata"
+    ]
+    if unmapped:
+        raise TraceFormatError(
+            "runClocks metadata does not identify sample events: " +
+            ", ".join(str(index) for index in unmapped))
+    run_clock_events = {
+        int(sample["event_index"]): int(sample["thread_id"])
+        for sample in samples
+    }
+    for thread in experiment.threads:
+        if thread.last_event_index >= len(capture.events):
+            raise TraceFormatError(
+                f"thread generation {thread.label!r} extends beyond capture")
+        if not any(
+                thread.first_event_index <= index <= thread.last_event_index and
+                thread_id == thread.thread_id
+                for index, thread_id in run_clock_events.items()):
+            raise TraceFormatError(
+                f"thread generation {thread.label!r} contains no runClocks "
+                "sample")
+    if summary["statuses"].get("timestamp_regression", 0):
+        raise TraceFormatError(
+            "runClocks characterization has a timestamp regression")
+    timestamps = [int(sample["timestamp_us"]) for sample in samples]
+    duration_us = max(timestamps) - min(timestamps)
+    duration_limit = int(
+        experiment.metadata["capture_duration_limit_us"])
+    if duration_us < 0 or duration_us > duration_limit:
+        raise TraceFormatError(
+            f"runClocks sample span {duration_us} us exceeds metadata limit "
+            f"{duration_limit} us")
+    intervals = [
+        int(sample["elapsed_us"]) for sample in samples
+        if sample["elapsed_us"] is not None
+    ]
+    return {
+        "format": RUN_CLOCKS_REPORT_FORMAT,
+        "provenance": {
+            "capture_sha256": hashlib.sha256(capture_data).hexdigest(),
+            "capture_bytes": len(capture_data),
+            "wire_version": capture.header.version,
+            "source_api": "sceKernelGetThreadInfo",
+            "source_field": RUN_CLOCKS_SOURCE,
+            "capture_metric": BUILTIN_NAMES[RUN_CLOCKS_METRIC_ID],
+        },
+        "experiment": experiment.metadata,
+        "observed": {
+            "first_timestamp_us": min(timestamps),
+            "last_timestamp_us": max(timestamps),
+            "sample_span_us": duration_us,
+            "sample_count": len(samples),
+            "interval_min_us": min(intervals) if intervals else None,
+            "interval_max_us": max(intervals) if intervals else None,
+        },
+        "run_clocks_analysis": analysis,
+    }
+
+
+def _read_bounded_bytes(path: Path, max_bytes: int) -> bytes:
     if max_bytes < 1:
         raise ValueError("max_bytes must be positive")
     with path.open("rb") as capture_file:
@@ -780,7 +1325,11 @@ def _read_capture(path: Path, max_bytes: int = DEFAULT_MAX_BYTES) -> TraceCaptur
     if len(data) > max_bytes:
         raise TraceFormatError(
             f"capture exceeds the {max_bytes}-byte safety limit")
-    return decode_capture(data)
+    return data
+
+
+def _read_capture(path: Path, max_bytes: int = DEFAULT_MAX_BYTES) -> TraceCapture:
+    return decode_capture(_read_bounded_bytes(path, max_bytes))
 
 
 def _write_atomic(path: Path, data: bytes, force: bool = False) -> None:
@@ -896,6 +1445,16 @@ def build_argument_parser() -> argparse.ArgumentParser:
     chrome.add_argument("--max-bytes", type=_positive_int,
                         default=DEFAULT_MAX_BYTES)
 
+    run_clocks = subparsers.add_parser(
+        "runclocks",
+        help="export a bounded raw runClocks characterization report")
+    run_clocks.add_argument("capture", type=Path)
+    run_clocks.add_argument("metadata", type=Path)
+    run_clocks.add_argument("output", type=Path)
+    run_clocks.add_argument("--force", action="store_true")
+    run_clocks.add_argument("--max-bytes", type=_positive_int,
+                            default=DEFAULT_MAX_BYTES)
+
     receive = subparsers.add_parser(
         "receive", help="receive one TCP capture through clean sender EOF")
     receive.add_argument("output", type=Path)
@@ -940,6 +1499,21 @@ def main(argv: Sequence[str] | None = None) -> int:
             else:
                 export_chrome_trace(capture, args.output, args.force)
             print(f"Wrote {args.output} ({len(capture.events)} events)")
+            return 0
+
+        if args.command == "runclocks":
+            capture_data = _read_bounded_bytes(args.capture, args.max_bytes)
+            capture = decode_capture(capture_data)
+            metadata_data = _read_bounded_bytes(
+                args.metadata, MAX_EXPERIMENT_METADATA_BYTES)
+            experiment = decode_run_clocks_experiment(metadata_data)
+            report = run_clocks_characterization_report(
+                capture, capture_data, experiment)
+            _write_atomic(args.output, _json_bytes(report), args.force)
+            sample_count = report["run_clocks_analysis"]["summary"]["samples"]
+            print(
+                f"Wrote {args.output} ({sample_count} raw runClocks samples; "
+                "unit unknown)")
             return 0
 
         if args.command == "receive":

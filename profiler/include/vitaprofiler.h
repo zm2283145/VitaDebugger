@@ -261,6 +261,8 @@ struct vp_vita_memory_snapshot {
 
 struct vp_vita_thread_snapshot {
     uint64_t timestamp_us;
+    /* Verbatim SceKernelThreadInfo.runClocks bits. Unit and counter width are
+     * unproven; do not convert this field to time or CPU utilization. */
     uint64_t run_clocks;
     uint32_t thread_id;
     int32_t stack_free_bytes;

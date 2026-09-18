@@ -333,7 +333,10 @@ The application remains responsible for the SceNet module/global lifetime;
 add `SceNet_stub` when linking the TCP adapter. The adapter owns only its
 socket/epoll resources. See the
 [binary trace](profiler/docs/binary-trace.md) and
-[Vita TCP sink](profiler/docs/vita-tcp-stream.md) guides.
+[Vita TCP sink](profiler/docs/vita-tcp-stream.md) guides. The
+[`runClocks` characterization protocol](profiler/docs/run-clocks-characterization.md)
+keeps that thread field and its deltas raw with an unknown unit; it does not
+derive CPU utilization.
 
 The direct user-mode ScePerf initializer fails closed with
 `VP_ERROR_UNSUPPORTED` on the tested retail runtime because its imports were

@@ -12,8 +12,9 @@ The current increment provides:
 - Frame markers with measured frame-to-frame duration and a monotonically
   increasing frame ID.
 - User-mode snapshots of free USER, CDRAM, and PHYCONT memory.
-- User-mode snapshots for a known application thread: cumulative `runClocks`,
-  free stack, thread preemptions, and interrupt preemptions.
+- User-mode snapshots for a known application thread: cumulative raw
+  `runClocks` with an explicitly unknown unit, free stack, thread preemptions,
+  and interrupt preemptions.
 - A caller-owned, fixed-capacity event ring with multi-producer/single-consumer
   operation and explicit drop accounting.
 - A versioned 32-byte stream header and 32-byte event encoding with fixed-width
@@ -27,8 +28,9 @@ The current increment provides:
 - An opt-in, caller-owned Vita TCP sink with bounded nonblocking SceNet
   connect/send behavior, partial-send handling, explicit cleanup obligations,
   and transport statistics.
-- A bounded TCP receiver plus text, complete decoded JSON, and Chrome Trace/Perfetto
-  viewer output with named zone, counter, frame, and built-in metric handling.
+- A bounded TCP receiver plus text, complete decoded JSON, and Chrome
+  Trace/Perfetto viewer output with named zone, counter, frame, built-in
+  metric, and generation-aware raw `runClocks` delta handling.
 - A dependency-free Tk desktop viewer over those same receiver, decoder,
   analyzer, and export APIs, with background work, cancellation, filtering,
   selection, and explicit wire-v1 loss-reporting limits.
@@ -131,6 +133,9 @@ validates that path from an ordinary user-mode app without the kernel plugin.
 See [VitaProfiler desktop GUI](docs/desktop-gui.md) to open captures, control
 the receiver, inspect frames/zones/counters, and export through the same
 pipeline without additional Python packages.
+See [`runClocks` characterization](docs/run-clocks-characterization.md) for
+the bounded capture/report command, experiment metadata schema, conservative
+wrap/reset and thread-generation policy, and remaining hardware measurements.
 See [Cooperative graphics hooks](docs/graphics-hooks.md) for safe
 VitaGL/SceGxm call-site instrumentation, the [real-world VitaGL integration
 record](../docs/hardware/profiler-real-world-vitagl-2026-09-15.md) for a
@@ -242,9 +247,12 @@ built-in Vita sample names.
 
 `SceKernelThreadInfo.runClocks` is exported as a cumulative **raw** value because
 the public header's wording and behavior need hardware characterization before
-the viewer assigns a stronger unit or CPU-utilization meaning. Deltas are still
-useful for controlled experiments. This library does not enumerate arbitrary
-threads or sample their program counters.
+the viewer assigns a stronger unit or CPU-utilization meaning. The viewer
+reconstructs all 64 raw bits, labels the unit `unknown`, and emits raw deltas
+only within one declared or conservatively inferred thread generation.
+Decreases are discontinuities unless an explicit, experimentally justified
+counter width and maximum one-interval wrap delta classify them as wraps. This
+library does not enumerate arbitrary threads or sample their program counters.
 
 There is no generic user-mode call that reveals every GPU command's execution
 time. Useful GPU profiling will require narrow hooks around VitaGL/SceGxm

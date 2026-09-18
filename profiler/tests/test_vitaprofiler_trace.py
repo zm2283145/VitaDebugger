@@ -69,6 +69,53 @@ def make_capture() -> bytes:
     return names + header + events
 
 
+def make_run_clocks_capture(
+        samples: list[tuple[int, int, int]],
+        ) -> bytes:
+    names = encode_dictionary([])
+    header = trace.WIRE_HEADER.pack(
+        trace.WIRE_MAGIC, trace.WIRE_VERSION, trace.WIRE_HEADER_SIZE,
+        trace.WIRE_EVENT_SIZE, trace.WIRE_FLAGS, trace.WIRE_CLOCK_HZ, 900, 0)
+    events = b"".join(
+        encode_event(timestamp, value, trace.RUN_CLOCKS_METRIC_ID, thread_id,
+                     0, trace.EVENT_THREAD_SAMPLE,
+                     trace.EVENT_FLAG_RAW_VALUE)
+        for timestamp, value, thread_id in samples
+    )
+    return names + header + events
+
+
+def make_run_clocks_metadata(**overrides: object) -> dict[str, object]:
+    metadata: dict[str, object] = {
+        "format": trace.RUN_CLOCKS_EXPERIMENT_FORMAT,
+        "experiment_id": "idle-vs-busy-a",
+        "captured_at_utc": "2026-09-18T05:00:00Z",
+        "device_model": "PCH-2000",
+        "firmware": "3.65",
+        "title_id": "VDPR00001",
+        "build_id": "test-fixture",
+        "workload": "fixed busy loop",
+        "clock_profile": "application default; unchanged",
+        "power_state": "AC attached; battery 100%",
+        "sample_interval_us": 1000,
+        "sample_count_limit": 8,
+        "capture_duration_limit_us": 10000,
+        "producer_dropped_events": 0,
+        "sink_lost_events": 0,
+        "threads": [{
+            "thread_id": "0x40010003",
+            "generation": 0,
+            "label": "measurement-worker",
+            "first_event_index": 0,
+            "last_event_index": 2,
+        }],
+        "counter_bits": None,
+        "max_wrap_delta_raw": None,
+    }
+    metadata.update(overrides)
+    return metadata
+
+
 class DecodeTests(unittest.TestCase):
     def test_c_generated_capture_matches_python_decoder(self):
         fixture = PROFILER / "build" / "host" / "capture-from-c.vptrace"
@@ -224,6 +271,116 @@ class DecodeTests(unittest.TestCase):
         self.assertFalse(analysis.unmatched_begins)
         self.assertFalse(analysis.unmatched_ends)
 
+    def test_run_clocks_deltas_preserve_raw_unknown_unit(self):
+        raw = make_run_clocks_capture([
+            (1000, 100, 0x40010003),
+            (2000, 145, 0x40010003),
+            (3000, -2, 0x40010004),
+        ])
+        capture = trace.decode_capture(raw)
+        analysis = trace.analyze_run_clocks(capture)
+        samples = analysis["samples"]
+        self.assertEqual(samples[1]["delta_raw"], 45)
+        self.assertEqual(samples[1]["elapsed_us"], 1000)
+        self.assertEqual(samples[2]["raw_value_u64"], (1 << 64) - 2)
+        self.assertEqual(samples[2]["raw_value_u64_hex"],
+                         "0xfffffffffffffffe")
+        self.assertEqual(samples[2]["raw_value_u64_decimal"],
+                         str((1 << 64) - 2))
+        self.assertEqual(analysis["semantics"]["unit"], "unknown")
+        self.assertFalse(analysis["semantics"]["cpu_utilization"])
+        self.assertFalse(analysis["semantics"]["conversion_applied"])
+
+    def test_run_clocks_regression_starts_inferred_generation(self):
+        capture = trace.decode_capture(make_run_clocks_capture([
+            (1000, 200, 0x40010003),
+            (2000, 5, 0x40010003),
+            (3000, 15, 0x40010003),
+        ]))
+        samples = trace.analyze_run_clocks(capture)["samples"]
+        self.assertEqual(samples[1]["delta_status"], "reset_or_reuse")
+        self.assertIsNone(samples[1]["delta_raw"])
+        self.assertEqual(samples[1]["thread_generation"], 1)
+        self.assertEqual(samples[1]["counter_epoch"], 1)
+        self.assertEqual(samples[2]["delta_status"], "delta")
+        self.assertEqual(samples[2]["delta_raw"], 10)
+        self.assertEqual(samples[2]["thread_generation"], 1)
+
+    def test_run_clocks_wrap_requires_explicit_bounded_model(self):
+        capture = trace.decode_capture(make_run_clocks_capture([
+            (1000, 0xFFFFFFF8, 0x40010003),
+            (2000, 5, 0x40010003),
+        ]))
+        metadata = make_run_clocks_metadata(
+            counter_bits=32, max_wrap_delta_raw=32)
+        experiment = trace.decode_run_clocks_experiment(
+            json.dumps(metadata).encode())
+        samples = trace.analyze_run_clocks(capture, experiment)["samples"]
+        self.assertEqual(samples[1]["delta_status"], "wrap")
+        self.assertEqual(samples[1]["delta_raw"], 13)
+        self.assertEqual(samples[1]["thread_generation"], 0)
+
+    def test_run_clocks_explicit_thread_generation_breaks_tid_reuse(self):
+        capture = trace.decode_capture(make_run_clocks_capture([
+            (1000, 10, 0x40010003),
+            (2000, 20, 0x40010003),
+            (3000, 30, 0x40010003),
+        ]))
+        metadata = make_run_clocks_metadata(threads=[
+            {
+                "thread_id": "0x40010003",
+                "generation": 0,
+                "label": "worker-a",
+                "first_event_index": 0,
+                "last_event_index": 1,
+            },
+            {
+                "thread_id": "0x40010003",
+                "generation": 1,
+                "label": "worker-b",
+                "first_event_index": 2,
+                "last_event_index": 2,
+            },
+        ])
+        experiment = trace.decode_run_clocks_experiment(
+            json.dumps(metadata).encode())
+        samples = trace.analyze_run_clocks(capture, experiment)["samples"]
+        self.assertEqual(samples[1]["delta_raw"], 10)
+        self.assertEqual(samples[2]["delta_status"], "first_observation")
+        self.assertIsNone(samples[2]["delta_raw"])
+        self.assertEqual(samples[2]["thread_generation"], 1)
+        self.assertEqual(samples[2]["thread_label"], "worker-b")
+
+    def test_json_and_perfetto_keep_run_clocks_raw(self):
+        capture = trace.decode_capture(make_run_clocks_capture([
+            (1000, 100, 0x40010003),
+            (2000, 125, 0x40010003),
+        ]))
+        decoded = trace.capture_to_json(capture)
+        semantics = decoded["run_clocks_analysis"]["semantics"]
+        self.assertEqual(semantics["source"], "SceKernelThreadInfo.runClocks")
+        self.assertEqual(semantics["unit"], "unknown")
+        self.assertEqual(decoded["events"][0]["raw_value_u64"], 100)
+        self.assertEqual(decoded["events"][0]["value_unit"], "unknown")
+        self.assertEqual(
+            decoded["events"][0]["value_source"],
+            "SceKernelThreadInfo.runClocks")
+        perfetto = trace.capture_to_chrome_trace(capture)
+        raw_events = [
+            event for event in perfetto["traceEvents"]
+            if event.get("name") == "vita.thread.run_clocks"
+        ]
+        delta_events = [
+            event for event in perfetto["traceEvents"]
+            if event.get("name") == "vita.thread.run_clocks.delta_raw"
+        ]
+        self.assertEqual(raw_events[0]["args"]["unit"], "unknown")
+        self.assertFalse(raw_events[0]["args"]["cpu_utilization"])
+        self.assertEqual(delta_events[0]["args"]["delta_raw"], 25)
+        self.assertEqual(delta_events[0]["args"]["unit"], "unknown")
+        serialized = json.dumps(perfetto).lower()
+        self.assertNotIn("percent", serialized)
+
 
 class ReceiverTests(unittest.TestCase):
     def test_fragmented_loopback_tcp_capture(self):
@@ -334,6 +491,75 @@ class CommandLineTests(unittest.TestCase):
                 with self.assertRaises(FileExistsError):
                     trace._write_atomic(output, b"loser", force=False)
             self.assertEqual(output.read_bytes(), b"winner")
+
+    def test_runclocks_command_binds_bounded_capture_and_metadata(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            capture_path = root / "capture.vptrace"
+            metadata_path = root / "experiment.json"
+            output_path = root / "runclocks.json"
+            raw = make_run_clocks_capture([
+                (1000, 100, 0x40010003),
+                (2000, 140, 0x40010003),
+                (3000, 170, 0x40010003),
+            ])
+            capture_path.write_bytes(raw)
+            metadata_path.write_text(
+                json.dumps(make_run_clocks_metadata()), encoding="utf-8")
+
+            self.assertEqual(trace.main([
+                "runclocks", str(capture_path), str(metadata_path),
+                str(output_path),
+            ]), 0)
+            report = json.loads(output_path.read_text("utf-8"))
+            self.assertEqual(report["format"],
+                             trace.RUN_CLOCKS_REPORT_FORMAT)
+            self.assertEqual(
+                report["provenance"]["capture_sha256"],
+                __import__("hashlib").sha256(raw).hexdigest())
+            self.assertEqual(
+                report["run_clocks_analysis"]["summary"]["derived_deltas"], 2)
+            self.assertEqual(
+                report["run_clocks_analysis"]["samples"][1]["thread_label"],
+                "measurement-worker")
+            self.assertEqual(
+                report["observed"]["sample_span_us"], 2000)
+
+    def test_runclocks_command_rejects_unmapped_or_over_limit_samples(self):
+        raw = make_run_clocks_capture([
+            (1000, 100, 0x40010003),
+            (2000, 140, 0x40010003),
+            (3000, 170, 0x40010003),
+        ])
+        capture = trace.decode_capture(raw)
+        unmapped = make_run_clocks_metadata(threads=[{
+            "thread_id": "0x40010003",
+            "generation": 0,
+            "label": "measurement-worker",
+            "first_event_index": 0,
+            "last_event_index": 1,
+        }])
+        experiment = trace.decode_run_clocks_experiment(
+            json.dumps(unmapped).encode())
+        with self.assertRaisesRegex(trace.TraceFormatError,
+                                    "does not identify sample events"):
+            trace.run_clocks_characterization_report(
+                capture, raw, experiment)
+
+        over_limit = make_run_clocks_metadata(sample_count_limit=2)
+        experiment = trace.decode_run_clocks_experiment(
+            json.dumps(over_limit).encode())
+        with self.assertRaisesRegex(trace.TraceFormatError, "metadata limit"):
+            trace.run_clocks_characterization_report(
+                capture, raw, experiment)
+
+        lossy = make_run_clocks_metadata(producer_dropped_events=1)
+        experiment = trace.decode_run_clocks_experiment(
+            json.dumps(lossy).encode())
+        with self.assertRaisesRegex(trace.TraceFormatError,
+                                    "requires zero producer and sink loss"):
+            trace.run_clocks_characterization_report(
+                capture, raw, experiment)
 
     def test_cli_rejects_non_finite_timeouts(self):
         parser = trace.build_argument_parser()
