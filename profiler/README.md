@@ -38,6 +38,10 @@ The current increment provides:
   VitaGL/SceGxm submissions, waits, swaps, draws, shader/state changes,
   allocations, and frame markers, with stable IDs, a bounded scope stack, and
   compile-time no-op call-site macros.
+- An opt-in, allocation-free PC/call-stack sampling provider boundary with
+  explicit current/foreign capabilities, exact foreign identities, bounded
+  caller-owned frame storage, deterministic partial results, and retained
+  release obligations. No built-in Vita foreign-thread provider is enabled.
 - A guarded PMU provider/lease abstraction plus an injectable owned-reset
   adapter for the public ScePerf semantics. The adapter retains failed cleanup
   obligations. Its direct Vita convenience initializer now fails closed
@@ -147,7 +151,9 @@ VitaGL/SceGxm call-site instrumentation, the [real-world VitaGL integration
 record](../docs/hardware/profiler-real-world-vitagl-2026-09-15.md) for a
 default-off application example, and [Guarded CPU/PMU provider
 boundary](docs/pmu-provider.md) for the explicit exact-restore versus
-application-owned counter lifecycle.
+application-owned counter lifecycle. See [Bounded thread-sampling
+provider](docs/thread-sampling.md) for the new sampling contract and the exact
+kernel/hardware gates that still block a built-in foreign-thread adapter.
 
 Call `vp_vita_record_memory()` at a low frequency, such as once per second, not
 once per draw. Call `vp_vita_record_thread()` with `0` for the current thread or
@@ -247,7 +253,7 @@ built-in Vita sample names.
 | Known-thread cumulative stats | Implemented with a supplied/current thread ID | None |
 | Renderer/audio/allocator metrics | Generic counters and zones are ready | Integration hooks in each subsystem |
 | All-process thread enumeration | Cooperative/known IDs only | Narrow process-owned enumeration |
-| Statistical PC/call-stack sampling | Not safely available | Tokenized, read-only sampler boundary |
+| Statistical PC/call-stack sampling | Bounded provider/session policy; cooperative current-thread capture only through an application-supplied provider | Existing all-stop/register reads are not yet a generation-stable, fault-contained foreign sampler |
 | PMU hardware counters | Provider boundary, named raw samples, and injected owned-reset adapter tests; direct ScePerf initialization fails closed on tested retail 3.65 | Read-only inventory and the isolated lane-5 software-increment transaction pass on application cores 0-2. The default-off transport passed bounded core-0 `0x01`, `0x03`, and `0x10` samples with exact restoration, plus same-boot re-arm after its owning worker exited. Process-exit/crash, disconnect, timeout, and ownership-conflict gates remain |
 | GPU workload timing | Explicit CPU-side VitaGL/SceGxm call-site hooks | GPU timestamps or automatic interposition are not implemented |
 
@@ -259,8 +265,10 @@ only within one declared or conservatively inferred thread generation.
 Decreases are discontinuities unless an explicit, experimentally justified
 effective wrap width and maximum one-interval wrap delta classify them as
 wraps. The VitaSDK storage type is known to be unsigned 64-bit; that does not
-prove a 64-bit effective counter or its unit. This library does not enumerate
-arbitrary threads or sample their program counters.
+prove a 64-bit effective counter or its unit. This library does not itself
+enumerate arbitrary threads or acquire their program counters. It validates
+and bounds samples produced by an explicit provider, but ships no provider
+that claims Vita foreign-thread support.
 
 There is no generic user-mode call that reveals every GPU command's execution
 time. Useful GPU profiling will require narrow hooks around VitaGL/SceGxm
@@ -312,9 +320,13 @@ read-only name resolution after sealing, combined stream drain/decoding,
 fail-closed sink behavior, bounded/partial Vita TCP transport behavior, PMU
 ownership/restoration policy, public-ScePerf
 adapter sequencing and cleanup, graphics hook ordering/nesting/bounds, and
-compile-time/runtime disabled behavior. The Python suite adds
-corrupt/truncated capture rejection, fragmented loopback TCP reception, byte
-bounds, named zone analysis, and graphics event JSON/Perfetto output.
+compile-time/runtime disabled behavior.
+The sampling suite additionally checks hard frame/storage bounds, unsupported
+capabilities, deterministic partial unwind results, stale foreign identities,
+release quarantine/retry, malformed frame progress, and stable output.
+The Python suite adds corrupt/truncated capture rejection, fragmented loopback
+TCP reception, byte bounds, named zone analysis, and graphics event
+JSON/Perfetto output.
 
 From a Visual Studio Developer Command Prompt on Windows:
 
@@ -328,7 +340,7 @@ build\host\test_vitaprofiler_names.exe
 
 That abbreviated MSVC example covers only the portable core and name table.
 Run `make host-test` in the validated VitaSDK/MSYS2 environment for the complete
-gate: all five native suites, the C-writer-to-Python-reader wire fixture, and
+gate: all native suites, the C-writer-to-Python-reader wire fixture, and
 the Python receiver/viewer tests.
 
 The native suite tests the ScePerf adapter's sequencing through injected calls;

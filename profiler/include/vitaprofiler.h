@@ -30,6 +30,7 @@ enum vp_result {
     VP_RESULT_OK = 0,
     VP_RESULT_DROPPED = 1,
     VP_RESULT_END = 2,
+    VP_RESULT_PARTIAL = 3,
     VP_ERROR_INVALID_ARGUMENT = -1,
     VP_ERROR_NOT_INITIALIZED = -2,
     VP_ERROR_PLATFORM = -3,
@@ -44,6 +45,8 @@ enum vp_result {
     VP_ERROR_BUSY = -12,
     VP_ERROR_IO = -13,
     VP_ERROR_RESTORE_REQUIRED = -14,
+    VP_ERROR_STALE_IDENTITY = -15,
+    VP_ERROR_RELEASE_REQUIRED = -16,
 };
 
 enum vp_name_flags {
