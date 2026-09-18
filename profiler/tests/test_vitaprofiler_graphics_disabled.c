@@ -20,7 +20,7 @@ int main(void)
         VP_GRAPHICS_FRAME_MARK(hooks + touched++, VP_GRAPHICS_FRAME) !=
             VP_RESULT_OK ||
         VP_GRAPHICS_SCOPE_PUSH(hooks + touched++, stack + touched++,
-                               VP_GRAPHICS_ZONE_VITAGL_DRAW_SUBMIT) !=
+                               VP_GRAPHICS_ZONE_VITAGL_DRAW_CALL) !=
             VP_RESULT_OK ||
         VP_GRAPHICS_SCOPE_POP(hooks + touched++, stack + touched++) !=
             VP_RESULT_OK ||

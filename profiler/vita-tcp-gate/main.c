@@ -3,6 +3,7 @@
 #include "vitaprofiler_tcp_vita.h"
 
 #include <psp2/ctrl.h>
+#include <psp2/kernel/processmgr.h>
 #include <psp2/kernel/threadmgr.h>
 #include <psp2/net/net.h>
 #include <psp2/net/netctl.h>
@@ -557,7 +558,7 @@ static int run_capture(void)
     if (result != VP_RESULT_OK)
         goto cleanup;
 
-    stream_start_us = (int64_t)sceKernelGetSystemTimeWide();
+    stream_start_us = (int64_t)sceKernelGetProcessTimeWide();
     if (stream_start_us < 0) {
         result = VP_ERROR_PLATFORM;
         report_vp_result("read stream start clock", result);

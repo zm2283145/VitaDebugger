@@ -11,10 +11,8 @@ _Static_assert(sizeof(SceKernelSysClock) == sizeof(uint64_t),
 
 static uint64_t vp_vita_clock(void* user)
 {
-    SceInt64 now;
     (void)user;
-    now = sceKernelGetSystemTimeWide();
-    return now < 0 ? 0u : (uint64_t)now;
+    return (uint64_t)sceKernelGetProcessTimeWide();
 }
 
 static uint32_t vp_vita_thread_id(void* user)
@@ -69,7 +67,7 @@ int vp_vita_init(struct vp_context* context, struct vp_slot* slots,
 int vp_vita_capture_memory(struct vp_vita_memory_snapshot* snapshot)
 {
     SceKernelFreeMemorySizeInfo memory;
-    SceInt64 now;
+    uint64_t now;
     if (snapshot == NULL)
         return VP_ERROR_INVALID_ARGUMENT;
 
@@ -79,11 +77,9 @@ int vp_vita_capture_memory(struct vp_vita_memory_snapshot* snapshot)
     if (sceKernelGetFreeMemorySize(&memory) < 0)
         return VP_ERROR_PLATFORM;
 
-    now = sceKernelGetSystemTimeWide();
-    if (now < 0)
-        return VP_ERROR_PLATFORM;
-    snapshot->timestamp_us = (uint64_t)now;
-    snapshot->process_time_us = (uint64_t)sceKernelGetProcessTimeWide();
+    now = (uint64_t)sceKernelGetProcessTimeWide();
+    snapshot->timestamp_us = now;
+    snapshot->process_time_us = now;
     snapshot->free_user_bytes = (uint32_t)memory.size_user;
     snapshot->free_cdram_bytes = (uint32_t)memory.size_cdram;
     snapshot->free_phycont_bytes = (uint32_t)memory.size_phycont;
@@ -137,7 +133,7 @@ int vp_vita_capture_thread(uint32_t thread_id,
                            struct vp_vita_thread_snapshot* snapshot)
 {
     SceKernelThreadInfo info;
-    SceInt64 now;
+    uint64_t now;
     int stack_free;
     SceUID target;
 
@@ -153,11 +149,8 @@ int vp_vita_capture_thread(uint32_t thread_id,
     stack_free = sceKernelGetThreadStackFreeSize(target);
     if (stack_free < 0)
         return VP_ERROR_PLATFORM;
-    now = sceKernelGetSystemTimeWide();
-    if (now < 0)
-        return VP_ERROR_PLATFORM;
-
-    snapshot->timestamp_us = (uint64_t)now;
+    now = (uint64_t)sceKernelGetProcessTimeWide();
+    snapshot->timestamp_us = now;
     snapshot->run_clocks = (uint64_t)info.runClocks;
     snapshot->thread_id = (uint32_t)target;
     snapshot->stack_free_bytes = stack_free;

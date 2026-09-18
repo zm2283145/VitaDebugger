@@ -99,7 +99,7 @@ static int generate_fixture(const char* path)
     if (vp_graphics_frame_mark(&graphics, VP_GRAPHICS_FRAME) !=
             VP_RESULT_OK ||
         vp_graphics_zone_begin(&graphics,
-                               VP_GRAPHICS_ZONE_VITAGL_DRAW_SUBMIT,
+                               VP_GRAPHICS_ZONE_VITAGL_DRAW_CALL,
                                &graphics_draw) != VP_RESULT_OK)
         goto done;
     source.now = 18025u;

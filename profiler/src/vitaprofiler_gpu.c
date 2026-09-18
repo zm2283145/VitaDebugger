@@ -12,7 +12,7 @@ static const char* const vp_graphics_zone_names[VP_GRAPHICS_ZONE_COUNT] = {
     "scegxm.scene.cpu",
     "scegxm.finish.cpu_wait",
     "scegxm.display_queue.cpu_submit",
-    "vitagl.draw.cpu_submit",
+    "vitagl.draw.cpu_call",
     "vitagl.shader.cpu",
     "vitagl.state.cpu",
     "vitagl.alloc.cpu",
@@ -20,6 +20,12 @@ static const char* const vp_graphics_zone_names[VP_GRAPHICS_ZONE_COUNT] = {
     "scegxm.shader.cpu",
     "scegxm.state.cpu",
     "scegxm.alloc.cpu",
+    "scegxm.scene_begin.cpu",
+    "scegxm.scene_end.cpu",
+    "scegxm.scene_reset.cpu",
+    "scegxm.display_queue_add.cpu_wait",
+    "scegxm.display_callback.cpu",
+    "display.vblank.cpu_wait",
 };
 
 static const char* const

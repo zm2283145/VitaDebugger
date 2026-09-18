@@ -6,9 +6,13 @@ discover renderer state, and does not interpose, patch, or automatically wrap
 a graphics library. The application or pinned graphics-library source chooses
 each call site and retains all call, error, thread, and shutdown ownership.
 
-Every duration is CPU wall time observed around a call. The API provides no
-GPU timestamps and cannot distinguish GPU execution from command construction,
-driver work, queueing, or CPU waits.
+Every duration is CPU wall time observed around a call. `vp_vita_init()` uses
+`sceKernelGetProcessTimeWide()`, the same microsecond source Vita newlib uses
+for `CLOCK_MONOTONIC`; VitaGL's own timing uses the corresponding low-width
+process-time clock and describes draw measurements as CPU time. The API
+provides no GPU timestamps, and no GL timestamp-query facility was found. It
+cannot infer GPU execution from command construction, driver work, queueing,
+or CPU waits.
 
 ## Stable operations
 
@@ -23,14 +27,20 @@ original zones and two draw counters; deeper helpers return
 | --- | --- | --- |
 | Zone | `vitagl.frame.cpu` | Complete application frame around VitaGL work |
 | Zone | `vitagl.swap_buffers.cpu` | `vglSwapBuffers()` |
-| Zone | `vitagl.draw.cpu_submit` | One VitaGL draw submission |
+| Zone | `vitagl.draw.cpu_call` | CPU cost at one owned `glDraw*`/VitaGL draw entry |
 | Zone | `vitagl.shader.cpu` | Shader create, compile, link, or bind operation |
 | Zone | `vitagl.state.cpu` | Material state change or a bounded state batch |
 | Zone | `vitagl.alloc.cpu` | Graphics allocation or release call |
 | Zone | `scegxm.scene.cpu` | Matching `sceGxmBeginScene()`/`sceGxmEndScene()` flow |
+| Zone | `scegxm.scene_begin.cpu` | One direct `sceGxmBeginScene()` call |
+| Zone | `scegxm.scene_end.cpu` | One direct `sceGxmEndScene()` call |
+| Zone | `scegxm.scene_reset.cpu` | One source-owned scene reset path |
 | Zone | `scegxm.draw.cpu_submit` | One `sceGxmDraw()` submission |
 | Zone | `scegxm.finish.cpu_wait` | `sceGxmFinish()` CPU-observed wait |
-| Zone | `scegxm.display_queue.cpu_submit` | `sceGxmDisplayQueueAddEntry()` |
+| Zone | `scegxm.display_queue.cpu_submit` | Legacy broad display-queue label |
+| Zone | `scegxm.display_queue_add.cpu_wait` | `sceGxmDisplayQueueAddEntry()` backpressure/stall |
+| Zone | `scegxm.display_callback.cpu` | Display callback work on the display-queue thread |
+| Zone | `display.vblank.cpu_wait` | Explicit display/vblank wait call |
 | Zone | `scegxm.shader.cpu` | Program registration, binding, or release |
 | Zone | `scegxm.state.cpu` | State setter or a bounded state batch |
 | Zone | `scegxm.alloc.cpu` | SceGxm-related allocation or release call |
@@ -45,6 +55,11 @@ semantics. Pick one interpretation for an integration and document it beside
 the call site. Prefer per-frame counters over a zone around every inexpensive
 state setter; per-draw and per-state zones can create more telemetry traffic
 than the render work warrants.
+
+Keep boundaries separate when the owner exposes them. A `glDraw*` zone is the
+CPU entry cost seen by the application; it is not the same event as the
+internal `sceGxmDraw*` submission. Likewise, scene begin, end, and reset calls
+answer different questions than one broad scene-flow zone.
 
 ## Opt-in lifecycle and disabled cost
 
@@ -134,7 +149,7 @@ int submit_display_entry(struct renderer* renderer)
 
     profile_result = VP_GRAPHICS_ZONE_BEGIN(
         &renderer->graphics,
-        VP_GRAPHICS_ZONE_SCEGXM_DISPLAY_QUEUE_SUBMIT, &submit);
+        VP_GRAPHICS_ZONE_SCEGXM_DISPLAY_QUEUE_ADD_WAIT, &submit);
     result = sceGxmDisplayQueueAddEntry(
         renderer->old_sync, renderer->new_sync,
         renderer->display_data);
@@ -144,11 +159,19 @@ int submit_display_entry(struct renderer* renderer)
 }
 ```
 
-The same structure applies to `sceGxmDraw()`, `sceGxmFinish()`, shader/state
-operations, and allocation calls. `sceGxmFinish()` specifically measures CPU
-time spent in the call, which may include a wait; it is not GPU command timing.
-Application code outside VitaGL must not claim to wrap SceGxm calls that VitaGL
-owns internally.
+The same structure applies to `sceGxmDraw()`, scene begin/end/reset,
+`sceGxmFinish()`, shader/state operations, and allocation calls.
+`sceGxmDisplayQueueAddEntry()` duration primarily exposes queue
+backpressure/stall, not pure GPU duration. The display callback is a separate
+zone on the display-queue thread; its time precedes display scheduling and any
+explicit vblank wait. Keep an explicit vblank wait in
+`VP_GRAPHICS_ZONE_DISPLAY_VBLANK_WAIT`.
+
+`sceGxmFinish()` is a blocking completion boundary, so
+`VP_GRAPHICS_ZONE_SCEGXM_FINISH_WAIT` can identify deliberate synchronization.
+Adding that call solely for profiling perturbs normal CPU/GPU overlap; only
+instrument an existing opt-in completion point. Application code outside
+VitaGL must not claim to wrap SceGxm calls that VitaGL owns internally.
 
 ## Ordering, overload, and export
 

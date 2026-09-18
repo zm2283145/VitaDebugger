@@ -193,7 +193,7 @@ static void test_cooperative_graphics_hooks(void)
     CHECK(vp_graphics_hooks_init(&hooks, &context, &ids) == VP_RESULT_OK,
           "initialize compatibility graphics hooks");
     CHECK(vp_graphics_zone_begin(
-              &hooks, VP_GRAPHICS_ZONE_VITAGL_DRAW_SUBMIT, &scene) ==
+              &hooks, VP_GRAPHICS_ZONE_VITAGL_DRAW_CALL, &scene) ==
                   VP_ERROR_UNSUPPORTED &&
               vp_graphics_counter(
                   &hooks, VP_GRAPHICS_COUNTER_VITAGL_SHADER_CHANGES, 1) ==
@@ -324,7 +324,7 @@ static void test_deep_graphics_instrumentation(void)
         VP_GRAPHICS_NAME_ID_SCEGXM_SCENE,
         VP_GRAPHICS_NAME_ID_SCEGXM_FINISH_WAIT,
         VP_GRAPHICS_NAME_ID_SCEGXM_DISPLAY_QUEUE_SUBMIT,
-        VP_GRAPHICS_NAME_ID_VITAGL_DRAW_SUBMIT,
+        VP_GRAPHICS_NAME_ID_VITAGL_DRAW_CALL,
         VP_GRAPHICS_NAME_ID_VITAGL_SHADER,
         VP_GRAPHICS_NAME_ID_VITAGL_STATE,
         VP_GRAPHICS_NAME_ID_VITAGL_ALLOCATION,
@@ -332,6 +332,12 @@ static void test_deep_graphics_instrumentation(void)
         VP_GRAPHICS_NAME_ID_SCEGXM_SHADER,
         VP_GRAPHICS_NAME_ID_SCEGXM_STATE,
         VP_GRAPHICS_NAME_ID_SCEGXM_ALLOCATION,
+        VP_GRAPHICS_NAME_ID_SCEGXM_SCENE_BEGIN,
+        VP_GRAPHICS_NAME_ID_SCEGXM_SCENE_END,
+        VP_GRAPHICS_NAME_ID_SCEGXM_SCENE_RESET,
+        VP_GRAPHICS_NAME_ID_SCEGXM_DISPLAY_QUEUE_ADD_WAIT,
+        VP_GRAPHICS_NAME_ID_SCEGXM_DISPLAY_CALLBACK,
+        VP_GRAPHICS_NAME_ID_DISPLAY_VBLANK_WAIT,
     };
     static const uint32_t expected_counters[VP_GRAPHICS_COUNTER_COUNT] = {
         VP_GRAPHICS_NAME_ID_VITAGL_DRAW_CALLS,
@@ -391,7 +397,7 @@ static void test_deep_graphics_instrumentation(void)
 
     CHECK(vp_graphics_hooks_set_enabled(&hooks, 0) == VP_RESULT_OK &&
               vp_graphics_zone_begin(
-                  &hooks, VP_GRAPHICS_ZONE_VITAGL_DRAW_SUBMIT,
+                  &hooks, VP_GRAPHICS_ZONE_VITAGL_DRAW_CALL,
                   &disabled_scope) == VP_RESULT_OK &&
               vp_graphics_zone_end(&hooks, &disabled_scope) ==
                   VP_RESULT_OK &&

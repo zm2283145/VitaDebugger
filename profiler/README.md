@@ -66,6 +66,10 @@ development-computer tool owns its TCP listener and output files. PMU discovery
 is an optional companion capability, not a hidden dependency of the portable
 profiler core.
 
+On Vita, `vp_vita_init()` uses `sceKernelGetProcessTimeWide()` for the event
+clock. It is a monotonic microsecond process-time basis and matches Vita
+newlib's `CLOCK_MONOTONIC` mapping; it is not a GPU clock.
+
 ## Quick start
 
 ```c

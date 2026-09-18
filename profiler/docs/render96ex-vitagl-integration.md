@@ -3,9 +3,12 @@
 This records the cooperative call-site audit and subsequent default-off
 integration in the `Render96Ex-Vita` checkout. It deliberately does not patch
 imports, interpose VitaGL/SceGxm symbols, or modify a graphics library binary. The `vitaprofiler_gpu.h` hooks record CPU-observed time only; they are not GPU
-timestamps. The library now exposes deeper draw submission, shader/state,
-allocation, frame-marker, and bounded nesting helpers, but the captured
-Render96EX baseline below predates those additions.
+timestamps. The Vita adapter uses `sceKernelGetProcessTimeWide()` as its
+microsecond clock. The library now exposes separate VitaGL draw-call entry,
+SceGxm draw submission, scene begin/end/reset, display-queue backpressure,
+display callback, vblank wait, shader/state, allocation, frame-marker, and
+bounded nesting helpers, but the captured Render96EX baseline below predates
+those additions.
 
 ## Audit identity
 
@@ -83,13 +86,17 @@ dedicated cooperative drain thread or an existing non-render control thread,
 with an explicit shutdown/join owner.
 
 An optional second phase may patch the project's pinned VitaGL **source** at
-the exact SceGxm call sites it owns and use the deeper SceGxm draw, wait,
-display-queue, shader/state, and allocation hook IDs. The application-owned
-Render96EX layer can also adopt `graphics.frame.cpu`, per-frame shader/state
-and allocation counters, and the compile-time no-op macros. That must be a
+the exact SceGxm call sites it owns. Keep the application-visible `glDraw*`
+entry cost separate from the internal `sceGxmDraw*` submission; record scene
+begin/end/reset independently; classify `sceGxmDisplayQueueAddEntry()` as
+queue backpressure; and record display-callback and explicit vblank-wait time
+on their actual threads. `sceGxmFinish()` is opt-in because adding a blocking
+completion point perturbs CPU/GPU overlap. The application-owned Render96EX
+layer can also adopt `graphics.frame.cpu`, per-frame shader/state and
+allocation counters, and the compile-time no-op macros. That must be a
 reviewed source build with balanced cleanup on every return path. Runtime
-symbol replacement, import hooks, and binary interposition remain out of
-scope.
+symbol replacement, import hooks, binary interposition, and GL timestamp
+queries remain unavailable/out of scope.
 
 ## Bounded integration gate
 

@@ -131,17 +131,17 @@ class DecodeTests(unittest.TestCase):
         self.assertEqual(capture.resolve_name(capture.events[6].name_id),
                          "graphics.frame.cpu")
         self.assertEqual(capture.resolve_name(capture.events[7].name_id),
-                         "vitagl.draw.cpu_submit")
+                         "vitagl.draw.cpu_call")
         self.assertEqual(capture.events[8].value, 25)
         self.assertEqual(capture.resolve_name(capture.events[9].name_id),
                          "vitagl.draw_calls")
         self.assertEqual(capture.events[9].value, 43)
         decoded = trace.capture_to_json(capture)
         self.assertEqual(decoded["events"][7]["name"],
-                         "vitagl.draw.cpu_submit")
+                         "vitagl.draw.cpu_call")
         perfetto = trace.capture_to_chrome_trace(capture)
         self.assertTrue(any(event.get("ph") == "X" and
-                            event.get("name") == "vitagl.draw.cpu_submit" and
+                            event.get("name") == "vitagl.draw.cpu_call" and
                             event.get("dur") == 25
                             for event in perfetto["traceEvents"]))
         self.assertTrue(any(event.get("ph") == "C" and
