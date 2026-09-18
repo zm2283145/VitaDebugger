@@ -20,6 +20,7 @@ enum uvdb_breakpoint_patch_result {
     UVDB_BREAKPOINT_PATCH_ERROR_PATCH_READBACK = -6,
     UVDB_BREAKPOINT_PATCH_ERROR_PATCH_MISMATCH = -7,
     UVDB_BREAKPOINT_PATCH_ERROR_RESTORE_PENDING = -8,
+    UVDB_BREAKPOINT_PATCH_ERROR_IDENTITY = -9,
 };
 
 enum uvdb_breakpoint_patch_state {
@@ -50,6 +51,26 @@ struct uvdb_breakpoint_patch_io {
     void* user;
 };
 
+struct uvdb_breakpoint_patch_identity {
+    uint64_t target;
+    uint64_t module;
+};
+
+/* Return one only while the exact target and module objects named by
+ * `identity` still own the address range. Zero or a negative result is a
+ * fail-closed mismatch. The caller must serialize object destruction against
+ * the callback and following write; numeric IDs alone are not sufficient when
+ * an operating system can reuse them. */
+typedef int (*uvdb_breakpoint_patch_identity_fn)(
+    void* user, uintptr_t address, size_t size,
+    const struct uvdb_breakpoint_patch_identity* identity);
+
+struct uvdb_breakpoint_patch_owner {
+    struct uvdb_breakpoint_patch_identity identity;
+    uvdb_breakpoint_patch_identity_fn matches;
+    void* user;
+};
+
 /* The slot is caller-owned and allocation-free. Treat its fields as read-only
  * outside this module. Zero initialization is valid; slot_init is provided to
  * make initialization explicit. Operations on one slot are not concurrent. */
@@ -59,7 +80,9 @@ struct uvdb_breakpoint_patch_slot {
     uint8_t patch[UVDB_BREAKPOINT_PATCH_MAX_SIZE];
     uint8_t size;
     uint8_t state;
-    uint8_t reserved[2];
+    uint8_t identity_bound;
+    uint8_t reserved;
+    struct uvdb_breakpoint_patch_identity identity;
 };
 
 void uvdb_breakpoint_patch_slot_init(
@@ -82,6 +105,16 @@ int uvdb_breakpoint_patch_install(
     const struct uvdb_breakpoint_patch_io* io, uintptr_t address,
     const void* patch, size_t size);
 
+/* Identity-bound variant for targets whose module/process lifetime can be
+ * proven by a retained-object provider. A mismatch before installation writes
+ * nothing. A mismatch during restoration retains the complete obligation and
+ * writes nothing until the exact owner is available again. */
+int uvdb_breakpoint_patch_install_owned(
+    struct uvdb_breakpoint_patch_slot* slot,
+    const struct uvdb_breakpoint_patch_io* io,
+    const struct uvdb_breakpoint_patch_owner* owner, uintptr_t address,
+    const void* patch, size_t size);
+
 /* Restore is idempotent for an empty slot. For installed or pending slots it
  * writes the exact original bytes, synchronizes caches, and reads them back.
  * Only a complete write + successful sync + exact matching readback clears the
@@ -89,6 +122,11 @@ int uvdb_breakpoint_patch_install(
 int uvdb_breakpoint_patch_restore(
     struct uvdb_breakpoint_patch_slot* slot,
     const struct uvdb_breakpoint_patch_io* io);
+
+int uvdb_breakpoint_patch_restore_owned(
+    struct uvdb_breakpoint_patch_slot* slot,
+    const struct uvdb_breakpoint_patch_io* io,
+    const struct uvdb_breakpoint_patch_owner* owner);
 
 #ifdef __cplusplus
 }

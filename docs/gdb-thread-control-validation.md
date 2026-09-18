@@ -20,10 +20,33 @@ stepped; Phase 6 verified its user-library fix without changing the kernel
 companion. Phase 7 fixed GDB's ordinary hidden-breakpoint step-over `E16`, then
 verified ARM-state `MOV PC`, `LDMDB {..., PC}`, and `LDR PC` execution, clean
 detach, and reconnect. Controlled failure fixtures and longer stress runs
-remain pending. The larger decoder matrix has pure host coverage; only the
+now have deterministic host coverage but remain unrun on hardware. The larger
+decoder matrix has pure host coverage; only the
 representative forms named in Phase 7 inherit that hardware result. Do not
 describe the entire thread-control work as fully promoted until every check
 below passes.
+
+## Current evidence boundary
+
+This roadmap increment has three deliberately separate evidence levels:
+
+- **Host-modeled:** the production `uvdb.c` translation unit passes 2,048
+  logical-tick fake-kernel cycles covering stop ownership, late-thread
+  reconciliation, controller/lease exclusion, renewal and `EndStop` failure,
+  socket shutdown, watchdog expiry, fresh-stop recovery, stale generation
+  completion, disconnect, restart, trap cleanup, and zero leaked ownership.
+  No wall-clock sleep determines the result.
+- **Vita cross-built:** library-only, kernel-thread-control, and opt-in VFP
+  configurations compile and package with the current VitaSDK. The new
+  encoding tables are linked as data; dangerous forms are not executed.
+- **Hardware-proven:** only the Phase 1-7 results recorded below. This
+  increment has not contacted a Vita and adds no Phase 8 hardware claim.
+
+Renewal failure is now published only when both the observed stop token and
+its monotonic generation still match. A delayed failure from a retired session
+therefore cannot poison a replacement stop. Controlled renew/`EndStop`
+injection is currently a host fake-kernel facility, not a remotely exposed
+production or kernel test hook.
 
 ## Selection contract
 
@@ -75,6 +98,17 @@ stepping. The deterministic worker fixture avoids this ambiguity by parking
 each worker in a different exported function; it does not remove the general
 limitation for application threads that share code.
 
+The host model now names the minimum proof boundary for any future isolated
+foreign step: scheduler ownership, durable context identity, exclusive trap
+ownership, and rollback readiness must all refer to the same nonzero stop
+generation and a live selected thread distinct from the exception thread.
+Current VitaSDK headers document debug suspend/resume and read-only suspended
+thread snapshots, but not scheduler locking, nesting/ownership semantics, or
+an atomic resume-one/resuspend transaction. No production provider satisfies
+the model, so arbitrary foreign-thread execution remains disabled. The
+existing `vCont;s:T;c` behavior remains process-resume stepping with its
+documented distinct-path limitation; it must not be described as isolated.
+
 ## Stop/resume failure contract
 
 - A failed kernel all-stop acquisition closes the client instead of serving a
@@ -112,11 +146,27 @@ stepping, exact-stopped-thread retained-token validation, blocking/exclusive
 instruction rejection, ARM/Thumb direct and memory-address planners, IT
 placement, target/source alignment, conservative PC-writer classification, the
 no-EndStop-with-live-UDF cleanup policy, unsupported actions, and malformed
-packets. These are pure planner/classifier tests. Phase 7 additionally exercises
+packets. It also removes each foreign-step ownership proof independently and
+rejects stale context, trap, and rollback generations. The kernel-control
+integration target exercises the real lease lifecycle for 2,048 deterministic
+cycles, including renew/`EndStop` injection and cleanup. Breakpoint-patch tests
+cover partial writes, verification corruption, disconnect, competing ownership,
+exact original-byte retention, stale target/module identity, and restoration
+retry. These are host tests. Phase 7 additionally exercises
 successful target-memory reads, temporary-trap insertion, and retained-token
-integration live; injected read/install failures and trap rollback still need
-coverage. Also cross-build library-only, kernel-thread-control, and opt-in VFP
-variants so none of the feature combinations drift.
+integration live; the expanded injected rollback and identity matrix remains
+unrun on hardware. Also cross-build library-only, kernel-thread-control, and
+opt-in VFP variants so none of the feature combinations drift.
+
+The focused commands for this increment are:
+
+```sh
+make host-test-thread-control
+make host-test-breakpoint-patch
+make host-test-exclusive-step
+make host-test-uvdb-core-integration
+make host-test-uvdb-kernel-control-integration
+```
 
 ## Recorded live-hardware results
 
@@ -532,3 +582,30 @@ companion.
 Record the GDB transcript, exact application/kernel hashes, firmware, and
 whether each stop names the expected thread. Host tests and a VitaSDK cross-build
 are necessary but do not replace this lifecycle gate.
+
+## Phase 8: serialized failure and cleanup gate (not yet run)
+
+Use one exclusive hardware window; do not run this gate concurrently with
+another Vita workstream. Install the matching kernel plugin, reboot before
+launching the matching application, and record SHA-256 for the exact SKPRX,
+VPK, installed `eboot.bin`, and symbol ELF. Stop immediately on a reboot,
+kernel panic, inability to reconnect, residual UDF bytes, a target thread
+remaining suspended beyond the watchdog bound, or any artifact/hash mismatch.
+
+The current build does not expose production renew/`EndStop` injection.
+Therefore Phase 8 must not simulate those failures by guessing kernel APIs or
+corrupting live tokens. First add a separately reviewed, test-build-only,
+bounded kernel control that can fail exactly one renew or end operation while
+preserving the normal watchdog and ownership bookkeeping. The control must be
+absent from release builds and must report its consumed generation.
+
+For each injected operation, capture monitor status and raw RSP traffic before
+the injection, at disconnect, after the watchdog bound, after reconnect, and
+after clean detach. Required evidence is: the injected generation is named;
+the old generation cannot mark a replacement failed; late threads are included
+before resume; original trap bytes are restored before ownership is released;
+the application advances after watchdog recovery; restart accepts a new
+client; and final status reports zero software breakpoints and no active stop
+session. Recover by waiting for the watchdog, closing the client, reconnecting
+once, and cleanly detaching. If that fails, terminate the application; only
+after it exits may the operator disable the plugin entry and reboot.

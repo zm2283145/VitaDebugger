@@ -5,8 +5,10 @@
 #include <string.h>
 #include <unistd.h>
 
+#ifndef UVDB_HOST_INTEGRATION_TEST
 #define UVDB_HOST_INTEGRATION_TEST 1
 #define UVDB_HOST_COHERENT_ALL_STOP_TEST 1
+#endif
 #include "../../src/uvdb.c"
 
 enum {
@@ -78,8 +80,50 @@ static int fake_ku_copy_calls;
 static int fake_ku_copy_fail_call;
 static int fake_ku_copy_fail_from;
 #ifdef UVDB_KERNEL_THREAD_CONTROL
-static int fake_end_stop_calls;
-static int fake_end_stop_fail_count;
+struct fake_stop_kernel {
+    SceUID threads[8];
+    SceUID owned[8];
+    int thread_count;
+    int owned_count;
+    int active;
+    unsigned int token;
+    unsigned int next_token;
+    unsigned int now_tick;
+    unsigned int deadline_tick;
+    unsigned int renew_calls;
+    unsigned int end_calls;
+    unsigned int fail_renew_count;
+    unsigned int fail_end_count;
+};
+
+static struct fake_stop_kernel fake_stop;
+
+static int fake_stop_contains(const SceUID* values, int count, SceUID value)
+{
+    for(int index = 0; index < count; ++index)
+        if(values[index] == value)
+            return 1;
+    return 0;
+}
+
+static void fake_stop_reset(void)
+{
+    memset(&fake_stop, 0, sizeof(fake_stop));
+    fake_stop.threads[0] = FAKE_THREAD;
+    fake_stop.threads[1] = FAKE_OTHER_THREAD;
+    fake_stop.thread_count = 2;
+    fake_stop.next_token = 0x100u;
+}
+
+static void fake_stop_watchdog(void)
+{
+    if(fake_stop.active && fake_stop.now_tick >= fake_stop.deadline_tick)
+    {
+        fake_stop.active = 0;
+        fake_stop.token = 0;
+        fake_stop.owned_count = 0;
+    }
+}
 #endif
 
 char __executable_start[1];
@@ -173,10 +217,6 @@ static void reset_core(void)
     fake_ku_copy_calls = 0;
     fake_ku_copy_fail_call = 0;
     fake_ku_copy_fail_from = 0;
-#ifdef UVDB_KERNEL_THREAD_CONTROL
-    fake_end_stop_calls = 0;
-    fake_end_stop_fail_count = 0;
-#endif
     memset(&fake_predecessor_context, 0, sizeof(fake_predecessor_context));
     __atomic_store_n(&uvdb_remote_syscall_pending, NULL, __ATOMIC_RELEASE);
     if(!uvdb_memory_write_has_pending())
@@ -229,12 +269,18 @@ static void reset_core(void)
     fake_thread = FAKE_THREAD;
 #ifdef UVDB_KERNEL_THREAD_CONTROL
     __atomic_store_n(&uvdb_lease_stop, 0, __ATOMIC_RELEASE);
-    __atomic_store_n(&uvdb_stop_failed, 0, __ATOMIC_RELEASE);
-    __atomic_store_n(
-        &uvdb_stop_owner, UVDB_STOP_OWNER_NONE, __ATOMIC_RELEASE);
-    __atomic_store_n(&uvdb_stop_token, 1u, __ATOMIC_RELEASE);
     uvdb_lease_thread = -1;
     uvdb_lease_thread_ended = 0;
+    fake_stop_reset();
+    __atomic_store_n(&uvdb_stop_token, 0, __ATOMIC_SEQ_CST);
+    __atomic_store_n(&uvdb_stop_failed, 0, __ATOMIC_SEQ_CST);
+    __atomic_store_n(&uvdb_stop_owner, UVDB_STOP_OWNER_NONE,
+                     __ATOMIC_SEQ_CST);
+    struct vd_kernel_stop_result stop_result = {0};
+    check(vdKernelBeginStop(2000, -1, &stop_result) == 0 &&
+              stop_result.token != 0,
+          "kernel fixture begins reset stop");
+    uvdb_publish_stop_token(stop_result.token);
 #endif
 }
 
@@ -720,17 +766,20 @@ static void test_stop_retries_retained_kernel_stop(void)
 {
     reset_core();
     uvdb_server_thread = -1;
-    fake_end_stop_fail_count = 1;
+    unsigned int token = __atomic_load_n(
+        &uvdb_stop_token, __ATOMIC_ACQUIRE);
+    unsigned int end_calls = fake_stop.end_calls;
+    fake_stop.fail_end_count = 1u;
     check(uvdb_stop_server() < 0 &&
-              fake_end_stop_calls == 1 &&
+              fake_stop.end_calls == end_calls + 1u &&
               __atomic_load_n(&uvdb_stop_token,
-                              __ATOMIC_ACQUIRE) == 1u &&
+                              __ATOMIC_ACQUIRE) == token &&
               uvdb_state == UVDB_STATE_ERROR &&
               __atomic_load_n(&uvdb_target_stopped,
                               __ATOMIC_ACQUIRE),
           "failed EndStop retains coherent all-stop for retry");
     check(uvdb_stop_server() == 0 &&
-              fake_end_stop_calls == 2 &&
+              fake_stop.end_calls == end_calls + 2u &&
               __atomic_load_n(&uvdb_stop_token,
                               __ATOMIC_ACQUIRE) == 0u &&
               uvdb_state == UVDB_STATE_IDLE &&
@@ -1486,6 +1535,147 @@ static void test_unload_fails_without_kernel_callback_fence(void)
               uvdb_handlers.self != 0,
           "production unload fails closed without KuBridge callback fence");
 }
+#ifdef UVDB_KERNEL_THREAD_CONTROL
+static void test_kernel_stop_failure_stress(void)
+{
+    reset_core();
+    uvdb_claim_stop_controller();
+    check(uvdb_kernel_end_stop() == 0,
+          "stress fixture retires reset stop");
+    uvdb_release_stop_controller();
+
+    uint32_t previous_generation = __atomic_load_n(
+        &uvdb_stop_generation, __ATOMIC_SEQ_CST);
+    for(unsigned int cycle = 0; cycle < 2048u; ++cycle)
+    {
+        uvdb_socket = FAKE_SOCKET;
+        check(uvdb_kernel_begin_stop() == 0 &&
+                  fake_stop.active && fake_stop.owned_count == 1,
+              "many-cycle begin owns every initial peer");
+        uint32_t generation = __atomic_load_n(
+            &uvdb_stop_generation, __ATOMIC_SEQ_CST);
+        check(generation != 0 && generation != previous_generation,
+              "each stop publication advances its generation");
+        previous_generation = generation;
+
+        SceUID late = (SceUID)(0x1000u + cycle);
+        fake_stop.threads[fake_stop.thread_count++] = late;
+        uvdb_lease_renew_once();
+        check(fake_stop_contains(fake_stop.owned,
+                                 fake_stop.owned_count, late),
+              "renew deterministically reconciles a late thread");
+
+        unsigned int renew_calls = fake_stop.renew_calls;
+        __atomic_store_n(&uvdb_stop_owner, UVDB_STOP_OWNER_CONTROLLER,
+                         __ATOMIC_SEQ_CST);
+        uvdb_lease_renew_once();
+        check(fake_stop.renew_calls == renew_calls &&
+              __atomic_load_n(&uvdb_stop_owner, __ATOMIC_SEQ_CST) ==
+                  UVDB_STOP_OWNER_CONTROLLER,
+              "controller ownership excludes the lease keeper");
+        __atomic_store_n(&uvdb_stop_owner, UVDB_STOP_OWNER_NONE,
+                         __ATOMIC_SEQ_CST);
+
+        if((cycle % 7u) == 0)
+        {
+            unsigned int lifecycle = fake_lifecycle_sequence;
+            fake_stop.fail_renew_count = 1u;
+            uvdb_lease_renew_once();
+            check(__atomic_load_n(&uvdb_stop_failed, __ATOMIC_SEQ_CST) == 1 &&
+                  __atomic_load_n(&uvdb_stop_token,
+                                  __ATOMIC_SEQ_CST) != 0 &&
+                  fake_lifecycle_sequence > lifecycle,
+                  "injected renew failure retains token and disconnects");
+            fake_stop.now_tick = fake_stop.deadline_tick;
+            fake_stop_watchdog();
+            uvdb_claim_stop_controller();
+            check(uvdb_kernel_recover_stop() == 0 &&
+                      fake_stop.active &&
+                      __atomic_load_n(&uvdb_stop_failed,
+                                      __ATOMIC_SEQ_CST) == 0,
+                  "watchdog expiry recovers through a fresh stop generation");
+            uvdb_release_stop_controller();
+        }
+
+        uvdb_claim_stop_controller();
+        if((cycle % 11u) == 0)
+        {
+            fake_stop.fail_end_count = 1u;
+            check(uvdb_kernel_end_stop() == -1 &&
+                      fake_stop.active &&
+                      __atomic_load_n(&uvdb_stop_token,
+                                      __ATOMIC_SEQ_CST) != 0 &&
+                      !__atomic_load_n(&uvdb_stop_failed,
+                                       __ATOMIC_SEQ_CST),
+                  "injected end failure re-establishes coherent ownership");
+        }
+        check(uvdb_kernel_end_stop() == 0 &&
+                  !fake_stop.active && fake_stop.owned_count == 0 &&
+                  __atomic_load_n(&uvdb_stop_token,
+                                  __ATOMIC_SEQ_CST) == 0,
+              "end retry releases only the current generation");
+        uvdb_release_stop_controller();
+        fake_stop.thread_count = 2;
+    }
+
+    check(fake_stop.renew_calls > 2048u &&
+              fake_stop.end_calls > 2048u,
+          "stress ran deterministic renew/end failure cycles");
+}
+
+static void test_stale_lease_generation_and_disconnect_cleanup(void)
+{
+    static _Alignas(4) unsigned char code[4] =
+        {0x11u, 0x22u, 0x33u, 0x44u};
+    const unsigned char original[sizeof(code)] =
+        {0x11u, 0x22u, 0x33u, 0x44u};
+
+    reset_core();
+    unsigned int old_token = __atomic_load_n(
+        &uvdb_stop_token, __ATOMIC_SEQ_CST);
+    uint32_t old_generation = __atomic_load_n(
+        &uvdb_stop_generation, __ATOMIC_SEQ_CST);
+    uvdb_claim_stop_controller();
+    uvdb_publish_stop_token(old_token);
+    check(__atomic_load_n(&uvdb_stop_token, __ATOMIC_SEQ_CST) == old_token &&
+              __atomic_load_n(&uvdb_stop_generation,
+                              __ATOMIC_SEQ_CST) != old_generation &&
+              uvdb_publish_stop_failure(old_token, old_generation) == 0 &&
+              !__atomic_load_n(&uvdb_stop_failed, __ATOMIC_SEQ_CST),
+          "late renew failure cannot poison a reused-token generation");
+    check(uvdb_kernel_end_stop() == 0,
+          "replacement generation remains endable");
+    uvdb_release_stop_controller();
+
+    reset_core();
+    check(breakpoint_insert_internal(
+              (uintptr_t)code, sizeof(code), 1) == 0 &&
+              memcmp(code, original, sizeof(code)) != 0,
+          "disconnect fixture installs and verifies a temporary trap");
+    fake_stop.fail_end_count = 1u;
+    uvdb_fail_stopped_client();
+    check(memcmp(code, original, sizeof(code)) == 0 &&
+              breakpoint_active_count() == 0 &&
+              !fake_stop.active && fake_stop.owned_count == 0 &&
+              __atomic_load_n(&uvdb_stop_token,
+                              __ATOMIC_SEQ_CST) == 0 &&
+              uvdb_socket < 0,
+          "disconnect restores trap before retrying failed EndStop");
+
+    reset_core();
+    fake_stop.now_tick = fake_stop.deadline_tick;
+    fake_stop_watchdog();
+    check(!fake_stop.active && fake_stop.owned_count == 0,
+          "watchdog timeout releases fake-kernel ownership");
+    uvdb_claim_stop_controller();
+    check(uvdb_kernel_recover_stop() == 0 &&
+              fake_stop.active,
+          "expired token restarts with a fresh all-stop");
+    check(uvdb_kernel_end_stop() == 0,
+          "restarted stop cleans up exactly");
+    uvdb_release_stop_controller();
+}
+#endif
 
 int main(void)
 {
@@ -1516,6 +1706,10 @@ int main(void)
     test_connected_hup_during_shutdown();
     test_deterministic_multithread_lifecycle_stress();
     test_unload_fails_without_kernel_callback_fence();
+#ifdef UVDB_KERNEL_THREAD_CONTROL
+    test_kernel_stop_failure_stress();
+    test_stale_lease_generation_and_disconnect_cleanup();
+#endif
     if(failures)
         return 1;
     puts("PASS: integrated uvdb.c protocol, exception, and lifecycle ordering");
@@ -1893,89 +2087,113 @@ int _sceKernelReceiveMsgPipeVector(
     return 0;
 }
 
+int uvdb_stdio_is_internal_thread(int thread_id)
+{ (void)thread_id; return 0; }
+int uvdb_restore_stdio(void) { return 0; }
+int uvdb_debugnet_stop(void) { return 0; }
+
 #ifdef UVDB_KERNEL_THREAD_CONTROL
 int vdKernelGetStatus(struct vd_kernel_status* status)
 {
     if(!status)
         return -1;
-    *status = (struct vd_kernel_status){
-        .abi_version = VD_KERNEL_ABI_VERSION,
-        .capabilities =
-            VD_KERNEL_REQUIRED_THREAD_CONTROL_CAPABILITIES,
-        .max_threads = VD_KERNEL_MAX_THREADS,
-    };
+    memset(status, 0, sizeof(*status));
+    status->abi_version = VD_KERNEL_ABI_VERSION;
+    status->capabilities =
+        VD_KERNEL_REQUIRED_THREAD_CONTROL_CAPABILITIES;
+    status->max_threads = VD_KERNEL_MAX_THREADS;
     return 0;
 }
 
-int vdKernelBeginStop(
-    unsigned int lease_ms,
-    SceUID exempt_user_thread,
-    struct vd_kernel_stop_result* stop_result)
+int vdKernelGetThreadList(SceUID* ids, int capacity, int* copied_count,
+                          int* total_count)
 {
-    (void)lease_ms;
-    (void)exempt_user_thread;
-    if(!stop_result)
+    if(capacity < fake_stop.thread_count || !ids ||
+       !copied_count || !total_count)
         return -1;
-    *stop_result = (struct vd_kernel_stop_result){
-        .token = 1u,
-        .suspended_count = 1,
-        .failed_thread = -1,
-    };
+    memcpy(ids, fake_stop.threads,
+           (size_t)fake_stop.thread_count * sizeof(ids[0]));
+    *copied_count = fake_stop.thread_count;
+    *total_count = fake_stop.thread_count;
+    return 0;
+}
+
+int vdKernelBeginStop(unsigned int lease_ms, SceUID exempt_user_thread,
+                      struct vd_kernel_stop_result* stop_result)
+{
+    if(!stop_result || lease_ms < 250u || lease_ms > 5000u ||
+       fake_stop.active)
+        return -1;
+    memset(stop_result, 0, sizeof(*stop_result));
+    fake_stop.active = 1;
+    fake_stop.token = ++fake_stop.next_token;
+    fake_stop.deadline_tick = fake_stop.now_tick + 4u;
+    fake_stop.owned_count = 0;
+    for(int index = 0; index < fake_stop.thread_count; ++index)
+        if(fake_stop.threads[index] != fake_thread &&
+           fake_stop.threads[index] != exempt_user_thread)
+            fake_stop.owned[fake_stop.owned_count++] =
+                fake_stop.threads[index];
+    stop_result->token = fake_stop.token;
+    stop_result->suspended_count = fake_stop.owned_count;
+    stop_result->failed_thread = -1;
     return 0;
 }
 
 int vdKernelRenewStop(unsigned int token, unsigned int lease_ms)
 {
-    return token == 1u && lease_ms == 2000u ? 0 : -1;
+    ++fake_stop.renew_calls;
+    if(fake_stop.fail_renew_count)
+    {
+        --fake_stop.fail_renew_count;
+        return -70;
+    }
+    fake_stop_watchdog();
+    if(!fake_stop.active || token != fake_stop.token ||
+       lease_ms < 250u || lease_ms > 5000u)
+        return -5;
+    for(int index = 0; index < fake_stop.thread_count; ++index)
+        if(fake_stop.threads[index] != fake_thread &&
+           fake_stop.threads[index] != uvdb_lease_thread &&
+           !fake_stop_contains(fake_stop.owned, fake_stop.owned_count,
+                               fake_stop.threads[index]))
+            fake_stop.owned[fake_stop.owned_count++] =
+                fake_stop.threads[index];
+    fake_stop.deadline_tick = fake_stop.now_tick + 4u;
+    return 0;
 }
 
 int vdKernelEndStop(unsigned int token, int* resumed_count)
 {
-    if(token != 1u)
-        return -1;
-    ++fake_end_stop_calls;
-    if(fake_end_stop_fail_count)
+    ++fake_stop.end_calls;
+    if(!resumed_count || !fake_stop.active || token != fake_stop.token)
+        return -5;
+    if(fake_stop.fail_end_count)
     {
-        --fake_end_stop_fail_count;
-        return -1;
+        --fake_stop.fail_end_count;
+        return -71;
     }
-    if(resumed_count)
-        *resumed_count = 1;
-    return 0;
-}
-
-int vdKernelGetThreadList(
-    SceUID* ids,
-    int capacity,
-    int* copied_count,
-    int* total_count)
-{
-    if(!ids || capacity < 1 || !copied_count || !total_count)
-        return -1;
-    ids[0] = FAKE_THREAD;
-    *copied_count = 1;
-    *total_count = 1;
+    *resumed_count = fake_stop.owned_count;
+    fake_stop.active = 0;
+    fake_stop.token = 0;
+    fake_stop.owned_count = 0;
     return 0;
 }
 
 int vdKernelGetThreadRegisters(
-    unsigned int token,
-    SceUID target_user_thread,
+    unsigned int token, SceUID target_user_thread,
     struct vd_thread_registers* registers)
 {
-    if(token != 1u || target_user_thread != FAKE_THREAD || !registers)
+    if(!registers || !fake_stop.active || token != fake_stop.token ||
+       !fake_stop_contains(fake_stop.threads, fake_stop.thread_count,
+                           target_user_thread))
         return -1;
     memset(registers, 0, sizeof(*registers));
-    registers->entry[0].r[0] = UINT32_C(0x11223344);
-    registers->entry[0].sp = UINT32_C(0x8100f000);
-    registers->entry[0].lr = UINT32_C(0x81000100);
-    registers->entry[0].pc = UINT32_C(0x81001234);
-    registers->entry[0].cpsr = UINT32_C(0x60000010);
+    registers->entry[0].sp = UINT32_C(0x81001000) +
+                             (uint32_t)target_user_thread * 0x10u;
+    registers->entry[0].pc = UINT32_C(0x81010000) +
+                             (uint32_t)target_user_thread * 4u;
+    registers->entry[0].cpsr = UINT32_C(0x10);
     return 0;
 }
 #endif
-
-int uvdb_stdio_is_internal_thread(int thread_id)
-{ (void)thread_id; return 0; }
-int uvdb_restore_stdio(void) { return 0; }
-int uvdb_debugnet_stop(void) { return 0; }

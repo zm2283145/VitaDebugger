@@ -807,6 +807,61 @@ int main(void)
           !uvdb_stop_cleanup_can_release(0, -1),
           "unknown cleanup state remains fail-closed");
 
+    struct uvdb_foreign_step_capability foreign = {
+        .proofs = UVDB_FOREIGN_STEP_REQUIRED_PROOFS,
+        .stop_generation = 7,
+        .inventory_generation = 7,
+        .context_generation = 7,
+        .trap_generation = 7,
+        .rollback_generation = 7,
+        .selected_thread = 0x202,
+        .exception_thread = 0x101,
+    };
+    uint32_t missing = UINT32_MAX;
+    check(uvdb_foreign_step_capability_validate(&foreign, &missing) == 0 &&
+          missing == 0,
+          "foreign-step host model requires every ownership proof");
+    static const uint32_t proof_bits[] = {
+        UVDB_FOREIGN_STEP_PROOF_SCHEDULER_OWNERSHIP,
+        UVDB_FOREIGN_STEP_PROOF_CONTEXT_IDENTITY,
+        UVDB_FOREIGN_STEP_PROOF_TRAP_OWNERSHIP,
+        UVDB_FOREIGN_STEP_PROOF_ROLLBACK,
+    };
+    for(size_t proof = 0;
+        proof < sizeof(proof_bits) / sizeof(proof_bits[0]); ++proof)
+    {
+        foreign.proofs = UVDB_FOREIGN_STEP_REQUIRED_PROOFS &
+                         ~proof_bits[proof];
+        missing = 0;
+        check(uvdb_foreign_step_capability_validate(
+                  &foreign, &missing) < 0 &&
+              missing == proof_bits[proof],
+              "foreign-step model rejects each missing ownership proof");
+    }
+    foreign.proofs = UVDB_FOREIGN_STEP_REQUIRED_PROOFS;
+    foreign.context_generation = 6;
+    check(uvdb_foreign_step_capability_validate(
+              &foreign, &missing) < 0,
+          "foreign-step model rejects stale context generation");
+    foreign.context_generation = 7;
+    foreign.trap_generation = 8;
+    check(uvdb_foreign_step_capability_validate(
+              &foreign, &missing) < 0,
+          "foreign-step model rejects stale trap ownership");
+    foreign.trap_generation = 7;
+    foreign.rollback_generation = 0;
+    check(uvdb_foreign_step_capability_validate(
+              &foreign, &missing) < 0,
+          "foreign-step model rejects missing rollback generation");
+    foreign.rollback_generation = 7;
+    foreign.selected_thread = foreign.exception_thread;
+    check(uvdb_foreign_step_capability_validate(
+              &foreign, &missing) < 0,
+          "foreign-step model is only for an exact foreign thread");
+    check(uvdb_foreign_step_capability_validate(NULL, &missing) < 0 &&
+          missing == UVDB_FOREIGN_STEP_REQUIRED_PROOFS,
+          "absent foreign-step provider remains explicitly disabled");
+
     if(failures)
         return 1;
     puts("PASS: coherent RSP thread selection and vCont planning");

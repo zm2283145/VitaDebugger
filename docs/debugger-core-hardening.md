@@ -44,6 +44,24 @@ chaining, transactional live memory writes, and File-I/O Ctrl-C is in
   re-arms the old breakpoint. Either restoration obligation remains durable
   and prevents resume/clean shutdown when verification is uncertain.
 
+Software-trap writes use the narrower breakpoint patch transaction. The host
+helper snapshots exact original bytes before publishing a restoration
+obligation, verifies patch write/cache sync/read-back, rolls back on every
+install failure, and retains the original bytes until a verified restoration
+clears the slot. Its failure matrix includes short/partial writes, sync
+failure, read-back corruption, disconnect, competing slot ownership, retry,
+and exact-byte restoration.
+
+An identity-bound variant additionally requires a retained target and module
+identity to own the exact address range before install and before every restore
+write. A mismatch performs no write and retains the obligation. The callback
+contract requires object destruction to be serialized through the validation
+and following write; reusable numeric process/module IDs alone are
+insufficient. Production breakpoint sites still use the legacy unbound wrapper
+because no Vita provider currently supplies those durable references. This is
+a host-modeled boundary, not a claim that live stale-module restoration is
+safe.
+
 Response retransmission after a peer NACK is intentionally unsupported at
 present. Such a NACK closes the operation rather than accepting an ambiguous
 protocol state. This is separate from the raw request NACK emitted above when
@@ -271,6 +289,9 @@ The focused host suite covers:
 - fake-kernel short reads, persistent and transient short writes, sync
   failures, verification corruption, explicit prepare/apply/commit, successful
   rollback, and retained restoration obligations;
+- identity-bound trap installation/restoration with disconnect, competing
+  ownership, stale target/module identity, no-write failure, exact original
+  byte retention, and later retry;
 - fake register/VFP setter snapshot, verification, rollback, and retry paths;
 - nested-guard serialization and fake predecessor chaining policy; and
 - a controlled two-thread primary/nested predecessor race proving that primary
@@ -305,6 +326,10 @@ The focused host suite covers:
 - a deterministic 1,000-generation stress run with three concurrent
   protocol/fault workers plus console pressure, checking exclusive ownership,
   guard quiescence, reconnect publication, and bounded shutdown drain;
+- 2,048 logical-tick cycles through the production stop-lease helpers with
+  late-thread reconciliation, controller/lease exclusion, injected renew/end
+  failures, watchdog expiry, generation replacement, disconnect, restart, and
+  zero leaked fake-kernel ownership;
 - File-I/O literal-C/attachment fuzzing and a transition gate proving one T02
   only for real all-stop while the synthetic context fails closed;
 - a production saved-context File-I/O path
@@ -343,3 +368,7 @@ The focused host suite covers:
    supporting safe runtime reset or unload of an injected debugger module.
 9. Validate remote File-I/O Ctrl-C, the single `T02`, register inspection, and
    explicit resume on a kernel-integrated hardware session.
+10. Supply durable retained process/module objects before wiring identity-bound
+   trap restoration into production, then reproduce the host partial-write,
+   corruption, disconnect, stale-identity, competing-owner, and retry matrix on
+   hardware.

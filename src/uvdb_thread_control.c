@@ -11,6 +11,28 @@ struct uvdb_vcont_action {
     unsigned int has_thread;
 };
 
+int uvdb_foreign_step_capability_validate(
+    const struct uvdb_foreign_step_capability* capability,
+    uint32_t* missing_proofs)
+{
+    uint32_t missing = UVDB_FOREIGN_STEP_REQUIRED_PROOFS;
+    if(capability)
+        missing &= ~capability->proofs;
+    if(missing_proofs)
+        *missing_proofs = missing;
+    if(!capability || missing ||
+       (capability->proofs & ~UVDB_FOREIGN_STEP_REQUIRED_PROOFS) != 0 ||
+       capability->selected_thread <= 0 ||
+       capability->selected_thread == capability->exception_thread ||
+       capability->stop_generation == 0 ||
+       capability->inventory_generation != capability->stop_generation ||
+       capability->context_generation != capability->stop_generation ||
+       capability->trap_generation != capability->stop_generation ||
+       capability->rollback_generation != capability->stop_generation)
+        return -1;
+    return 0;
+}
+
 static int thread_inventory_valid(
     const struct uvdb_thread_inventory* inventory)
 {

@@ -295,6 +295,7 @@ static volatile int uvdb_lease_stop;
 static volatile int uvdb_stop_failed;
 static volatile int uvdb_stop_owner;
 static volatile unsigned int uvdb_stop_token;
+static volatile uint32_t uvdb_stop_generation;
 static SceUID uvdb_lease_thread = -1;
 static int uvdb_lease_thread_ended;
 #endif
@@ -3039,6 +3040,41 @@ static void uvdb_release_stop_controller(void)
                      __ATOMIC_SEQ_CST);
 }
 
+static uint32_t uvdb_advance_stop_generation(void)
+{
+    uint32_t generation = __atomic_add_fetch(
+        &uvdb_stop_generation, 1u, __ATOMIC_SEQ_CST);
+    if(generation == 0)
+        generation = __atomic_add_fetch(
+            &uvdb_stop_generation, 1u, __ATOMIC_SEQ_CST);
+    return generation;
+}
+
+static void uvdb_publish_stop_token(unsigned int token)
+{
+    __atomic_store_n(&uvdb_stop_token, token, __ATOMIC_SEQ_CST);
+    (void)uvdb_advance_stop_generation();
+}
+
+static void uvdb_retire_stop_token(void)
+{
+    __atomic_store_n(&uvdb_stop_token, 0, __ATOMIC_SEQ_CST);
+    (void)uvdb_advance_stop_generation();
+}
+
+static int uvdb_publish_stop_failure(
+    unsigned int observed_token,
+    uint32_t observed_generation)
+{
+    if(__atomic_load_n(&uvdb_stop_token, __ATOMIC_SEQ_CST) !=
+           observed_token ||
+       __atomic_load_n(&uvdb_stop_generation, __ATOMIC_SEQ_CST) !=
+           observed_generation)
+        return 0;
+    __atomic_store_n(&uvdb_stop_failed, 1, __ATOMIC_SEQ_CST);
+    return 1;
+}
+
 static int uvdb_kernel_begin_stop(void)
 {
     uvdb_claim_stop_controller();
@@ -3058,7 +3094,7 @@ static int uvdb_kernel_begin_stop(void)
     }
     /* Clear a prior lease failure before publishing the new usable token. */
     __atomic_store_n(&uvdb_stop_failed, 0, __ATOMIC_SEQ_CST);
-    __atomic_store_n(&uvdb_stop_token, result.token, __ATOMIC_SEQ_CST);
+    uvdb_publish_stop_token(result.token);
     int begin_result = result.already_suspended_count == 0 ? 0 : -1;
     uvdb_release_stop_controller();
     return begin_result;
@@ -3084,8 +3120,7 @@ static int uvdb_kernel_recover_stop(void)
     if(recovery_result >= 0 && recovery.token)
     {
         __atomic_store_n(&uvdb_stop_failed, 0, __ATOMIC_SEQ_CST);
-        __atomic_store_n(&uvdb_stop_token, recovery.token,
-                         __ATOMIC_SEQ_CST);
+        uvdb_publish_stop_token(recovery.token);
         /* Controller ownership remains asserted for the caller's cleanup. */
         return 0;
     }
@@ -3111,7 +3146,7 @@ static int uvdb_kernel_end_stop(void)
     int result = vdKernelEndStop(token, &resumed);
     if(result >= 0)
     {
-        __atomic_store_n(&uvdb_stop_token, 0, __ATOMIC_SEQ_CST);
+        uvdb_retire_stop_token();
         __atomic_store_n(&uvdb_stop_failed, 0, __ATOMIC_SEQ_CST);
         return 0;
     }
@@ -3120,7 +3155,7 @@ static int uvdb_kernel_end_stop(void)
 
 static void uvdb_kernel_abandon_stop(void)
 {
-    __atomic_store_n(&uvdb_stop_token, 0, __ATOMIC_SEQ_CST);
+    uvdb_retire_stop_token();
     __atomic_store_n(&uvdb_stop_failed, 1, __ATOMIC_SEQ_CST);
 }
 #else
@@ -5462,6 +5497,41 @@ static int uvdb_server_main(SceSize args, void* argp)
 }
 
 #ifdef UVDB_KERNEL_THREAD_CONTROL
+static void uvdb_lease_renew_once(void)
+{
+    int expected_owner = UVDB_STOP_OWNER_NONE;
+    if(!__atomic_compare_exchange_n(&uvdb_stop_owner, &expected_owner,
+                                    UVDB_STOP_OWNER_LEASE, 0,
+                                    __ATOMIC_SEQ_CST,
+                                    __ATOMIC_SEQ_CST))
+        return;
+
+    uint32_t generation = __atomic_load_n(
+        &uvdb_stop_generation, __ATOMIC_SEQ_CST);
+    unsigned int token = __atomic_load_n(&uvdb_stop_token,
+                                          __ATOMIC_SEQ_CST);
+    if(!token ||
+       __atomic_load_n(&uvdb_stop_failed, __ATOMIC_SEQ_CST))
+    {
+        __atomic_store_n(&uvdb_stop_owner, UVDB_STOP_OWNER_NONE,
+                         __ATOMIC_SEQ_CST);
+        return;
+    }
+
+    int renew_result = vdKernelRenewStop(token, 2000);
+    if(renew_result < 0 &&
+       uvdb_publish_stop_failure(token, generation))
+    {
+        /* Retain the token for the controller's bounded re-reconcile and
+         * cleanup path. Ownership keeps EndStop from completing between
+         * renewal and failure publication. */
+        int socket = uvdb_socket;
+        uvdb_shutdown_socket_if_current(&uvdb_socket, socket);
+    }
+    __atomic_store_n(&uvdb_stop_owner, UVDB_STOP_OWNER_NONE,
+                     __ATOMIC_SEQ_CST);
+}
+
 static int uvdb_lease_main(SceSize args, void* argp)
 {
     (void)args;
@@ -5469,30 +5539,7 @@ static int uvdb_lease_main(SceSize args, void* argp)
     uvdb_register_thread("uvdb lease keeper");
     while(!__atomic_load_n(&uvdb_lease_stop, __ATOMIC_SEQ_CST))
     {
-        unsigned int token = __atomic_load_n(&uvdb_stop_token,
-                                              __ATOMIC_SEQ_CST);
-        int expected_owner = UVDB_STOP_OWNER_NONE;
-        if(token &&
-           !__atomic_load_n(&uvdb_stop_failed, __ATOMIC_SEQ_CST) &&
-           __atomic_compare_exchange_n(&uvdb_stop_owner, &expected_owner,
-                                        UVDB_STOP_OWNER_LEASE, 0,
-                                        __ATOMIC_SEQ_CST,
-                                        __ATOMIC_SEQ_CST))
-        {
-            int renew_result = vdKernelRenewStop(token, 2000);
-            if(renew_result < 0 &&
-               __atomic_load_n(&uvdb_stop_token, __ATOMIC_SEQ_CST) == token)
-            {
-                /* Retain the token for the controller's bounded re-reconcile
-                 * and cleanup path. Ownership keeps EndStop from completing
-                 * between renewal and failure publication. */
-                __atomic_store_n(&uvdb_stop_failed, 1, __ATOMIC_SEQ_CST);
-                int socket = uvdb_socket;
-                uvdb_shutdown_socket_if_current(&uvdb_socket, socket);
-            }
-            __atomic_store_n(&uvdb_stop_owner, UVDB_STOP_OWNER_NONE,
-                             __ATOMIC_SEQ_CST);
-        }
+        uvdb_lease_renew_once();
         sceKernelDelayThread(500000);
     }
     uvdb_unregister_thread();

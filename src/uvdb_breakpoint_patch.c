@@ -26,6 +26,26 @@ static int uvdb_breakpoint_patch_slot_metadata_is_valid(
            uvdb_breakpoint_patch_range_is_valid(slot->address, slot->size);
 }
 
+static int uvdb_breakpoint_patch_owner_is_valid(
+    const struct uvdb_breakpoint_patch_owner* owner)
+{
+    return owner != NULL && owner->matches != NULL &&
+           owner->identity.target != 0u && owner->identity.module != 0u;
+}
+
+static int uvdb_breakpoint_patch_identity_matches(
+    const struct uvdb_breakpoint_patch_slot* slot,
+    const struct uvdb_breakpoint_patch_owner* owner)
+{
+    if (!slot->identity_bound)
+        return owner == NULL;
+    return uvdb_breakpoint_patch_owner_is_valid(owner) &&
+           memcmp(&slot->identity, &owner->identity,
+                  sizeof(slot->identity)) == 0 &&
+           owner->matches(owner->user, slot->address, slot->size,
+                          &slot->identity) == 1;
+}
+
 static void uvdb_breakpoint_patch_clear(
     struct uvdb_breakpoint_patch_slot* slot)
 {
@@ -38,7 +58,8 @@ static void uvdb_breakpoint_patch_clear(
  * exact is deliberately conservative. */
 static int uvdb_breakpoint_patch_restore_internal(
     struct uvdb_breakpoint_patch_slot* slot,
-    const struct uvdb_breakpoint_patch_io* io)
+    const struct uvdb_breakpoint_patch_io* io,
+    const struct uvdb_breakpoint_patch_owner* owner)
 {
     uint8_t readback[UVDB_BREAKPOINT_PATCH_MAX_SIZE] = {0};
     size_t written;
@@ -46,6 +67,8 @@ static int uvdb_breakpoint_patch_restore_internal(
     int sync_result;
 
     slot->state = UVDB_BREAKPOINT_PATCH_RESTORE_PENDING;
+    if (!uvdb_breakpoint_patch_identity_matches(slot, owner))
+        return UVDB_BREAKPOINT_PATCH_ERROR_IDENTITY;
     written = io->write(io->user, slot->address, slot->original, slot->size);
     sync_result = io->sync(io->user, slot->address, slot->size);
     read = io->read(io->user, slot->address, readback, slot->size);
@@ -76,6 +99,16 @@ int uvdb_breakpoint_patch_install(
     const struct uvdb_breakpoint_patch_io* io, uintptr_t address,
     const void* patch, size_t size)
 {
+    return uvdb_breakpoint_patch_install_owned(
+        slot, io, NULL, address, patch, size);
+}
+
+int uvdb_breakpoint_patch_install_owned(
+    struct uvdb_breakpoint_patch_slot* slot,
+    const struct uvdb_breakpoint_patch_io* io,
+    const struct uvdb_breakpoint_patch_owner* owner, uintptr_t address,
+    const void* patch, size_t size)
+{
     uint8_t desired[UVDB_BREAKPOINT_PATCH_MAX_SIZE] = {0};
     uint8_t original[UVDB_BREAKPOINT_PATCH_MAX_SIZE] = {0};
     uint8_t readback[UVDB_BREAKPOINT_PATCH_MAX_SIZE] = {0};
@@ -84,14 +117,21 @@ int uvdb_breakpoint_patch_install(
     if (slot == NULL || patch == NULL ||
         !uvdb_breakpoint_patch_io_is_valid(io) ||
         !uvdb_breakpoint_patch_range_is_valid(address, size) ||
-        slot->state > UVDB_BREAKPOINT_PATCH_INSTALLED)
+        slot->state > UVDB_BREAKPOINT_PATCH_INSTALLED ||
+        (owner != NULL && !uvdb_breakpoint_patch_owner_is_valid(owner)))
         return UVDB_BREAKPOINT_PATCH_ERROR_INVALID_ARGUMENT;
     if (slot->state != UVDB_BREAKPOINT_PATCH_EMPTY)
         return UVDB_BREAKPOINT_PATCH_ERROR_SLOT_IN_USE;
 
     memcpy(desired, patch, size);
+    if (owner != NULL &&
+        owner->matches(owner->user, address, size, &owner->identity) != 1)
+        return UVDB_BREAKPOINT_PATCH_ERROR_IDENTITY;
     if (io->read(io->user, address, original, size) != size)
         return UVDB_BREAKPOINT_PATCH_ERROR_ORIGINAL_READ;
+    if (owner != NULL &&
+        owner->matches(owner->user, address, size, &owner->identity) != 1)
+        return UVDB_BREAKPOINT_PATCH_ERROR_IDENTITY;
 
     /* Publish complete recovery metadata before the first byte can change. */
     uvdb_breakpoint_patch_clear(slot);
@@ -100,6 +140,10 @@ int uvdb_breakpoint_patch_install(
     memcpy(slot->patch, desired, size);
     slot->size = (uint8_t)size;
     slot->state = UVDB_BREAKPOINT_PATCH_RESTORE_PENDING;
+    if (owner != NULL) {
+        slot->identity_bound = 1u;
+        slot->identity = owner->identity;
+    }
 
     if (io->write(io->user, address, slot->patch, size) != size) {
         failure = UVDB_BREAKPOINT_PATCH_ERROR_PATCH_WRITE;
@@ -122,7 +166,7 @@ int uvdb_breakpoint_patch_install(
     return UVDB_BREAKPOINT_PATCH_OK;
 
 rollback:
-    if (uvdb_breakpoint_patch_restore_internal(slot, io) !=
+    if (uvdb_breakpoint_patch_restore_internal(slot, io, owner) !=
         UVDB_BREAKPOINT_PATCH_OK)
         return UVDB_BREAKPOINT_PATCH_ERROR_RESTORE_PENDING;
     return failure;
@@ -132,6 +176,14 @@ int uvdb_breakpoint_patch_restore(
     struct uvdb_breakpoint_patch_slot* slot,
     const struct uvdb_breakpoint_patch_io* io)
 {
+    return uvdb_breakpoint_patch_restore_owned(slot, io, NULL);
+}
+
+int uvdb_breakpoint_patch_restore_owned(
+    struct uvdb_breakpoint_patch_slot* slot,
+    const struct uvdb_breakpoint_patch_io* io,
+    const struct uvdb_breakpoint_patch_owner* owner)
+{
     if (slot == NULL)
         return UVDB_BREAKPOINT_PATCH_ERROR_INVALID_ARGUMENT;
     if (slot->state == UVDB_BREAKPOINT_PATCH_EMPTY)
@@ -139,5 +191,5 @@ int uvdb_breakpoint_patch_restore(
     if (!uvdb_breakpoint_patch_io_is_valid(io) ||
         !uvdb_breakpoint_patch_slot_metadata_is_valid(slot))
         return UVDB_BREAKPOINT_PATCH_ERROR_INVALID_ARGUMENT;
-    return uvdb_breakpoint_patch_restore_internal(slot, io);
+    return uvdb_breakpoint_patch_restore_internal(slot, io, owner);
 }

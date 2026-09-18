@@ -258,4 +258,58 @@ arm_step_exclusive_after:
     .word uvdb_arm_exclusive_word
 .size arm_step_exclusive_fixture, .-arm_step_exclusive_fixture
 
+/* Non-executed encoding fixtures for the fail-closed decoder gate. These
+ * symbols let a hardware script verify exact bytes without ever branching
+ * into a privileged return, blocking instruction, or unsafe exclusive
+ * sequence. */
+.section .rodata
+.balign 4
+.global uvdb_step_supported_arm_encodings
+.global uvdb_step_supported_arm_encodings_end
+uvdb_step_supported_arm_encodings:
+    .word 0xe280f004 /* ADD PC, R0, #4 */
+    .word 0xe12fff10 /* BX R0 */
+    .word 0xe590f004 /* LDR PC, [R0, #4] */
+    .word 0xe8b08010 /* LDMIA R0!, {R4, PC} */
+uvdb_step_supported_arm_encodings_end:
+
+.global uvdb_step_rejected_arm_encodings
+.global uvdb_step_rejected_arm_encodings_end
+uvdb_step_rejected_arm_encodings:
+    .word 0xe1b0f000 /* MOVS PC, R0: privileged exception return */
+    .word 0xf8900a00 /* RFEIA R0 */
+    .word 0xe12fff20 /* BXJ R0 */
+    .word 0xe1a0f110 /* MOV PC, R0, LSL R1 */
+    .word 0xef000000 /* SVC #0 */
+    .word 0xe320f002 /* WFE */
+    .word 0xe320f003 /* WFI */
+    .word 0xe1910f9f /* LDREX R0, [R1] */
+    .word 0xe1920f9f /* nested/mismatched LDREX */
+    .word 0xe1823f92 /* mismatched-base STREX */
+uvdb_step_rejected_arm_encodings_end:
+
+.balign 2
+.global uvdb_step_supported_thumb_encodings
+.global uvdb_step_supported_thumb_encodings_end
+uvdb_step_supported_thumb_encodings:
+    .hword 0xd102 /* BNE */
+    .hword 0x4710 /* BX R2 */
+    .hword 0xf8d0, 0xf004 /* LDR.W PC, [R0, #4] */
+    .hword 0xe8bd, 0x8010 /* POP.W {R4, PC} */
+uvdb_step_supported_thumb_encodings_end:
+
+.global uvdb_step_rejected_thumb_encodings
+.global uvdb_step_rejected_thumb_encodings_end
+uvdb_step_rejected_thumb_encodings:
+    .hword 0xbf04, 0x4687 /* ITT EQ followed by non-final MOV PC, R0 */
+    .hword 0xf3de, 0x8f04 /* SUBS PC, LR, #4 exception return */
+    .hword 0xf3c0, 0x8f00 /* BXJ */
+    .hword 0xdf00 /* SVC #0 */
+    .hword 0xbf20 /* WFE */
+    .hword 0xbf30 /* WFI */
+    .hword 0xe851, 0x0f00 /* LDREX R0, [R1] */
+    .hword 0xe8d2, 0x1f4f /* nested/mismatched LDREXB */
+    .hword 0xe842, 0x2300 /* mismatched-base STREX */
+uvdb_step_rejected_thumb_encodings_end:
+
 .thumb

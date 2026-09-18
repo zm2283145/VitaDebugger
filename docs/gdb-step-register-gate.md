@@ -87,3 +87,29 @@ This gate closes the currently implemented practical milestone. It does not
 claim scheduler-locked arbitrary foreign-thread execution, displaced stepping,
 foreign-thread/VFP writes, privileged exception-return decoding, syscall
 catching, or support for unmatched and otherwise unsafe exclusive sequences.
+
+## Current roadmap increment
+
+The follow-on safety increment is host-modeled and Vita cross-built, but has no
+new hardware result. Host tests now cover trap partial writes, sync/read-back
+failures, verification corruption, disconnect, competing ownership, exact
+original-byte retention, restoration retry, and stale retained target/module
+identity. Production still uses the unbound trap helper because a durable Vita
+target/module object provider has not been proven.
+
+The Vita fixture ELF now exports non-executed exact encoding tables for
+representative accepted ARM/Thumb branches, interworking, PC loads, and
+multi-register PC loads. Rejected tables cover PC-writing privileged exception
+returns, `BXJ`, register-controlled A32 shifts, SVC, WFE/WFI, nested or
+mismatched exclusive sequences, and a non-final IT-block PC write. These
+symbols prove that the encodings cross-assemble and allow a future gate to
+inspect their bytes; they do not claim that any rejected instruction was
+executed on hardware.
+
+Arbitrary foreign-thread isolation remains disabled. A host capability model
+requires scheduler ownership, context identity, trap ownership, rollback
+readiness, and matching nonzero generations before a resume-one or displaced
+step provider may run. Current VitaSDK declarations do not document a
+scheduler lock or atomic resume-one/resuspend contract, so no production
+provider is wired. Unsupported cases must continue to fail before changing
+memory/registers or acquiring trap/stop ownership.

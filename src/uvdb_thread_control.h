@@ -39,6 +39,37 @@ struct uvdb_step_target {
     uint8_t breakpoint_size;
 };
 
+enum uvdb_foreign_step_proof {
+    UVDB_FOREIGN_STEP_PROOF_SCHEDULER_OWNERSHIP = 1u << 0,
+    UVDB_FOREIGN_STEP_PROOF_CONTEXT_IDENTITY = 1u << 1,
+    UVDB_FOREIGN_STEP_PROOF_TRAP_OWNERSHIP = 1u << 2,
+    UVDB_FOREIGN_STEP_PROOF_ROLLBACK = 1u << 3,
+};
+
+#define UVDB_FOREIGN_STEP_REQUIRED_PROOFS \
+    (UVDB_FOREIGN_STEP_PROOF_SCHEDULER_OWNERSHIP | \
+     UVDB_FOREIGN_STEP_PROOF_CONTEXT_IDENTITY | \
+     UVDB_FOREIGN_STEP_PROOF_TRAP_OWNERSHIP | \
+     UVDB_FOREIGN_STEP_PROOF_ROLLBACK)
+
+/* Host-model boundary for a future resume-one or displaced-step provider.
+ * Production must not call a foreign execution primitive until all ownership
+ * proofs name one nonzero stop generation and one live selected thread. */
+struct uvdb_foreign_step_capability {
+    uint32_t proofs;
+    uint32_t stop_generation;
+    uint32_t inventory_generation;
+    uint32_t context_generation;
+    uint32_t trap_generation;
+    uint32_t rollback_generation;
+    int32_t selected_thread;
+    int32_t exception_thread;
+};
+
+int uvdb_foreign_step_capability_validate(
+    const struct uvdb_foreign_step_capability* capability,
+    uint32_t* missing_proofs);
+
 void uvdb_thread_inventory_reset(struct uvdb_thread_inventory* inventory);
 int uvdb_thread_inventory_add(struct uvdb_thread_inventory* inventory,
                               int32_t id);

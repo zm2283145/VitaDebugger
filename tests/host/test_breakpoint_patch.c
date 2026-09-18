@@ -29,6 +29,8 @@ struct fake_memory {
     unsigned int writes_while_pending;
     unsigned int writes_without_obligation;
     const struct uvdb_breakpoint_patch_slot* observed_slot;
+    struct uvdb_breakpoint_patch_identity identity;
+    int connected;
 };
 
 static void fake_init(struct fake_memory* memory)
@@ -41,6 +43,9 @@ static void fake_init(struct fake_memory* memory)
         memory->read_returns[i] = FAKE_EXACT;
         memory->write_returns[i] = FAKE_EXACT;
     }
+    memory->identity.target = UINT64_C(0x1122334455667788);
+    memory->identity.module = UINT64_C(0x8877665544332211);
+    memory->connected = 1;
 }
 
 static int fake_range(uintptr_t address, size_t size, size_t* offset)
@@ -61,7 +66,7 @@ static size_t fake_read(void* user, uintptr_t address, void* output,
     size_t reported;
     size_t copied;
 
-    if (call >= FAKE_OPERATION_LIMIT || output == NULL ||
+    if (!memory->connected || call >= FAKE_OPERATION_LIMIT || output == NULL ||
         !fake_range(address, size, &offset))
         return 0u;
     reported = memory->read_returns[call] == FAKE_EXACT
@@ -90,7 +95,7 @@ static size_t fake_write(void* user, uintptr_t address, const void* input,
         ++memory->writes_while_pending;
     else
         ++memory->writes_without_obligation;
-    if (call >= FAKE_OPERATION_LIMIT || input == NULL ||
+    if (!memory->connected || call >= FAKE_OPERATION_LIMIT || input == NULL ||
         !fake_range(address, size, &offset))
         return 0u;
     reported = memory->write_returns[call] == FAKE_EXACT
@@ -122,6 +127,27 @@ static struct uvdb_breakpoint_patch_io fake_io(struct fake_memory* memory)
     io.sync = fake_sync;
     io.user = memory;
     return io;
+}
+
+static int fake_identity_matches(
+    void* user, uintptr_t address, size_t size,
+    const struct uvdb_breakpoint_patch_identity* identity)
+{
+    struct fake_memory* memory = (struct fake_memory*)user;
+    size_t offset;
+    return memory->connected && identity != NULL &&
+           fake_range(address, size, &offset) &&
+           memcmp(identity, &memory->identity, sizeof(*identity)) == 0;
+}
+
+static struct uvdb_breakpoint_patch_owner fake_owner(
+    struct fake_memory* memory)
+{
+    struct uvdb_breakpoint_patch_owner owner;
+    owner.identity = memory->identity;
+    owner.matches = fake_identity_matches;
+    owner.user = memory;
+    return owner;
 }
 
 static int slot_is_clear(const struct uvdb_breakpoint_patch_slot* slot)
@@ -400,6 +426,71 @@ static void test_restore_requires_sync_and_exact_verification(void)
           "exact restoration retry clears after prior mismatch");
 }
 
+static void test_disconnect_competing_owner_and_identity_retry(void)
+{
+    static const uint8_t trap[4] = {0xf0u, 0x00u, 0xf0u, 0xe7u};
+    struct uvdb_breakpoint_patch_slot slot;
+    struct fake_memory memory;
+    struct uvdb_breakpoint_patch_io io;
+    struct uvdb_breakpoint_patch_owner owner;
+    struct uvdb_breakpoint_patch_owner stale_owner;
+    uint8_t original[4];
+    unsigned int writes;
+
+    fake_init(&memory);
+    io = fake_io(&memory);
+    owner = fake_owner(&memory);
+    uvdb_breakpoint_patch_slot_init(&slot);
+    memory.observed_slot = &slot;
+    memcpy(original, memory.bytes, sizeof(original));
+
+    check(uvdb_breakpoint_patch_install_owned(
+              &slot, &io, &owner, FAKE_BASE, trap, sizeof(trap)) ==
+              UVDB_BREAKPOINT_PATCH_OK &&
+              slot.identity_bound == 1u &&
+              memcmp(&slot.identity, &owner.identity,
+                     sizeof(slot.identity)) == 0,
+          "owned install retains exact target and module identity");
+
+    stale_owner = owner;
+    stale_owner.identity.module++;
+    writes = memory.write_calls;
+    check(uvdb_breakpoint_patch_install_owned(
+              &slot, &io, &stale_owner, FAKE_BASE + 4u, trap,
+              sizeof(trap)) == UVDB_BREAKPOINT_PATCH_ERROR_SLOT_IN_USE &&
+              memory.write_calls == writes,
+          "competing owner cannot replace an occupied trap slot");
+
+    memory.connected = 0;
+    check(uvdb_breakpoint_patch_restore_owned(&slot, &io, &owner) ==
+              UVDB_BREAKPOINT_PATCH_ERROR_IDENTITY &&
+              slot.state == UVDB_BREAKPOINT_PATCH_RESTORE_PENDING &&
+              memory.write_calls == writes,
+          "disconnect retains restoration metadata without writing");
+
+    memory.connected = 1;
+    memory.identity.module++;
+    check(uvdb_breakpoint_patch_restore_owned(&slot, &io, &owner) ==
+              UVDB_BREAKPOINT_PATCH_ERROR_IDENTITY &&
+              slot.state == UVDB_BREAKPOINT_PATCH_RESTORE_PENDING &&
+              memory.write_calls == writes,
+          "stale module identity cannot restore into a replacement mapping");
+    memory.identity.module--;
+    memory.identity.target++;
+    check(uvdb_breakpoint_patch_restore_owned(&slot, &io, &owner) ==
+              UVDB_BREAKPOINT_PATCH_ERROR_IDENTITY &&
+              slot.state == UVDB_BREAKPOINT_PATCH_RESTORE_PENDING &&
+              memory.write_calls == writes,
+          "stale target identity cannot restore into a replacement process");
+
+    memory.identity = owner.identity;
+    check(uvdb_breakpoint_patch_restore_owned(&slot, &io, &owner) ==
+              UVDB_BREAKPOINT_PATCH_OK &&
+              memcmp(memory.bytes, original, sizeof(original)) == 0 &&
+              slot_is_clear(&slot),
+          "matching retained identities authorize exact restoration retry");
+}
+
 static void test_invalid_arguments(void)
 {
     static const uint8_t trap[4] = {0xf0u, 0x00u, 0xf0u, 0xe7u};
@@ -492,6 +583,7 @@ int main(void)
     test_install_failures_roll_back();
     test_failed_rollback_then_retry();
     test_restore_requires_sync_and_exact_verification();
+    test_disconnect_competing_owner_and_identity_retry();
     test_invalid_arguments();
 
     if (failures != 0) {
