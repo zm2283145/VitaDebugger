@@ -8,18 +8,24 @@ The protocol-v2 authentication storage/crypto boundary
 `vitadebug_attach_auth.c` validates exact active key records, signs only through
 an injected private-key callback, verifies Ed25519 with the repository's
 vendored Monocypher, and provides constant-time fixed-value comparison.
-The persistent store records local identity, allowlist/revocation state,
-revision, and service generation without dynamic allocation. Its Vita adapter
-uses fixed `ur0:` paths but remains fail-closed until external hardware
-callbacks prove seed confidentiality and maintain an independent durable
-rollback floor.
+The persistent store records only public local identity,
+allowlist/revocation state, revision, and service generation without dynamic
+allocation. Private-key generation/signing/destruction are delegated to an
+opaque backend that must attest non-exportability and isolation. Persistence
+must own handle-bound open/create/commit operations, and the monotonic floor
+must attest an independent trust domain. Missing capabilities are rejected;
+there is no Vita implementation of these trusted backends. Non-destructive
+deinit wipes all resident metadata and copied backend vtables; destructive
+uninstall is a separate tombstone operation.
 
 `vitadebug_attach_auth_listener.c` implements only the four protocol-v2
 authentication records. It uses one absolute deadline, exact frame sizes,
 private-subnet source policy, fixed replay/backoff tables, and one serialized
 connection. `vitadebug_attach_auth_listener_vita.c` owns the worker and
 registered sockets; shutdown cancels blocked I/O and requires the worker to be
-joined before network teardown.
+joined before network teardown. Disposable-title mode owns SceNet
+load/init/term/unload. Shell-borrowed mode owns none of those operations,
+performs no NetCtl transition, and cannot tear down shared networking.
 
 `vitadebug_attach_broker.c` remains the protocol-v1 read-only discovery core.
 `vitadebug_attach_control.c` is a host-tested lifecycle and authorization model

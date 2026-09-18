@@ -19,6 +19,7 @@ extern "C" {
 #define VD_ATTACH_AUTH_LISTENER_MAX_FAILURES 32u
 #define VD_ATTACH_AUTH_LISTENER_MIN_BACKOFF_MS 250u
 #define VD_ATTACH_AUTH_LISTENER_MAX_BACKOFF_MS 8000u
+#define VD_ATTACH_AUTH_NETWORK_MEMORY_MIN (256u * 1024u)
 
 enum {
     VD_ATTACH_AUTH_LISTENER_OK = 0,
@@ -42,6 +43,28 @@ typedef enum VdAttachAuthListenerState {
     VD_ATTACH_AUTH_LISTENER_RUNNING = 2,
     VD_ATTACH_AUTH_LISTENER_STOPPING = 3,
 } VdAttachAuthListenerState;
+
+typedef enum VdAttachAuthNetworkMode {
+    VD_ATTACH_AUTH_NETWORK_STANDALONE_OWNED = 1,
+    VD_ATTACH_AUTH_NETWORK_SHELL_BORROWED = 2,
+} VdAttachAuthNetworkMode;
+
+/*
+ * Standalone mode owns module load, sceNetInit, sceNetTerm, and module unload.
+ * Shell-borrowed mode owns none of them and supplies no network-memory pool.
+ * Hybrid ownership is rejected so a shell integration cannot tear down shared
+ * process networking by mistake.
+ */
+typedef struct VdAttachAuthNetworkConfig {
+    VdAttachAuthNetworkMode mode;
+    void *network_memory;
+    size_t network_memory_size;
+    int owns_network_module;
+    int owns_network_initialization;
+} VdAttachAuthNetworkConfig;
+
+int vd_attach_auth_network_config_validate(
+    const VdAttachAuthNetworkConfig *config);
 
 typedef struct VdAttachAuthSocketOps {
     void *context;

@@ -1,123 +1,123 @@
 # Authenticated attach key provisioning
 
 Authentication uses Ed25519 through the repository's existing
-`VitaDevDeploy` provider on the host and vendored Monocypher verification on
-Vita. No fallback algorithm or unsigned mode exists.
+`VitaDevDeploy` provider on the host and vendored Monocypher verification in
+the portable Vita protocol core. There is no fallback algorithm, unsigned
+mode, or encryption; the protocol is signed plaintext.
 
 ## Host storage
 
-`vdattach.auth_keys.JsonKeyStore` is an atomic host implementation. Its injected
-Ed25519 provider should be `deploy/host/vitadevdeploy/crypto.py`; that provider
-uses Python `cryptography` or an explicitly selected Ed25519-capable OpenSSL.
-Provider absence is an error, never a downgrade.
+`vdattach.auth_keys.JsonKeyStore` is the host implementation. Its injected
+Ed25519 provider is `deploy/host/vitadevdeploy/crypto.py`; provider absence is
+an error, never a downgrade.
 
-The store contains:
+The host store contains:
 
 - `state.json`, schema 1, with a monotonically increasing revision;
-- one active local key ID and generation plus private/public PEM filenames;
-- an explicit list of peer key IDs, generations, public PEM filenames, and
-  `active` or `revoked` status.
+- one active local key ID/generation and private/public PEM filenames; and
+- exact peer IDs/generations, public PEM filenames, and active/revoked status.
 
-State and private keys are atomically replaced. Private files request
-owner-only permissions where the operating system supports them. Reads reject
-links, non-regular files, oversized files, unsupported schemas, unknown fields,
-noncanonical key IDs, and missing material. Applications must not log PEM
-content, raw public-key allowlists, signatures, or nonces.
+Private files request owner-only permissions where supported. Reads reject
+links, non-regular files, oversized files, unsupported schemas, unknown
+fields, noncanonical IDs, and missing material. Do not log PEM content,
+allowlists, signatures, or nonces.
 
-Provisioning is an explicit API operation:
+The host-only provisioning helper may generate a public 72-byte `VDAP` bundle
+and parse a public 56-byte `VDAR` receipt. Those formats contain no private
+material. Under the current hardware decision they are test fixtures only:
+do not copy a bundle to a Vita and do not provision a real device identity.
 
-```python
-from pathlib import Path
-from vdattach.auth_keys import JsonKeyStore
-from vitadevdeploy.crypto import get_backend
+## Device storage contract
 
-store = JsonKeyStore(Path("private-host-key-store"), get_backend("auto"))
-identity = store.provision(local_key_id=0x0123456789abcdef)
-```
-
-Copy only `identity.public_pem` and its exact key ID/generation through an
-authenticated out-of-band channel to the Vita provisioning process. Copy the
-Vita public key, key ID, and generation back through that channel and call
-`allow_peer`. Never copy either private key.
-
-Rotation creates a different key ID and increments the local generation. The
-new key files and state become durable before old private files are removed.
-The remote peer must explicitly allow the new ID/generation; there is no
-automatic trust inheritance. Keep the old remote allowlist entry only for a
-bounded transition, then revoke it. A revoked exact generation fails
-immediately and is never replaced by another generation with the same ID.
-
-## Vita storage boundary
-
-`VdAttachAuthKeyStorage` is the exact injected device boundary. It requires:
+`VdAttachAuthKeyStorage` is listener-facing and intentionally exposes only:
 
 - active local-public-key loading;
-- exact peer key ID/generation lookup with active/revoked distinction;
-- local signing without exporting the private key;
-- atomic local provision and rotation;
-- durable peer allow and revoke.
+- exact peer ID/generation lookup with active/revoked distinction; and
+- signing by opaque local key ID/generation.
 
-All callbacks are mandatory. The active local key ID, generation, and public
-key must come from one persistent revision. Rotation must durably activate the
-replacement before retiring the old key. Revocation must survive reboot before
-returning success.
+It has no provisioning, rotation, seed import, seed export, or peer
+administration callback. Administration is a separate local store API.
 
-`vitadebug_attach_auth_store.c` now implements the bounded device-store format
-behind injected file and rollback operations. The format has one active local
-seed/public identity, up to 16 exact peer ID/generation records, explicit
-active/revoked status, a monotonically increasing state revision, and a
-monotonically increasing service generation. It rejects links, non-regular
-files, short/trailing/oversized records, unsupported flags or schema, duplicate
-peers, stale revisions, public/seed mismatches, and a restored service
-generation. It never allocates from file-controlled lengths.
+The schema-2 metadata core persists only public local identity, exact peer
+allowlist/revocation state, revision, and service generation. It never stores
+or retains an Ed25519 seed or expanded private key. Its three injected
+backends are separate:
 
-Updates write the complete next revision to a fixed temporary file, sync the
-file, rename it over the fixed store, sync the parent, re-read and verify the
-committed bytes, then advance the independent rollback floor. Rotation makes
-the new seed active in that single revision; interruption before commit leaves
-the old complete revision active. A floor advancement failure is an error even
-if the file rename completed: the store cannot be used again until reload
-proves the committed revision is not stale.
+1. a trusted persistence backend owns handle-bound current/staged
+   open/create/read/write/sync/close/commit/discard operations;
+2. a monotonic backend owns a durable floor in an independent trust domain;
+3. an opaque private-key backend generates, identifies, signs with, and
+   destroys a non-exportable key isolated from the metadata principal.
 
-The Vita adapter fixes the paths:
+Initialization rejects a raw-seed key backend, a floor in the metadata
+namespace, missing handle-bound/durable-commit capability, missing
+non-exportability/isolation capability, or any incomplete callback set.
+There is deliberately no `export_seed` contract.
 
-```text
-ur0:data/VitaDebugger/private/attach-auth.store
-ur0:data/VitaDebugger/private/attach-auth.store.new
-```
+Capability bits and distinct trust-domain tokens are structural fail-closed
+checks, not hardware assurance. A Vita implementation must not populate them
+until each backend and its caller isolation have independent evidence. A
+file-backed implementation must supply no-follow, already-open regular-file
+handles; the core never performs a pathname check followed by a separate open.
 
-Vita public `sceIo` APIs provide bounded I/O, regular-file metadata, file sync,
-rename, and parent-directory sync attempts. They do **not** prove that another
-SceShell-resident component cannot read/replace the seed, that links cannot be
-substituted between checks, that rename is power-loss atomic, or that an
-attacker cannot roll back both files. Therefore
-`vd_attach_auth_store_vita_init()` requires three reviewed hardware callbacks:
-`prove_private_storage`, `load_floor`, and `advance_floor`. Missing or failing
-callbacks keep initialization unavailable and the listener port closed.
+The core is bounded and allocation-free. It rejects malformed, truncated,
+trailing, oversized, unknown-schema, duplicate, stale, and mismatched-key
+state. A commit writes and syncs a staged handle, closes it, asks the trusted
+backend to publish it durably, and only then advances the independent floor.
+The core receives no storage path and makes no boolean claim that a pathname
+is private.
 
-The bound `VdAttachAuthKeyStorage` can provision an unprovisioned store. The
-device seed must be generated locally from `sceKernelGetRandomNumber`; the
-caller supplies the matching derived public key and wipes the seed after the
-transaction. Peer provisioning accepts only the host public key plus its exact
-ID/generation. There is no network seed import, private-key export, unsigned
-mode, or fallback store.
+Schema 1 contained a raw device seed and is rejected rather than migrated.
+No seed-bearing schema-1 file was provisioned on the authorized device. A
+future migration would require a separate reviewed retirement procedure; the
+schema-2 core never opens or exports that seed.
 
-`vd_attach_auth_store_uninstall()` is the explicit destructive operation. It
-removes the committed and temporary store, syncs the parent directory, and
-advances the rollback floor so restoring a removed file cannot reactivate the
-old identity. Normal listener stop never calls uninstall.
+`vd_attach_auth_store_deinit()` is non-destructive and idempotent. It wipes
+all resident metadata and copied backend vtables without deleting persistent
+state or opaque keys. Call it after normal stop and on every initialization,
+bind, listener-start, worker-start, or unload failure. The destructive
+`vd_attach_auth_store_uninstall()` instead commits a key-free tombstone above
+the rollback floor and asks the opaque key backend to destroy the retired
+identity. Deleting metadata alone is not uninstall and cannot lower the
+monotonic floor or reactivate an older identity.
 
-## Revocation response
+## Retail 3.65 decision
 
-On suspected compromise:
+Production Vita authentication is a **hard block**. Public or safely callable
+retail 3.65 APIs do not provide both:
 
-1. stop the listener and invalidate all sessions;
-2. revoke the compromised exact key ID/generation on both peers;
-3. persist and verify the new revisions before restarting;
-4. provision distinct replacement key IDs out of band;
-5. confirm old proofs fail and backoff is applied;
-6. never reuse an old service generation, session ID, or nonce.
+- a non-exportable Ed25519 key inaccessible to ordinary/co-resident SceShell
+  code; and
+- an independent durable monotonic anti-rollback floor.
 
-Authentication provides integrity and peer authorization, not confidentiality.
-If network observers are in scope, keep the listener disabled until an
-encrypted transport is separately designed and reviewed.
+Running as `*main` shares the SceShell identity and memory. `0600` mode bits
+are not documented per-title isolation. Public `sceIo` has no documented
+no-follow/openat contract and no documented atomic, power-loss-safe
+rename-plus-directory-sync contract. Registry, savedata, and SQLite state can
+be rolled back with the metadata. IdStorage, Syscon, NVS, PFS, and SceSbl
+would require unsupported or reverse-engineered privileged mechanisms. The
+public RNG is suitable for entropy but does not solve persistence or key
+isolation.
+
+Accordingly, there is no Vita backend for the three trusted interfaces. The
+sentinel VPK cannot accept a backend override, never generates a real seed,
+never consumes the public provisioning bundle, and never starts networking.
+
+## Rotation and revocation model
+
+For a future approved backend, local rotation must generate a new opaque key,
+commit the new public identity and incremented metadata revision above the
+floor, then retire the old opaque key. Peer rotation still requires explicit
+allowlisting of the new exact ID/generation followed by durable revocation of
+the old entry. A revoked generation is never silently replaced by another
+generation with the same ID.
+
+Receipt publication through public Vita file APIs must not be described as an
+atomic replacement. A future characterization artifact may write a
+non-sensitive, one-shot sentinel receipt only after proving the destination
+does not exist; that result is evidence about the test run, not evidence of
+secure provisioning or durability.
+
+Authentication provides integrity and peer authorization, not
+confidentiality. If network observers are in scope, keep the listener disabled
+until an encrypted transport is separately designed and reviewed.

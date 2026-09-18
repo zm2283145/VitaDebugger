@@ -21,7 +21,8 @@ AUTH_SOURCES := broker/src/vitadebug_attach_auth.c broker/src/vitadebug_attach_a
 AUTH_LISTENER_SOURCES := broker/src/vitadebug_attach_auth.c \
 	broker/src/vitadebug_attach_auth_listener.c \
 	$(MONOCYPHER_DIR)/monocypher.c $(MONOCYPHER_DIR)/monocypher-ed25519.c
-AUTH_STORE_SOURCES := broker/src/vitadebug_attach_auth_store.c \
+AUTH_STORE_SOURCES := broker/src/vitadebug_attach_auth.c \
+	broker/src/vitadebug_attach_auth_store.c \
 	broker/src/vitadebug_attach_auth_store_vita.c \
 	$(MONOCYPHER_DIR)/monocypher.c $(MONOCYPHER_DIR)/monocypher-ed25519.c
 BROKER_TEST := test-attach-broker$(HOST_EXEEXT)

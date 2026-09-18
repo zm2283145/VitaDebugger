@@ -43,47 +43,6 @@ static int fake_sign(void *opaque, uint64_t key_id, uint64_t generation,
     return VD_ATTACH_AUTH_OK;
 }
 
-static int fake_provision(void *opaque, uint64_t key_id,
-                          uint64_t generation,
-                          const uint8_t private_key[32],
-                          const uint8_t public_key[32]) {
-    (void)opaque;
-    (void)key_id;
-    (void)generation;
-    (void)private_key;
-    (void)public_key;
-    return VD_ATTACH_AUTH_OK;
-}
-
-static int fake_rotate(void *opaque, uint64_t old_key_id,
-                       uint64_t old_generation, uint64_t new_key_id,
-                       uint64_t new_generation,
-                       const uint8_t private_key[32],
-                       const uint8_t public_key[32]) {
-    (void)opaque;
-    (void)old_key_id;
-    (void)old_generation;
-    (void)new_key_id;
-    (void)new_generation;
-    (void)private_key;
-    (void)public_key;
-    return VD_ATTACH_AUTH_OK;
-}
-
-static int fake_allow(void *opaque, const VdAttachAuthPublicKey *key) {
-    (void)opaque;
-    (void)key;
-    return VD_ATTACH_AUTH_OK;
-}
-
-static int fake_revoke(void *opaque, uint64_t key_id,
-                       uint64_t generation) {
-    (void)opaque;
-    (void)key_id;
-    (void)generation;
-    return VD_ATTACH_AUTH_OK;
-}
-
 static VdAttachAuthKeyStorage fake_storage(FakeKeyStorage *context) {
     VdAttachAuthKeyStorage storage;
     memset(&storage, 0, sizeof(storage));
@@ -91,10 +50,6 @@ static VdAttachAuthKeyStorage fake_storage(FakeKeyStorage *context) {
     storage.load_local_public = fake_load_local;
     storage.lookup_peer = fake_lookup_peer;
     storage.sign_local = fake_sign;
-    storage.provision_local = fake_provision;
-    storage.rotate_local = fake_rotate;
-    storage.allow_peer = fake_allow;
-    storage.revoke_peer = fake_revoke;
     return storage;
 }
 

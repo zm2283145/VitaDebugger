@@ -51,13 +51,13 @@ typedef struct VdAttachAuthPublicKey {
 /*
  * The implementation owns device-private-key storage. Runtime signing
  * identifies the active local key by ID and generation and returns only the
- * signature. Provision/rotation are explicit sensitive administration calls;
- * their private-key input must never be exposed by the network listener.
+ * signature. Provisioning, rotation, and revocation are intentionally outside
+ * this listener-facing interface so raw private material cannot be introduced
+ * through the network authentication boundary.
  *
- * All callbacks must be backed by one atomic persistent revision. Rotation
- * must make the replacement active before retiring the old private key.
- * Revocation must survive reboot before reporting success. Lookup returns
- * ACTIVE, REVOKED, or NOT_ALLOWED without silently selecting another key.
+ * Public-key lookup and the opaque signer must agree on one active local
+ * ID/generation. Lookup returns ACTIVE, REVOKED, or NOT_ALLOWED without
+ * silently selecting another key.
  */
 typedef struct VdAttachAuthKeyStorage {
     void *context;
@@ -74,23 +74,6 @@ typedef struct VdAttachAuthKeyStorage {
                       size_t transcript_size,
                       uint8_t signature[VD_ATTACH_AUTH_SIGNATURE_BYTES],
                       uint64_t deadline_ms);
-    int (*provision_local)(void *context,
-                           uint64_t key_id,
-                           uint64_t generation,
-                           const uint8_t private_key[VD_ATTACH_AUTH_KEY_BYTES],
-                           const uint8_t public_key[VD_ATTACH_AUTH_KEY_BYTES]);
-    int (*rotate_local)(void *context,
-                        uint64_t old_key_id,
-                        uint64_t old_generation,
-                        uint64_t new_key_id,
-                        uint64_t new_generation,
-                        const uint8_t private_key[VD_ATTACH_AUTH_KEY_BYTES],
-                        const uint8_t public_key[VD_ATTACH_AUTH_KEY_BYTES]);
-    int (*allow_peer)(void *context,
-                      const VdAttachAuthPublicKey *key);
-    int (*revoke_peer)(void *context,
-                       uint64_t key_id,
-                       uint64_t generation);
 } VdAttachAuthKeyStorage;
 
 int vd_attach_auth_storage_validate(

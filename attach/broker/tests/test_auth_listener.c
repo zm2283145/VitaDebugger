@@ -139,48 +139,6 @@ static int fake_sign_local(
     return VD_ATTACH_AUTH_OK;
 }
 
-static int fake_admin_local(void *opaque,
-                            uint64_t key_id,
-                            uint64_t generation,
-                            const uint8_t private_key[32],
-                            const uint8_t public_key[32]) {
-    (void)opaque;
-    (void)key_id;
-    (void)generation;
-    (void)private_key;
-    (void)public_key;
-    return VD_ATTACH_AUTH_OK;
-}
-
-static int fake_rotate_local(void *opaque,
-                             uint64_t old_key_id,
-                             uint64_t old_generation,
-                             uint64_t new_key_id,
-                             uint64_t new_generation,
-                             const uint8_t private_key[32],
-                             const uint8_t public_key[32]) {
-    (void)old_key_id;
-    (void)old_generation;
-    return fake_admin_local(opaque, new_key_id, new_generation,
-                            private_key, public_key);
-}
-
-static int fake_allow_peer(void *opaque,
-                           const VdAttachAuthPublicKey *key) {
-    (void)opaque;
-    (void)key;
-    return VD_ATTACH_AUTH_OK;
-}
-
-static int fake_revoke_peer(void *opaque,
-                            uint64_t key_id,
-                            uint64_t generation) {
-    (void)opaque;
-    (void)key_id;
-    (void)generation;
-    return VD_ATTACH_AUTH_OK;
-}
-
 static VdAttachAuthKeyStorage fake_key_storage(FakeStorage *storage) {
     VdAttachAuthKeyStorage result;
     memset(&result, 0, sizeof(result));
@@ -188,10 +146,6 @@ static VdAttachAuthKeyStorage fake_key_storage(FakeStorage *storage) {
     result.load_local_public = fake_load_local;
     result.lookup_peer = fake_lookup_peer;
     result.sign_local = fake_sign_local;
-    result.provision_local = fake_admin_local;
-    result.rotate_local = fake_rotate_local;
-    result.allow_peer = fake_allow_peer;
-    result.revoke_peer = fake_revoke_peer;
     return result;
 }
 
@@ -751,6 +705,38 @@ static void test_configuration_bounds(void) {
            VD_ATTACH_AUTH_LISTENER_ERROR_ARGUMENT);
 }
 
+static void test_network_ownership_modes(void) {
+    uint8_t network_memory[VD_ATTACH_AUTH_NETWORK_MEMORY_MIN];
+    VdAttachAuthNetworkConfig config;
+
+    memset(&config, 0, sizeof(config));
+    config.mode = VD_ATTACH_AUTH_NETWORK_STANDALONE_OWNED;
+    config.network_memory = network_memory;
+    config.network_memory_size = sizeof(network_memory);
+    config.owns_network_module = 1;
+    config.owns_network_initialization = 1;
+    assert(vd_attach_auth_network_config_validate(&config) ==
+           VD_ATTACH_AUTH_LISTENER_OK);
+
+    config.mode = VD_ATTACH_AUTH_NETWORK_SHELL_BORROWED;
+    assert(vd_attach_auth_network_config_validate(&config) ==
+           VD_ATTACH_AUTH_LISTENER_ERROR_ARGUMENT);
+    config.network_memory = NULL;
+    config.network_memory_size = 0u;
+    config.owns_network_module = 0;
+    config.owns_network_initialization = 0;
+    assert(vd_attach_auth_network_config_validate(&config) ==
+           VD_ATTACH_AUTH_LISTENER_OK);
+
+    config.owns_network_initialization = 1;
+    assert(vd_attach_auth_network_config_validate(&config) ==
+           VD_ATTACH_AUTH_LISTENER_ERROR_ARGUMENT);
+    config.owns_network_initialization = 0;
+    config.owns_network_module = 1;
+    assert(vd_attach_auth_network_config_validate(&config) ==
+           VD_ATTACH_AUTH_LISTENER_ERROR_ARGUMENT);
+}
+
 static void test_shutdown_during_start_cannot_reopen_listener(void) {
     FakeStorage storage;
     FakeSocket fake;
@@ -781,6 +767,7 @@ int main(void) {
     test_failed_closes_are_retained_and_retried();
     test_restart_generation_and_stale_proof();
     test_configuration_bounds();
+    test_network_ownership_modes();
     test_shutdown_during_start_cannot_reopen_listener();
     puts("attach authentication listener tests passed");
     return 0;

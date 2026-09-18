@@ -38,9 +38,13 @@ The signed transcripts bind host and server key generations, service
 generation, session ID, opaque transport binding, request/client/server
 nonces, monotonic expiry, final status, and session nonce. Failed attempts use
 bounded exponential backoff. Replay storage is bounded and fails closed at
-capacity. Host storage supports explicit provisioning, rotation, and
-revocation. Vita storage is an injected mandatory boundary whose current
-implementation is unavailable, so no device can authenticate yet.
+capacity. Host storage supports explicit provisioning, rotation, and revocation. The
+device metadata core persists no seed and requires separate opaque-key,
+handle-bound persistence, and independent monotonic backends. Retail 3.65 has
+no approved implementation: `*main` is not isolated from co-resident SceShell
+code, public file APIs do not prove no-follow or power-loss-safe commit, and
+ordinary persistent stores share the rollback domain. The sentinel VPK cannot
+accept an assurance override, provision a key, or start networking.
 
 Version 2 provides authentication and integrity, not transport encryption.
 Network metadata and payload contents are visible. No documentation or UI may

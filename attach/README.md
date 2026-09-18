@@ -83,14 +83,16 @@ target or control wire command and no module path. Version 2 currently defines
 only fixed `HELLO`, `CHALLENGE`, `PROOF`, and `RESULT` records. Its host model
 uses the repository's Ed25519 provider, and the C verifier reuses vendored
 Monocypher. The serialized Vita listener owns one worker and tracks its listen
-and accepted sockets for cancellation. The device key-store adapter requires
-external hardware assurance callbacks and otherwise refuses to open. Protocol
-v1 remains read-only. See [the control model](docs/control-model.md).
+and accepted sockets for cancellation. The device key-store core now separates
+public metadata persistence from opaque non-exportable signing operations and
+rejects untrusted path-only, same-namespace rollback, or raw-seed backends.
+There is no Vita secure-storage backend. Protocol v1 remains read-only. See
+[the control model](docs/control-model.md).
 
 The ARM static-library target remains a compile-only gate. A safe disposable
-`VDAT00001` VPK now links the authentication listener and storage adapter, but
-its default build exits before networking because the required hardware storage
-proofs are absent. It is not shell-resident. The protocol-v1 Vita inventory
+`VDAT00001` VPK is now a sentinel-only hard-block artifact: it records the
+retail-3.65 secure-storage block and exits without provisioning a key or
+initializing networking. It is not shell-resident. The protocol-v1 Vita inventory
 adapter remains unavailable because public user APIs cannot provide the trusted
 foreign main-module identity required to issue a ticket. See
 [the broker boundary](broker/README.md) and
@@ -126,14 +128,15 @@ Protocol v2 has separate authentication-only tools:
 
 ```powershell
 py -3 attach/tools/vdattach_auth_provision.py --help
-py -3 attach/tools/vdattach_auth.py `
-  --host 10.1.1.217 --port 18195 `
-  --key-store .\private-host-key-store --json
+py -3 attach/tools/vdattach_auth.py --help
 .\attach\tools\build_auth_gate.ps1
 ```
 
-The build publishes a safe `VDAT00001` VPK and hash/source manifest under
-`attach/dist/auth-gate/`. Its transport is signed plaintext with no encryption.
+The provisioning/client commands are limited to host fixtures while the
+retail-3.65 hard block remains. Do not point them at `10.1.1.217`. The build
+publishes a safe sentinel-only `VDAT00001` VPK and hash/source manifest under
+`attach/dist/auth-gate/`; the VPK never starts networking. The future protocol
+transport remains signed plaintext with no encryption.
 
 ## Layout
 
@@ -148,7 +151,7 @@ The build publishes a safe `VDAT00001` VPK and hash/source manifest under
   bounded protocol-v2 authentication model and atomic host key store.
 - `host/vdattach/auth_cli.py` and `auth_provision.py` provide the separate
   authentication and public-only provisioning tools.
-- `vita-auth-test/` builds the safe authentication-only gate VPK.
+- `vita-auth-test/` builds the safe sentinel-only hard-block VPK.
 - `tools/vdattach.py` runs the package without installation.
 - `tests/` covers canonical encoding, frame limits, capability/ABI gates,
   session binding, exact-title discovery, and ticket release.
@@ -169,10 +172,10 @@ The build publishes a safe `VDAT00001` VPK and hash/source manifest under
 | Ticket release and connection state machine | Implemented and host-tested |
 | Allocation-free Vita broker state machine | Implemented and host-tested; current control contract passes its ARM rebuild |
 | Authenticated listener-facing control state | Host-tested model; no TCP/crypto adapter |
-| Serialized Vita authentication listener/lifecycle wrapper | Implemented and host-tested; disposable VPK builds; hardware run blocked on storage proofs |
+| Serialized Vita authentication listener/lifecycle wrapper | Implemented and host-tested; SceNet ownership modes are explicit; sentinel VPK never starts it |
 | Trusted Vita foreign-target identity adapter | Fail-closed stub; provider required |
 | Read-only kernel target-identity/ticket export | Not implemented |
-| Broker authentication/pairing crypto | Host model, Monocypher, persistent store, listener, and public-only provisioning implemented; Vita store remains fail-closed without hardware assurances |
+| Broker authentication/pairing crypto | Host model, Monocypher, public-only metadata store, listener, and provisioning formats implemented; production Vita authentication is hard-blocked and has no secure-storage backend |
 | Fixed debugger-module loader request model | Implemented and host-tested; privileged backend owns lease grant, no path input or Vita backend |
 | Foreign-process `.suprx` loader export | Not implemented or hardware-tested |
 | Injected debugger `.suprx` | Not implemented |

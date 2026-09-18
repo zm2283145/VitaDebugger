@@ -14,7 +14,6 @@ param(
     [string] $PeerNetmaskHex = "ffffff00",
     [ValidateRange(100, 30000)]
     [int] $HandshakeDeadlineMs = 3000,
-    [string] $AssuranceSource,
     [ValidateRange(1, 256)]
     [int] $Jobs = [Math]::Max(1, [Environment]::ProcessorCount)
 )
@@ -98,6 +97,7 @@ try {
     $env:PATH = "$Msys2RuntimePath;$([IO.Path]::GetDirectoryName($make));$(Join-Path $VitaSdkPath 'bin');$oldPath"
     $makeForCmake = $make.Replace("\", "/")
     $arguments = @(
+        "-UVD_ATTACH_AUTH_ASSURANCE_SOURCE",
         "-S", $sourceDirectory,
         "-B", $buildDirectory,
         "-G", "MSYS Makefiles",
@@ -110,14 +110,6 @@ try {
         "-DVD_ATTACH_AUTH_PEER_NETMASK_HEX=$PeerNetmaskHex",
         "-DVD_ATTACH_AUTH_HANDSHAKE_MS=$HandshakeDeadlineMs"
     )
-    $effectiveAssuranceSource = ""
-    if (-not [string]::IsNullOrWhiteSpace($AssuranceSource)) {
-        if (-not (Test-Path -LiteralPath $AssuranceSource -PathType Leaf)) {
-            throw "Assurance source was not found at '$AssuranceSource'."
-        }
-        $effectiveAssuranceSource = (Resolve-Path -LiteralPath $AssuranceSource).Path
-    }
-    $arguments += "-DVD_ATTACH_AUTH_ASSURANCE_SOURCE=$($effectiveAssuranceSource.Replace('\', '/'))"
     & $cmake @arguments
     if ($LASTEXITCODE -ne 0) {
         throw "Authentication gate configuration failed."
@@ -134,6 +126,21 @@ try {
             (Get-Item -LiteralPath $artifact).Length -le 0) {
             throw "Build did not produce '$artifact'."
         }
+    }
+
+    $elf = Join-Path $buildDirectory "vitadebug_attach_auth_gate"
+    $readelf = Join-Path $VitaSdkPath "bin\arm-vita-eabi-readelf.exe"
+    $nm = Join-Path $VitaSdkPath "bin\arm-vita-eabi-nm.exe"
+    $sections = (& $readelf -SW $elf) -join "`n"
+    if ($LASTEXITCODE -ne 0) {
+        throw "Could not inspect sentinel ELF sections."
+    }
+    $symbols = (& $nm $elf) -join "`n"
+    if ($LASTEXITCODE -ne 0 -or
+        $sections -match "SceNet|SceNetCtl|SceSysmodule" -or
+        $symbols -match
+            "sce(Net|NetCtl|Sysmodule|AppMgr|Kernel(Create|Start)Thread|KernelGetRandomNumber)|vd_attach_auth_(listener|store)") {
+        throw "Sentinel unexpectedly contains networking or authentication runtime code."
     }
 
     $ebootBytes = [IO.File]::ReadAllBytes($eboot)
@@ -187,33 +194,23 @@ try {
             vita_sdk = $compilerVersion
             title_id = "VDAT00001"
             protocol = 2
-            scope = "authentication-only"
+            scope = "sentinel-only"
             transport = "signed-plaintext"
             encryption = "none"
-            endpoint = [ordered]@{
+            network = "not-started"
+            future_listener_endpoint = [ordered]@{
                 bind_ipv4_hex = $BindIpv4Hex
                 peer_network_hex = $PeerNetworkHex
                 peer_netmask_hex = $PeerNetmaskHex
                 port = $Port
                 handshake_deadline_ms = $HandshakeDeadlineMs
             }
-            hardware_assurance = if ([string]::IsNullOrWhiteSpace($AssuranceSource)) {
-                "missing-runtime-fail-closed"
-            } else {
-                "external-source-requires-independent-review"
-            }
+            hardware_assurance = "retail-3.65-hard-block"
             artifacts = [ordered]@{
                 "eboot.bin" = Get-Sha256Lower (Join-Path $stage "eboot.bin")
                 "VitaDebuggerAuthGate.vpk" = Get-Sha256Lower (Join-Path $stage "VitaDebuggerAuthGate.vpk")
             }
-            assurance_source = if ([string]::IsNullOrWhiteSpace($effectiveAssuranceSource)) {
-                $null
-            } else {
-                [ordered]@{
-                    file = [IO.Path]::GetFileName($effectiveAssuranceSource)
-                    sha256 = Get-Sha256Lower $effectiveAssuranceSource
-                }
-            }
+            secure_storage_backend = $null
             sources = $sourceHashes
         }
         $manifest | ConvertTo-Json -Depth 6 |

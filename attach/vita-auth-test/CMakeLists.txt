@@ -26,8 +26,6 @@ set(VD_ATTACH_AUTH_PEER_NETMASK_HEX "ffffff00" CACHE STRING
     "Contiguous peer netmask as eight lowercase network-order hexadecimal digits")
 set(VD_ATTACH_AUTH_HANDSHAKE_MS "3000" CACHE STRING
     "One absolute authentication handshake deadline in milliseconds")
-set(VD_ATTACH_AUTH_ASSURANCE_SOURCE "" CACHE FILEPATH
-    "Reviewed source defining the three hardware assurance callbacks")
 
 if(NOT VD_ATTACH_AUTH_LISTENER_PORT MATCHES "^[0-9]+$" OR
    VD_ATTACH_AUTH_LISTENER_PORT LESS 18000 OR
@@ -53,37 +51,11 @@ foreach(IP_VARIABLE
     endif()
 endforeach()
 
-set(AUTH_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/..")
-set(REPO_ROOT "${AUTH_ROOT}/..")
-set(MONOCYPHER_ROOT
-    "${REPO_ROOT}/deploy/agent/third_party/monocypher")
 set(AUTH_GATE_SOURCES
     src/main.c
-    "${AUTH_ROOT}/broker/src/vitadebug_attach_auth.c"
-    "${AUTH_ROOT}/broker/src/vitadebug_attach_auth_listener.c"
-    "${AUTH_ROOT}/broker/src/vitadebug_attach_auth_listener_vita.c"
-    "${AUTH_ROOT}/broker/src/vitadebug_attach_auth_store.c"
-    "${AUTH_ROOT}/broker/src/vitadebug_attach_auth_store_vita.c"
-    "${MONOCYPHER_ROOT}/monocypher.c"
-    "${MONOCYPHER_ROOT}/monocypher-ed25519.c"
 )
-if(NOT "${VD_ATTACH_AUTH_ASSURANCE_SOURCE}" STREQUAL "")
-    if(NOT EXISTS "${VD_ATTACH_AUTH_ASSURANCE_SOURCE}" OR
-       IS_DIRECTORY "${VD_ATTACH_AUTH_ASSURANCE_SOURCE}")
-        message(FATAL_ERROR
-            "VD_ATTACH_AUTH_ASSURANCE_SOURCE must name a reviewed source file")
-    endif()
-    list(APPEND AUTH_GATE_SOURCES "${VD_ATTACH_AUTH_ASSURANCE_SOURCE}")
-    set(VD_ATTACH_AUTH_HAS_ASSURANCE 1)
-else()
-    set(VD_ATTACH_AUTH_HAS_ASSURANCE 0)
-endif()
 
 add_executable(vitadebug_attach_auth_gate ${AUTH_GATE_SOURCES})
-target_include_directories(vitadebug_attach_auth_gate PRIVATE
-    "${AUTH_ROOT}/broker/include"
-    "${MONOCYPHER_ROOT}"
-)
 target_compile_features(vitadebug_attach_auth_gate PRIVATE c_std_11)
 target_compile_options(vitadebug_attach_auth_gate PRIVATE
     -Wall -Wextra -Werror -Wformat=2 -Wshadow -Wstrict-prototypes
@@ -95,21 +67,18 @@ target_compile_definitions(vitadebug_attach_auth_gate PRIVATE
     VD_ATTACH_AUTH_PEER_NETWORK=0x${VD_ATTACH_AUTH_PEER_NETWORK_HEX}u
     VD_ATTACH_AUTH_PEER_NETMASK=0x${VD_ATTACH_AUTH_PEER_NETMASK_HEX}u
     VD_ATTACH_AUTH_HANDSHAKE_MS=${VD_ATTACH_AUTH_HANDSHAKE_MS}u
-    VD_ATTACH_AUTH_HAS_ASSURANCE=${VD_ATTACH_AUTH_HAS_ASSURANCE}
+    VD_ATTACH_AUTH_HARD_BLOCK=1
 )
 target_link_options(vitadebug_attach_auth_gate PRIVATE
     -Wl,--gc-sections
 )
 target_link_libraries(vitadebug_attach_auth_gate
-    SceCtrl_stub
     SceIofilemgr_stub
-    SceKernelThreadMgr_stub
-    SceNet_stub
-    SceSysmodule_stub
 )
 
-# This remains an ordinary safe user-mode fSELF. It has no AppMgr, kernel
-# loader, target-process, module-injection, or GDB import.
+# This sentinel remains an ordinary safe user-mode fSELF. It writes the hard
+# block status and exits; it has no network, AppMgr, kernel-loader,
+# target-process, module-injection, or GDB import.
 vita_create_self(eboot.bin vitadebug_attach_auth_gate)
 vita_create_vpk(VitaDebuggerAuthGate.vpk ${VITA_TITLE_ID} eboot.bin
     VERSION ${VITA_VERSION}

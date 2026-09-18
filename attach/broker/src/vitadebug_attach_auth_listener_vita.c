@@ -199,21 +199,46 @@ static int vd_auth_vita_worker(SceSize argument_size, void *arguments) {
     return result;
 }
 
-int vd_attach_auth_vita_runtime_prepare(
+static void vd_auth_vita_set_socket_ops(
+    VdAttachAuthVitaRuntime *runtime,
+    VdAttachAuthSocketOps *socket_ops) {
+    memset(socket_ops, 0, sizeof(*socket_ops));
+    socket_ops->context = runtime;
+    socket_ops->now_ms = vd_auth_vita_now_ms;
+    socket_ops->entropy = vd_auth_vita_entropy;
+    socket_ops->listen_open = vd_auth_vita_listen_open;
+    socket_ops->accept = vd_auth_vita_accept;
+    socket_ops->read = vd_auth_vita_read;
+    socket_ops->write = vd_auth_vita_write;
+    socket_ops->shutdown = vd_auth_vita_shutdown;
+    socket_ops->close = vd_auth_vita_close;
+}
+
+int vd_attach_auth_vita_runtime_prepare_standalone(
     VdAttachAuthVitaRuntime *runtime,
     void *network_memory,
     size_t network_memory_size,
     VdAttachAuthSocketOps *socket_ops) {
+    VdAttachAuthNetworkConfig config;
     SceNetInitParam init;
     int result;
+    memset(&config, 0, sizeof(config));
+    config.mode = VD_ATTACH_AUTH_NETWORK_STANDALONE_OWNED;
+    config.network_memory = network_memory;
+    config.network_memory_size = network_memory_size;
+    config.owns_network_module = 1;
+    config.owns_network_initialization = 1;
     if (runtime == NULL || socket_ops == NULL ||
-        network_memory == NULL ||
-        network_memory_size < VD_ATTACH_AUTH_VITA_NET_MEMORY_MIN ||
         network_memory_size > INT_MAX) {
+        return VD_ATTACH_AUTH_LISTENER_ERROR_ARGUMENT;
+    }
+    if (vd_attach_auth_network_config_validate(&config) !=
+        VD_ATTACH_AUTH_LISTENER_OK) {
         return VD_ATTACH_AUTH_LISTENER_ERROR_ARGUMENT;
     }
     memset(runtime, 0, sizeof(*runtime));
     runtime->worker = -1;
+    runtime->network_mode = config.mode;
     runtime->network_memory = network_memory;
     runtime->network_memory_size = network_memory_size;
     result = sceSysmoduleLoadModule(SCE_SYSMODULE_NET);
@@ -233,16 +258,27 @@ int vd_attach_auth_vita_runtime_prepare(
         return VD_ATTACH_AUTH_LISTENER_ERROR_RESOURCE;
     }
     runtime->network_initialized = 1;
-    memset(socket_ops, 0, sizeof(*socket_ops));
-    socket_ops->context = runtime;
-    socket_ops->now_ms = vd_auth_vita_now_ms;
-    socket_ops->entropy = vd_auth_vita_entropy;
-    socket_ops->listen_open = vd_auth_vita_listen_open;
-    socket_ops->accept = vd_auth_vita_accept;
-    socket_ops->read = vd_auth_vita_read;
-    socket_ops->write = vd_auth_vita_write;
-    socket_ops->shutdown = vd_auth_vita_shutdown;
-    socket_ops->close = vd_auth_vita_close;
+    runtime->network_ready = 1;
+    vd_auth_vita_set_socket_ops(runtime, socket_ops);
+    return VD_ATTACH_AUTH_LISTENER_OK;
+}
+
+int vd_attach_auth_vita_runtime_prepare_borrowed(
+    VdAttachAuthVitaRuntime *runtime,
+    VdAttachAuthSocketOps *socket_ops) {
+    VdAttachAuthNetworkConfig config;
+    memset(&config, 0, sizeof(config));
+    config.mode = VD_ATTACH_AUTH_NETWORK_SHELL_BORROWED;
+    if (runtime == NULL || socket_ops == NULL ||
+        vd_attach_auth_network_config_validate(&config) !=
+            VD_ATTACH_AUTH_LISTENER_OK) {
+        return VD_ATTACH_AUTH_LISTENER_ERROR_ARGUMENT;
+    }
+    memset(runtime, 0, sizeof(*runtime));
+    runtime->worker = -1;
+    runtime->network_mode = config.mode;
+    runtime->network_ready = 1;
+    vd_auth_vita_set_socket_ops(runtime, socket_ops);
     return VD_ATTACH_AUTH_LISTENER_OK;
 }
 
@@ -250,9 +286,10 @@ int vd_attach_auth_vita_runtime_start_worker(
     VdAttachAuthVitaRuntime *runtime,
     VdAttachAuthListener *listener) {
     VdAttachAuthVitaRuntime *argument;
+    int cleanup_result;
     int result;
     if (runtime == NULL || listener == NULL ||
-        !runtime->network_initialized || runtime->worker >= 0 ||
+        !runtime->network_ready || runtime->worker >= 0 ||
         listener->state != VD_ATTACH_AUTH_LISTENER_RUNNING) {
         return VD_ATTACH_AUTH_LISTENER_ERROR_STATE;
     }
@@ -263,18 +300,32 @@ int vd_attach_auth_vita_runtime_start_worker(
         SCE_KERNEL_THREAD_CPU_AFFINITY_MASK_DEFAULT, NULL);
     if (runtime->worker < 0) {
         result = runtime->worker;
+        cleanup_result = vd_attach_auth_listener_shutdown(listener);
         runtime->worker = -1;
-        runtime->listener = NULL;
+        if (cleanup_result >= 0) {
+            runtime->listener = NULL;
+        }
+        if (cleanup_result < 0) {
+            return VD_ATTACH_AUTH_LISTENER_ERROR_IO;
+        }
         return result;
     }
     argument = runtime;
     result = sceKernelStartThread(runtime->worker, sizeof(argument),
                                   &argument);
     if (result < 0) {
+        cleanup_result = vd_attach_auth_listener_shutdown(listener);
         int delete_result = sceKernelDeleteThread(runtime->worker);
         if (delete_result >= 0) {
             runtime->worker = -1;
-            runtime->listener = NULL;
+            if (cleanup_result >= 0) {
+                runtime->listener = NULL;
+            }
+        } else {
+            return VD_ATTACH_AUTH_LISTENER_ERROR_RESOURCE;
+        }
+        if (cleanup_result < 0) {
+            return VD_ATTACH_AUTH_LISTENER_ERROR_IO;
         }
         return result;
     }
@@ -291,6 +342,8 @@ int vd_attach_auth_vita_runtime_stop(
     if (runtime->listener != NULL) {
         if (vd_attach_auth_listener_shutdown(runtime->listener) < 0) {
             result = VD_ATTACH_AUTH_LISTENER_ERROR_IO;
+        } else if (runtime->worker < 0) {
+            runtime->listener = NULL;
         }
     }
     if (runtime->worker >= 0) {
@@ -309,19 +362,30 @@ int vd_attach_auth_vita_runtime_stop(
         runtime->worker = -1;
         runtime->worker_started = 0;
         runtime->worker_ended = 0;
-        runtime->listener = NULL;
+        if (result == VD_ATTACH_AUTH_LISTENER_OK) {
+            runtime->listener = NULL;
+        }
     }
-    if (runtime->network_initialized) {
+    if (result != VD_ATTACH_AUTH_LISTENER_OK) {
+        return result;
+    }
+    if (runtime->network_mode ==
+            VD_ATTACH_AUTH_NETWORK_STANDALONE_OWNED &&
+        runtime->network_initialized) {
         if (sceNetTerm() < 0) {
             return VD_ATTACH_AUTH_LISTENER_ERROR_RESOURCE;
         }
         runtime->network_initialized = 0;
     }
-    if (runtime->network_module_loaded) {
+    if (runtime->network_mode ==
+            VD_ATTACH_AUTH_NETWORK_STANDALONE_OWNED &&
+        runtime->network_module_loaded) {
         if (sceSysmoduleUnloadModule(SCE_SYSMODULE_NET) < 0) {
             return VD_ATTACH_AUTH_LISTENER_ERROR_RESOURCE;
         }
         runtime->network_module_loaded = 0;
     }
+    runtime->network_ready = 0;
+    runtime->network_mode = 0;
     return result;
 }

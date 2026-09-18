@@ -9,20 +9,10 @@
 extern "C" {
 #endif
 
-#define VD_ATTACH_AUTH_STORE_SCHEMA 1u
+#define VD_ATTACH_AUTH_STORE_SCHEMA 2u
 #define VD_ATTACH_AUTH_STORE_MAX_PEERS 16u
 #define VD_ATTACH_AUTH_STORE_MAX_BYTES 2048u
 #define VD_ATTACH_AUTH_STORE_CONTEXT_BYTES 2048u
-
-/*
- * This path is intentionally fixed.  A Vita integration must arrange for the
- * directory and both files to be private to the broker's trusted principal.
- * VitaSDK's public sceIo API cannot establish that confidentiality property.
- */
-#define VD_ATTACH_AUTH_STORE_VITA_PATH \
-    "ur0:data/VitaDebugger/private/attach-auth.store"
-#define VD_ATTACH_AUTH_STORE_VITA_TEMP_PATH \
-    "ur0:data/VitaDebugger/private/attach-auth.store.new"
 
 enum {
     VD_ATTACH_AUTH_STORE_OK = 0,
@@ -34,50 +24,100 @@ enum {
     VD_ATTACH_AUTH_STORE_ERROR_LIMIT = -25,
     VD_ATTACH_AUTH_STORE_ERROR_CONFLICT = -26,
     VD_ATTACH_AUTH_STORE_ERROR_NOT_PROVISIONED = -27,
+    VD_ATTACH_AUTH_STORE_ERROR_PRIVATE_KEY = -28,
+    VD_ATTACH_AUTH_STORE_ERROR_CAPABILITY = -29,
 };
 
 enum {
-    VD_ATTACH_AUTH_STORE_IO_OK = 0,
-    VD_ATTACH_AUTH_STORE_IO_NOT_FOUND = 1,
+    VD_ATTACH_AUTH_STORE_BACKEND_OK = 0,
+    VD_ATTACH_AUTH_STORE_BACKEND_NOT_FOUND = 1,
+    /* Commit outcome is unknown; preserve staged data for recovery. */
+    VD_ATTACH_AUTH_STORE_BACKEND_INTERRUPTED = 2,
+};
+
+enum {
+    VD_ATTACH_AUTH_PERSISTENCE_HANDLE_BOUND = 1u << 0,
+    VD_ATTACH_AUTH_PERSISTENCE_DURABLE_COMMIT = 1u << 1,
+    VD_ATTACH_AUTH_PERSISTENCE_RECOVERABLE_STAGE = 1u << 2,
+    VD_ATTACH_AUTH_PERSISTENCE_PATH_PROOF_ONLY = 1u << 31,
 };
 
 /*
- * Successful opens MUST refer to a regular file reached without following
- * links.  Implementations must also reject multiply-linked files where their
- * platform supports links.  create_new must be exclusive.  replace_atomic
- * must atomically replace the destination, and sync_parent must make the
- * directory entry durable.  No callback may retain a supplied data pointer.
+ * All operations address backend-owned current or staged objects; the core
+ * never receives a path.  commit_staged and discard_staged must act on the
+ * exact handle supplied.  A successful commit atomically and durably promotes
+ * that synced staged object to current without consuming the handle.  A file
+ * backend must return only no-follow, already-open regular-file handles.
+ * close always consumes its handle, even when it reports a diagnostic error.
+ * A commit error means no promotion; an ambiguous result must be reported as
+ * BACKEND_INTERRUPTED so recovery, rather than rollback, decides the outcome.
+ * Capability bits and trust-domain tokens support structural fail-closed
+ * checks but are not proof of trustworthiness; each backend still requires
+ * independent review.
  */
-typedef struct VdAttachAuthStoreFileOps {
+typedef struct VdAttachAuthStorePersistenceOps {
     void *context;
-    int (*open_read_regular_no_follow)(void *context,
-                                       const char *path,
-                                       void **handle);
-    int (*create_new_regular_no_follow)(void *context,
-                                        const char *path,
-                                        void **handle);
+    const void *trust_domain;
+    uint32_t capabilities;
+    int (*open_current)(void *context, void **handle);
+    int (*open_staged)(void *context, void **handle);
+    int (*create_staged)(void *context, void **handle);
     int (*read)(void *context, void *handle, uint8_t *data,
                 size_t capacity, size_t *read_size);
     int (*write)(void *context, void *handle, const uint8_t *data,
                  size_t size, size_t *write_size);
     int (*sync)(void *context, void *handle);
     int (*close)(void *context, void *handle);
-    int (*replace_atomic)(void *context, const char *from,
-                          const char *to);
-    int (*remove_regular_no_follow)(void *context, const char *path);
-    int (*sync_parent)(void *context, const char *path);
-} VdAttachAuthStoreFileOps;
+    int (*commit_staged)(void *context, void *staged_handle);
+    int (*discard_staged)(void *context, void *staged_handle);
+} VdAttachAuthStorePersistenceOps;
+
+enum {
+    VD_ATTACH_AUTH_MONOTONIC_INDEPENDENT_TRUST_DOMAIN = 1u << 0,
+    VD_ATTACH_AUTH_MONOTONIC_DURABLE = 1u << 1,
+    VD_ATTACH_AUTH_MONOTONIC_METADATA_NAMESPACE = 1u << 31,
+};
 
 /*
- * The floor must live outside the regular store and resist rollback by an
- * attacker able to restore an older store file.  advance_floor must durably
- * set the floor to at least revision before returning success.
+ * trust_domain must identify a security domain distinct from persistence.
+ * advance_floor durably raises the floor before returning success.
  */
-typedef struct VdAttachAuthStoreRollbackOps {
+typedef struct VdAttachAuthStoreMonotonicOps {
     void *context;
+    const void *trust_domain;
+    uint32_t capabilities;
     int (*load_floor)(void *context, uint64_t *revision);
     int (*advance_floor)(void *context, uint64_t revision);
-} VdAttachAuthStoreRollbackOps;
+} VdAttachAuthStoreMonotonicOps;
+
+enum {
+    VD_ATTACH_AUTH_PRIVATE_KEY_NON_EXPORTABLE = 1u << 0,
+    VD_ATTACH_AUTH_PRIVATE_KEY_ISOLATED = 1u << 1,
+    VD_ATTACH_AUTH_PRIVATE_KEY_RAW_SEED_IMPORT = 1u << 31,
+};
+
+/*
+ * This backend owns all private key material.  No callback imports or exports
+ * a seed/private key.  generate returns public material only.  destroy must
+ * be idempotent for an already-absent key.
+ */
+typedef struct VdAttachAuthStorePrivateKeyOps {
+    void *context;
+    const void *trust_domain;
+    uint32_t capabilities;
+    int (*generate)(void *context, uint64_t key_id,
+                    uint64_t generation,
+                    uint8_t public_key[VD_ATTACH_AUTH_KEY_BYTES]);
+    int (*load_public)(void *context, uint64_t key_id,
+                       uint64_t generation,
+                       uint8_t public_key[VD_ATTACH_AUTH_KEY_BYTES]);
+    int (*sign)(void *context, uint64_t key_id, uint64_t generation,
+                const uint8_t *message, size_t message_size,
+                uint8_t signature[VD_ATTACH_AUTH_SIGNATURE_BYTES],
+                uint64_t deadline_ms);
+    int (*destroy)(void *context, uint64_t key_id,
+                   uint64_t generation);
+} VdAttachAuthStorePrivateKeyOps;
 
 typedef struct VdAttachAuthStoreMetadata {
     uint32_t schema;
@@ -94,20 +134,19 @@ typedef union VdAttachAuthStore {
 
 int vd_attach_auth_store_init(
     VdAttachAuthStore *store,
-    const VdAttachAuthStoreFileOps *file_ops,
-    const VdAttachAuthStoreRollbackOps *rollback_ops);
+    const VdAttachAuthStorePersistenceOps *persistence,
+    const VdAttachAuthStoreMonotonicOps *monotonic,
+    const VdAttachAuthStorePrivateKeyOps *private_keys);
 
 int vd_attach_auth_store_recover(VdAttachAuthStore *store);
+
+/* Idempotent and non-destructive: only resident state/vtables are wiped. */
+void vd_attach_auth_store_deinit(VdAttachAuthStore *store);
 
 int vd_attach_auth_store_get_metadata(
     const VdAttachAuthStore *store,
     VdAttachAuthStoreMetadata *metadata);
 
-/*
- * Atomically advances both the persistent revision and service generation.
- * Call this before opening a listener port so every service lifetime uses a
- * distinct, rollback-protected, nonzero generation.
- */
 int vd_attach_auth_store_reserve_service_generation(
     VdAttachAuthStore *store,
     uint64_t *service_generation);
@@ -126,23 +165,21 @@ int vd_attach_auth_store_sign_local(
     VdAttachAuthStore *store,
     const uint8_t *message,
     size_t message_size,
-    uint8_t signature[VD_ATTACH_AUTH_SIGNATURE_BYTES]);
+    uint8_t signature[VD_ATTACH_AUTH_SIGNATURE_BYTES],
+    uint64_t deadline_ms);
 
 int vd_attach_auth_store_provision(
     VdAttachAuthStore *store,
     uint64_t key_id,
-    uint64_t generation,
-    const uint8_t seed[VD_ATTACH_AUTH_KEY_BYTES]);
+    uint64_t generation);
 
 int vd_attach_auth_store_rotate(
     VdAttachAuthStore *store,
     uint64_t old_key_id,
     uint64_t old_generation,
     uint64_t new_key_id,
-    uint64_t new_generation,
-    const uint8_t seed[VD_ATTACH_AUTH_KEY_BYTES]);
+    uint64_t new_generation);
 
-/* Peer provisioning accepts public material only. */
 int vd_attach_auth_store_allow_peer(
     VdAttachAuthStore *store,
     const VdAttachAuthPublicKey *peer);
@@ -152,35 +189,18 @@ int vd_attach_auth_store_revoke_peer(
     uint64_t key_id,
     uint64_t generation);
 
-/*
- * Uninstall durably commits a key-free tombstone before returning.  Its
- * revision remains protected by the rollback floor, so restoring an older
- * file containing keys is rejected.
- */
+/* Commits a tombstone before destroying the opaque local key. */
 int vd_attach_auth_store_uninstall(VdAttachAuthStore *store);
 
+/* Binds only the three listener-facing, non-administrative operations. */
 int vd_attach_auth_store_bind(VdAttachAuthStore *store,
                               VdAttachAuthKeyStorage *storage);
 
 /*
- * Public sceIo calls provide regular file I/O, sync, and rename only.  The
- * caller-supplied proof is therefore mandatory and must attest private-path,
- * no-link, and atomic-rename properties on every use.  The externally backed
- * floor callbacks are also mandatory.  The assurance object must outlive the
- * store.
+ * No public VitaSDK API can satisfy these trust requirements.  This sentinel
+ * always wipes store and returns VD_ATTACH_AUTH_STORE_ERROR_UNAVAILABLE.
  */
-typedef struct VdAttachAuthStoreVitaAssurance {
-    void *context;
-    int (*prove_private_storage)(void *context,
-                                 const char *store_path,
-                                 const char *temporary_path);
-    int (*load_floor)(void *context, uint64_t *revision);
-    int (*advance_floor)(void *context, uint64_t revision);
-} VdAttachAuthStoreVitaAssurance;
-
-int vd_attach_auth_store_vita_init(
-    VdAttachAuthStore *store,
-    VdAttachAuthStoreVitaAssurance *assurance);
+int vd_attach_auth_store_vita_init(VdAttachAuthStore *store);
 
 #ifdef __cplusplus
 }

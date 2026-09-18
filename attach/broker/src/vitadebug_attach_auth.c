@@ -33,9 +33,7 @@ int vd_attach_auth_storage_validate(
     const VdAttachAuthKeyStorage *storage) {
     if (storage == NULL || storage->load_local_public == NULL ||
         storage->lookup_peer == NULL || storage->sign_local == NULL ||
-        storage->provision_local == NULL ||
-        storage->rotate_local == NULL || storage->allow_peer == NULL ||
-        storage->revoke_peer == NULL) {
+        storage->context == NULL) {
         return VD_ATTACH_AUTH_ERROR_UNAVAILABLE;
     }
     return VD_ATTACH_AUTH_OK;

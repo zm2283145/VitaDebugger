@@ -16,6 +16,31 @@
 #define VD_AUTH_STATUS_OK 0u
 #define VD_AUTH_STATUS_DENIED 1u
 
+int vd_attach_auth_network_config_validate(
+    const VdAttachAuthNetworkConfig *config) {
+    if (config == NULL) {
+        return VD_ATTACH_AUTH_LISTENER_ERROR_ARGUMENT;
+    }
+    if (config->mode == VD_ATTACH_AUTH_NETWORK_STANDALONE_OWNED) {
+        return config->network_memory != NULL &&
+                       config->network_memory_size >=
+                           VD_ATTACH_AUTH_NETWORK_MEMORY_MIN &&
+                       config->owns_network_module == 1 &&
+                       config->owns_network_initialization == 1
+                   ? VD_ATTACH_AUTH_LISTENER_OK
+                   : VD_ATTACH_AUTH_LISTENER_ERROR_ARGUMENT;
+    }
+    if (config->mode == VD_ATTACH_AUTH_NETWORK_SHELL_BORROWED) {
+        return config->network_memory == NULL &&
+                       config->network_memory_size == 0u &&
+                       config->owns_network_module == 0 &&
+                       config->owns_network_initialization == 0
+                   ? VD_ATTACH_AUTH_LISTENER_OK
+                   : VD_ATTACH_AUTH_LISTENER_ERROR_ARGUMENT;
+    }
+    return VD_ATTACH_AUTH_LISTENER_ERROR_ARGUMENT;
+}
+
 static uint16_t vd_auth_get_u16(const uint8_t *data) {
     return (uint16_t)(((uint16_t)data[0] << 8) | data[1]);
 }

@@ -160,4 +160,11 @@ Shutdown first rejects new work, then shuts down and closes both registered
 sockets so blocked accept/read/write calls terminate. A failed descriptor
 close remains a cleanup obligation and is retried before restart. Repeated
 shutdown is idempotent, and the worker must be joined and deleted before
-network teardown or code unload.
+owned network teardown or code unload. Disposable-title mode owns SceNet
+load/init/term/unload. Shell-borrowed mode owns none of those operations,
+performs no NetCtl transition, and cannot tear down shared networking.
+
+The retail-3.65 secure-storage review keeps this listener disabled on hardware.
+The VPK is a sentinel only: it does not provision a key, initialize networking,
+or open the endpoint. These records remain a host-tested protocol contract for
+a future trusted backend, not an advertised production service.

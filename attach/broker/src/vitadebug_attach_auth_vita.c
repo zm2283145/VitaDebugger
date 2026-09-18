@@ -3,8 +3,8 @@
 #include <string.h>
 
 /*
- * Device authentication is deliberately unavailable until an atomic,
- * permission-reviewed, persistent Vita key store is implemented and tested.
+ * Retail Vita authentication is deliberately unavailable until independently
+ * reviewed opaque-key, handle-bound persistence, and monotonic backends exist.
  */
 void vd_attach_auth_vita_unavailable_storage(
     VdAttachAuthKeyStorage *storage) {
