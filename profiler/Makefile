@@ -225,25 +225,30 @@ $(HOST_BUILD)/test_vitaprofiler_tcp_vita: src/vitaprofiler.c src/vitaprofiler_na
 
 $(HOST_BUILD)/test_vitaprofiler_integrations: src/vitaprofiler.c src/vitaprofiler_names.c src/vitaprofiler_pmu.c src/vitaprofiler_gpu.c tests/test_vitaprofiler_integrations.c include/vitaprofiler.h include/vitaprofiler_pmu.h include/vitaprofiler_gpu.h
 	mkdir -p $(HOST_BUILD)
-	$(HOST_CC) $(CPPFLAGS) $(HOST_CFLAGS) -pthread src/vitaprofiler.c src/vitaprofiler_names.c src/vitaprofiler_pmu.c src/vitaprofiler_gpu.c tests/test_vitaprofiler_integrations.c -o $@
+	$(HOST_CC) $(CPPFLAGS) $(HOST_CFLAGS) -DVITAPROFILER_GRAPHICS_ENABLED -pthread src/vitaprofiler.c src/vitaprofiler_names.c src/vitaprofiler_pmu.c src/vitaprofiler_gpu.c tests/test_vitaprofiler_integrations.c -o $@
+
+$(HOST_BUILD)/test_vitaprofiler_graphics_disabled: tests/test_vitaprofiler_graphics_disabled.c include/vitaprofiler.h include/vitaprofiler_gpu.h
+	mkdir -p $(HOST_BUILD)
+	$(HOST_CC) $(CPPFLAGS) $(HOST_CFLAGS) tests/test_vitaprofiler_graphics_disabled.c -o $@
 
 $(HOST_BUILD)/test_vitaprofiler_pmu_vita: src/vitaprofiler.c src/vitaprofiler_pmu.c src/vitaprofiler_pmu_vita.c tests/test_vitaprofiler_pmu_vita.c include/vitaprofiler.h include/vitaprofiler_pmu.h include/vitaprofiler_pmu_vita.h
 	mkdir -p $(HOST_BUILD)
 	$(HOST_CC) $(CPPFLAGS) $(HOST_CFLAGS) src/vitaprofiler.c src/vitaprofiler_pmu.c src/vitaprofiler_pmu_vita.c tests/test_vitaprofiler_pmu_vita.c -o $@
 
-$(HOST_BUILD)/generate_vitaprofiler_fixture: src/vitaprofiler.c src/vitaprofiler_names.c src/vitaprofiler_stream.c tests/generate_vitaprofiler_fixture.c include/vitaprofiler.h include/vitaprofiler_stream.h
+$(HOST_BUILD)/generate_vitaprofiler_fixture: src/vitaprofiler.c src/vitaprofiler_names.c src/vitaprofiler_stream.c src/vitaprofiler_gpu.c tests/generate_vitaprofiler_fixture.c include/vitaprofiler.h include/vitaprofiler_stream.h include/vitaprofiler_gpu.h
 	mkdir -p $(HOST_BUILD)
-	$(HOST_CC) $(CPPFLAGS) $(HOST_CFLAGS) -pthread src/vitaprofiler.c src/vitaprofiler_names.c src/vitaprofiler_stream.c tests/generate_vitaprofiler_fixture.c -o $@
+	$(HOST_CC) $(CPPFLAGS) $(HOST_CFLAGS) -pthread src/vitaprofiler.c src/vitaprofiler_names.c src/vitaprofiler_stream.c src/vitaprofiler_gpu.c tests/generate_vitaprofiler_fixture.c -o $@
 
 $(HOST_BUILD)/capture-from-c.vptrace: $(HOST_BUILD)/generate_vitaprofiler_fixture
 	$(HOST_BUILD)/generate_vitaprofiler_fixture $@
 
-host-test: $(HOST_BUILD)/test_vitaprofiler $(HOST_BUILD)/test_vitaprofiler_names $(HOST_BUILD)/test_vitaprofiler_stream $(HOST_BUILD)/test_vitaprofiler_tcp_vita $(HOST_BUILD)/test_vitaprofiler_integrations $(HOST_BUILD)/test_vitaprofiler_pmu_vita $(HOST_BUILD)/capture-from-c.vptrace
+host-test: $(HOST_BUILD)/test_vitaprofiler $(HOST_BUILD)/test_vitaprofiler_names $(HOST_BUILD)/test_vitaprofiler_stream $(HOST_BUILD)/test_vitaprofiler_tcp_vita $(HOST_BUILD)/test_vitaprofiler_integrations $(HOST_BUILD)/test_vitaprofiler_graphics_disabled $(HOST_BUILD)/test_vitaprofiler_pmu_vita $(HOST_BUILD)/capture-from-c.vptrace
 	$(HOST_BUILD)/test_vitaprofiler
 	$(HOST_BUILD)/test_vitaprofiler_names
 	$(HOST_BUILD)/test_vitaprofiler_stream
 	$(HOST_BUILD)/test_vitaprofiler_tcp_vita
 	$(HOST_BUILD)/test_vitaprofiler_integrations
+	$(HOST_BUILD)/test_vitaprofiler_graphics_disabled
 	$(HOST_BUILD)/test_vitaprofiler_pmu_vita
 	$(PYTHON) tests/test_vitaprofiler_trace.py
 	$(PYTHON) tests/test_vitaprofiler_desktop.py

@@ -2,9 +2,10 @@
 
 This records the cooperative call-site audit and subsequent default-off
 integration in the `Render96Ex-Vita` checkout. It deliberately does not patch
-imports, interpose VitaGL/SceGxm symbols, or modify a graphics library binary. The existing
-`vitaprofiler_gpu.h` hooks record CPU-observed time only; they are not GPU
-timestamps.
+imports, interpose VitaGL/SceGxm symbols, or modify a graphics library binary. The `vitaprofiler_gpu.h` hooks record CPU-observed time only; they are not GPU
+timestamps. The library now exposes deeper draw submission, shader/state,
+allocation, frame-marker, and bounded nesting helpers, but the captured
+Render96EX baseline below predates those additions.
 
 ## Audit identity
 
@@ -82,10 +83,13 @@ dedicated cooperative drain thread or an existing non-render control thread,
 with an explicit shutdown/join owner.
 
 An optional second phase may patch the project's pinned VitaGL **source** at
-the exact SceGxm call sites it owns and use the existing SceGxm hook IDs. That
-must be a reviewed source build with balanced begin/end cleanup on every
-return path. Runtime symbol replacement, import hooks, and binary
-interposition are out of scope.
+the exact SceGxm call sites it owns and use the deeper SceGxm draw, wait,
+display-queue, shader/state, and allocation hook IDs. The application-owned
+Render96EX layer can also adopt `graphics.frame.cpu`, per-frame shader/state
+and allocation counters, and the compile-time no-op macros. That must be a
+reviewed source build with balanced cleanup on every return path. Runtime
+symbol replacement, import hooks, and binary interposition remain out of
+scope.
 
 ## Bounded integration gate
 
@@ -108,9 +112,10 @@ It met the following requirements:
 
 The second capture measured a 3.917 ms median `goddard.head.cpu` callback inside
 an 83.373 ms median head frame, with 828 median VitaGL draws and 0.379 ms median
-total time in the two CPU-observed swaps. The next instrumentation should be
-placed below Goddard list construction at source-owned VitaGL/SceGxm submission
-or synchronization points.
+total time in the two CPU-observed swaps. The next hardware capture should place the new hooks below Goddard list
+construction at source-owned VitaGL/SceGxm submission or synchronization
+points. No such deeper Render96EX hardware capture is claimed by the current
+library-only change.
 
 Compare frame time with telemetry disabled, enabled without a receiver, and
 enabled with a receiver. A receiver outage must fail/disable telemetry without

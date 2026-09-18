@@ -34,8 +34,10 @@ The current increment provides:
 - A dependency-free Tk desktop viewer over those same receiver, decoder,
   analyzer, and export APIs, with background work, cancellation, filtering,
   selection, and explicit wire-v1 loss-reporting limits.
-- Cooperative, header-independent CPU wall-time hook interfaces for VitaGL and
-  SceGxm call sites.
+- Cooperative, header-independent CPU wall-time hooks for application-owned
+  VitaGL/SceGxm submissions, waits, swaps, draws, shader/state changes,
+  allocations, and frame markers, with stable IDs, a bounded scope stack, and
+  compile-time no-op call-site macros.
 - A guarded PMU provider/lease abstraction plus an injectable owned-reset
   adapter for the public ScePerf semantics. The adapter retains failed cleanup
   obligations. Its direct Vita convenience initializer now fails closed
@@ -305,9 +307,10 @@ collisions/capacity/truncation, concurrent multi-producer delivery, concurrent
 read-only name resolution after sealing, combined stream drain/decoding,
 fail-closed sink behavior, bounded/partial Vita TCP transport behavior, PMU
 ownership/restoration policy, public-ScePerf
-adapter sequencing and cleanup, and graphics hook emission.
-The Python suite adds corrupt/truncated capture rejection, fragmented loopback
-TCP reception, byte bounds, named zone analysis, and JSON/Perfetto output.
+adapter sequencing and cleanup, graphics hook ordering/nesting/bounds, and
+compile-time/runtime disabled behavior. The Python suite adds
+corrupt/truncated capture rejection, fragmented loopback TCP reception, byte
+bounds, named zone analysis, and graphics event JSON/Perfetto output.
 
 From a Visual Studio Developer Command Prompt on Windows:
 

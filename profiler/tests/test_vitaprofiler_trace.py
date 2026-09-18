@@ -123,11 +123,31 @@ class DecodeTests(unittest.TestCase):
                         "make host-test must generate the C wire fixture")
         capture = trace.decode_capture(fixture.read_bytes())
         self.assertEqual(capture.header.stream_start_us, 900)
-        self.assertEqual(len(capture.events), 6)
+        self.assertEqual(len(capture.events), 10)
         self.assertEqual(capture.resolve_name(capture.events[0].name_id),
                          "update")
         self.assertEqual(capture.events[1].value, 42)
         self.assertEqual(capture.events[5].name_id, 0xFFF00001)
+        self.assertEqual(capture.resolve_name(capture.events[6].name_id),
+                         "graphics.frame.cpu")
+        self.assertEqual(capture.resolve_name(capture.events[7].name_id),
+                         "vitagl.draw.cpu_submit")
+        self.assertEqual(capture.events[8].value, 25)
+        self.assertEqual(capture.resolve_name(capture.events[9].name_id),
+                         "vitagl.draw_calls")
+        self.assertEqual(capture.events[9].value, 43)
+        decoded = trace.capture_to_json(capture)
+        self.assertEqual(decoded["events"][7]["name"],
+                         "vitagl.draw.cpu_submit")
+        perfetto = trace.capture_to_chrome_trace(capture)
+        self.assertTrue(any(event.get("ph") == "X" and
+                            event.get("name") == "vitagl.draw.cpu_submit" and
+                            event.get("dur") == 25
+                            for event in perfetto["traceEvents"]))
+        self.assertTrue(any(event.get("ph") == "C" and
+                            event.get("name") == "vitagl.draw_calls" and
+                            event.get("args", {}).get("value") == 43
+                            for event in perfetto["traceEvents"]))
 
     def test_named_capture_summary_and_exports(self):
         capture = trace.decode_capture(make_capture())

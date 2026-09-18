@@ -125,11 +125,14 @@ static void test_guarded_pmu_provider(void)
 struct fake_source {
     uint64_t now;
     uint32_t thread_id;
+    uint32_t clock_calls;
 };
 
 static uint64_t fake_clock(void* user)
 {
-    return ((struct fake_source*)user)->now;
+    struct fake_source* source = (struct fake_source*)user;
+    ++source->clock_calls;
+    return source->now;
 }
 
 static uint32_t fake_thread(void* user)
@@ -142,11 +145,11 @@ static void test_cooperative_graphics_hooks(void)
     struct vp_context context;
     struct vp_slot slots[32];
     struct vp_config config;
-    struct fake_source source = {100u, 5u};
+    struct fake_source source = {100u, 5u, 0u};
     struct vp_name_dictionary names;
     struct vp_name_dictionary_config name_config;
-    struct vp_name_entry entries[16];
-    char text[512];
+    struct vp_name_entry entries[32];
+    char text[1024];
     struct vp_graphics_name_ids ids;
     struct vp_pmu_name_ids pmu_ids;
     struct vp_pmu_sample pmu_sample;
@@ -167,7 +170,7 @@ static void test_cooperative_graphics_hooks(void)
           "initialize graphics profiler context");
     memset(&name_config, 0, sizeof(name_config));
     name_config.entries = entries;
-    name_config.entry_capacity = 16u;
+    name_config.entry_capacity = 32u;
     name_config.text = text;
     name_config.text_capacity = sizeof(text);
     CHECK(vp_name_dictionary_init(&names, &name_config) == VP_RESULT_OK &&
@@ -188,7 +191,16 @@ static void test_cooperative_graphics_hooks(void)
               memcmp(view.name, "scegxm.scene.cpu", view.name_length) == 0,
           "dictionary resolves SceGxm scene hook");
     CHECK(vp_graphics_hooks_init(&hooks, &context, &ids) == VP_RESULT_OK,
-          "initialize header-independent graphics hooks");
+          "initialize compatibility graphics hooks");
+    CHECK(vp_graphics_zone_begin(
+              &hooks, VP_GRAPHICS_ZONE_VITAGL_DRAW_SUBMIT, &scene) ==
+                  VP_ERROR_UNSUPPORTED &&
+              vp_graphics_counter(
+                  &hooks, VP_GRAPHICS_COUNTER_VITAGL_SHADER_CHANGES, 1) ==
+                  VP_ERROR_UNSUPPORTED &&
+              vp_graphics_frame_mark(&hooks, VP_GRAPHICS_FRAME) ==
+                  VP_ERROR_UNSUPPORTED,
+          "legacy name registration leaves deeper hooks explicitly disabled");
     CHECK(vp_graphics_zone_begin(&hooks, VP_GRAPHICS_ZONE_SCEGXM_SCENE,
                                  &scene) == VP_RESULT_OK,
           "begin CPU-side SceGxm scene hook");
@@ -229,11 +241,11 @@ static void test_render96ex_vitagl_callsite_sequence(void)
     struct vp_context context;
     struct vp_slot slots[8];
     struct vp_config config;
-    struct fake_source source = {100u, 7u};
+    struct fake_source source = {100u, 7u, 0u};
     struct vp_name_dictionary dictionary;
     struct vp_name_dictionary_config dictionary_config;
-    struct vp_name_entry entries[16];
-    char text[512];
+    struct vp_name_entry entries[32];
+    char text[1024];
     struct vp_graphics_name_ids ids;
     struct vp_graphics_hooks hooks;
     struct vp_zone_scope frame;
@@ -250,13 +262,13 @@ static void test_render96ex_vitagl_callsite_sequence(void)
     config.thread_user = &source;
     memset(&dictionary_config, 0, sizeof(dictionary_config));
     dictionary_config.entries = entries;
-    dictionary_config.entry_capacity = 16u;
+    dictionary_config.entry_capacity = 32u;
     dictionary_config.text = text;
     dictionary_config.text_capacity = sizeof(text);
     CHECK(vp_init(&context, &config) == VP_RESULT_OK &&
               vp_name_dictionary_init(&dictionary, &dictionary_config) ==
                   VP_RESULT_OK &&
-              vp_graphics_register_names(&dictionary, &ids) ==
+              vp_graphics_register_extended_names(&dictionary, &ids) ==
                   VP_RESULT_OK &&
               vp_name_dictionary_seal(&dictionary) == VP_RESULT_OK &&
               vp_graphics_hooks_init(&hooks, &context, &ids) ==
@@ -304,11 +316,198 @@ static void test_render96ex_vitagl_callsite_sequence(void)
     vp_deinit(&context);
 }
 
+static void test_deep_graphics_instrumentation(void)
+{
+    static const uint32_t expected_zones[VP_GRAPHICS_ZONE_COUNT] = {
+        VP_GRAPHICS_NAME_ID_VITAGL_FRAME,
+        VP_GRAPHICS_NAME_ID_VITAGL_SWAP_BUFFERS,
+        VP_GRAPHICS_NAME_ID_SCEGXM_SCENE,
+        VP_GRAPHICS_NAME_ID_SCEGXM_FINISH_WAIT,
+        VP_GRAPHICS_NAME_ID_SCEGXM_DISPLAY_QUEUE_SUBMIT,
+        VP_GRAPHICS_NAME_ID_VITAGL_DRAW_SUBMIT,
+        VP_GRAPHICS_NAME_ID_VITAGL_SHADER,
+        VP_GRAPHICS_NAME_ID_VITAGL_STATE,
+        VP_GRAPHICS_NAME_ID_VITAGL_ALLOCATION,
+        VP_GRAPHICS_NAME_ID_SCEGXM_DRAW_SUBMIT,
+        VP_GRAPHICS_NAME_ID_SCEGXM_SHADER,
+        VP_GRAPHICS_NAME_ID_SCEGXM_STATE,
+        VP_GRAPHICS_NAME_ID_SCEGXM_ALLOCATION,
+    };
+    static const uint32_t expected_counters[VP_GRAPHICS_COUNTER_COUNT] = {
+        VP_GRAPHICS_NAME_ID_VITAGL_DRAW_CALLS,
+        VP_GRAPHICS_NAME_ID_SCEGXM_DRAW_CALLS,
+        VP_GRAPHICS_NAME_ID_VITAGL_SHADER_CHANGES,
+        VP_GRAPHICS_NAME_ID_SCEGXM_SHADER_CHANGES,
+        VP_GRAPHICS_NAME_ID_VITAGL_STATE_CHANGES,
+        VP_GRAPHICS_NAME_ID_SCEGXM_STATE_CHANGES,
+        VP_GRAPHICS_NAME_ID_VITAGL_ALLOCATION_BYTES,
+        VP_GRAPHICS_NAME_ID_SCEGXM_ALLOCATION_BYTES,
+    };
+    struct vp_context context;
+    struct vp_slot slots[64];
+    struct vp_config config;
+    struct fake_source source = {90u, 11u, 0u};
+    struct vp_name_dictionary dictionary;
+    struct vp_name_dictionary_config dictionary_config;
+    struct vp_name_entry entries[32];
+    char text[1024];
+    struct vp_graphics_name_ids ids;
+    struct vp_graphics_hooks hooks;
+    struct vp_graphics_scope_stack stack;
+    struct vp_zone_scope disabled_scope;
+    struct vp_event events[32];
+    size_t count;
+    uint32_t i;
+
+    memset(&config, 0, sizeof(config));
+    config.slots = slots;
+    config.capacity = 64u;
+    config.clock = fake_clock;
+    config.clock_user = &source;
+    config.thread_id = fake_thread;
+    config.thread_user = &source;
+    memset(&dictionary_config, 0, sizeof(dictionary_config));
+    dictionary_config.entries = entries;
+    dictionary_config.entry_capacity = 32u;
+    dictionary_config.text = text;
+    dictionary_config.text_capacity = sizeof(text);
+    CHECK(vp_init(&context, &config) == VP_RESULT_OK &&
+              vp_name_dictionary_init(&dictionary, &dictionary_config) ==
+                  VP_RESULT_OK &&
+              vp_graphics_register_extended_names(&dictionary, &ids) ==
+                  VP_RESULT_OK &&
+              vp_name_dictionary_seal(&dictionary) == VP_RESULT_OK &&
+              vp_graphics_hooks_init(&hooks, &context, &ids) ==
+                  VP_RESULT_OK,
+          "initialize deep graphics hooks");
+    for (i = 0u; i < VP_GRAPHICS_ZONE_COUNT; ++i)
+        CHECK(ids.zones[i] == expected_zones[i],
+              "graphics zone ID remains stable");
+    for (i = 0u; i < VP_GRAPHICS_COUNTER_COUNT; ++i)
+        CHECK(ids.counters[i] == expected_counters[i],
+              "graphics counter ID remains stable");
+    CHECK(ids.frames[VP_GRAPHICS_FRAME] == VP_GRAPHICS_NAME_ID_FRAME,
+          "graphics frame ID remains stable");
+
+    CHECK(vp_graphics_hooks_set_enabled(&hooks, 0) == VP_RESULT_OK &&
+              vp_graphics_zone_begin(
+                  &hooks, VP_GRAPHICS_ZONE_VITAGL_DRAW_SUBMIT,
+                  &disabled_scope) == VP_RESULT_OK &&
+              vp_graphics_zone_end(&hooks, &disabled_scope) ==
+                  VP_RESULT_OK &&
+              vp_graphics_counter(
+                  &hooks, VP_GRAPHICS_COUNTER_VITAGL_DRAW_CALLS, 1) ==
+                  VP_RESULT_OK &&
+              vp_graphics_frame_mark(&hooks, VP_GRAPHICS_FRAME) ==
+                  VP_RESULT_OK &&
+              source.clock_calls == 0u &&
+              vp_drain(&context, events, 32u) == 0u,
+          "runtime-disabled hooks avoid clock and ring work");
+    CHECK(vp_graphics_hooks_set_enabled(&hooks, 1) == VP_RESULT_OK,
+          "enable graphics hooks");
+
+    vp_graphics_scope_stack_init(&stack);
+    CHECK(VP_GRAPHICS_FRAME_MARK(&hooks, VP_GRAPHICS_FRAME) ==
+              VP_RESULT_OK,
+          "record explicit graphics frame marker");
+    source.now = 100u;
+    CHECK(VP_GRAPHICS_SCOPE_PUSH(
+              &hooks, &stack, VP_GRAPHICS_ZONE_VITAGL_FRAME) ==
+                  VP_RESULT_OK,
+          "push outer graphics frame");
+    source.now = 110u;
+    CHECK(VP_GRAPHICS_SCOPE_PUSH(
+              &hooks, &stack, VP_GRAPHICS_ZONE_VITAGL_SHADER) ==
+                  VP_RESULT_OK,
+          "push nested shader change");
+    source.now = 115u;
+    CHECK(VP_GRAPHICS_SCOPE_POP(&hooks, &stack) == VP_RESULT_OK,
+          "pop nested shader change");
+    source.now = 120u;
+    CHECK(VP_GRAPHICS_SCOPE_PUSH(
+              &hooks, &stack, VP_GRAPHICS_ZONE_VITAGL_STATE) ==
+                  VP_RESULT_OK,
+          "push nested state change");
+    source.now = 125u;
+    CHECK(VP_GRAPHICS_SCOPE_POP(&hooks, &stack) == VP_RESULT_OK,
+          "pop nested state change");
+    CHECK(VP_GRAPHICS_COUNTER(
+              &hooks, VP_GRAPHICS_COUNTER_VITAGL_ALLOCATION_BYTES,
+              4096) == VP_RESULT_OK,
+          "record allocation byte counter");
+    source.now = 130u;
+    CHECK(VP_GRAPHICS_SCOPE_POP(&hooks, &stack) == VP_RESULT_OK,
+          "pop outer graphics frame");
+
+    count = vp_drain(&context, events, 32u);
+    CHECK(count == 8u && events[0].type == VP_EVENT_FRAME &&
+              events[0].name_id == ids.frames[VP_GRAPHICS_FRAME] &&
+              events[1].type == VP_EVENT_ZONE_BEGIN &&
+              events[1].name_id ==
+                  ids.zones[VP_GRAPHICS_ZONE_VITAGL_FRAME] &&
+              events[2].type == VP_EVENT_ZONE_BEGIN &&
+              events[2].name_id ==
+                  ids.zones[VP_GRAPHICS_ZONE_VITAGL_SHADER] &&
+              events[3].type == VP_EVENT_ZONE_END &&
+              events[2].correlation_id == events[3].correlation_id &&
+              events[3].value == 5 &&
+              events[4].type == VP_EVENT_ZONE_BEGIN &&
+              events[4].name_id ==
+                  ids.zones[VP_GRAPHICS_ZONE_VITAGL_STATE] &&
+              events[5].type == VP_EVENT_ZONE_END &&
+              events[4].correlation_id == events[5].correlation_id &&
+              events[5].value == 5 &&
+              events[6].type == VP_EVENT_COUNTER &&
+              events[6].value == 4096 &&
+              events[7].type == VP_EVENT_ZONE_END &&
+              events[1].correlation_id == events[7].correlation_id &&
+              events[7].value == 30,
+          "graphics events preserve nested ordering and duration");
+
+    vp_graphics_scope_stack_init(&stack);
+    for (i = 0u; i < VP_GRAPHICS_SCOPE_STACK_CAPACITY; ++i) {
+        ++source.now;
+        CHECK(vp_graphics_scope_push(
+                  &hooks, &stack, VP_GRAPHICS_ZONE_SCEGXM_DRAW_SUBMIT) ==
+                      VP_RESULT_OK,
+              "fill bounded graphics scope stack");
+    }
+    CHECK(vp_graphics_scope_push(
+              &hooks, &stack, VP_GRAPHICS_ZONE_SCEGXM_DRAW_SUBMIT) ==
+                  VP_ERROR_CAPACITY &&
+              stack.depth == VP_GRAPHICS_SCOPE_STACK_CAPACITY,
+          "graphics scope stack rejects overflow");
+    for (i = 0u; i < VP_GRAPHICS_SCOPE_STACK_CAPACITY; ++i) {
+        ++source.now;
+        CHECK(vp_graphics_scope_pop(&hooks, &stack) == VP_RESULT_OK,
+              "drain bounded graphics scope stack");
+    }
+    CHECK(vp_graphics_scope_pop(&hooks, &stack) ==
+              VP_ERROR_INVALID_ARGUMENT,
+          "graphics scope stack rejects underflow");
+    count = vp_drain(&context, events, 32u);
+    CHECK(count == VP_GRAPHICS_SCOPE_STACK_CAPACITY * 2u &&
+              events[0].type == VP_EVENT_ZONE_BEGIN &&
+              events[VP_GRAPHICS_SCOPE_STACK_CAPACITY - 1u].type ==
+                  VP_EVENT_ZONE_BEGIN &&
+              events[VP_GRAPHICS_SCOPE_STACK_CAPACITY].type ==
+                  VP_EVENT_ZONE_END &&
+              events[count - 1u].type == VP_EVENT_ZONE_END &&
+              events[0].correlation_id ==
+                  events[count - 1u].correlation_id &&
+              events[VP_GRAPHICS_SCOPE_STACK_CAPACITY - 1u].correlation_id ==
+                  events[VP_GRAPHICS_SCOPE_STACK_CAPACITY].correlation_id,
+          "bounded graphics stack emits balanced LIFO scopes");
+    vp_name_dictionary_deinit(&dictionary);
+    vp_deinit(&context);
+}
+
 int main(void)
 {
     test_guarded_pmu_provider();
     test_cooperative_graphics_hooks();
     test_render96ex_vitagl_callsite_sequence();
+    test_deep_graphics_instrumentation();
     if (failures != 0) {
         fprintf(stderr, "%d profiler integration test(s) failed\n", failures);
         return 1;
