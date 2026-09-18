@@ -25,7 +25,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 
 # These modules own the project's already-tested MI and RSP transports.  Keep
@@ -35,7 +35,7 @@ import gdb_monitor_smoke as monitor
 import gdb_vfp_lifecycle as vfp
 
 
-SCHEMA = "vitadebugger-step-register-live-gdb-v1"
+SCHEMA = "vitadebugger-step-register-live-gdb-v2"
 SYMBOL_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 GDB_FILE_COMMAND = re.compile(
     r'^\s*file\s+("(?:\\.|[^"\\])*"|[^\s#]+)\s*$'
@@ -71,6 +71,10 @@ class GateFailure(RuntimeError):
 
 class UnrestoredMutation(GateFailure):
     """A register restoration could not be proven while transport was live."""
+
+
+class StopWaitTimeout(GateFailure):
+    """Execution started, but GDB did not receive the expected stop."""
 
 
 @dataclass(frozen=True)
@@ -121,6 +125,7 @@ def transcript_identity(lines: Iterable[str]) -> dict[str, Any]:
     return {
         "mi_record_count": len(lines),
         "mi_sha256": hashlib.sha256(encoded).hexdigest(),
+        "mi_records": lines,
     }
 
 
@@ -131,6 +136,14 @@ def write_evidence(path: Path, evidence: dict[str, Any]) -> None:
         json.dumps(evidence, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
     temporary.replace(path)
+
+
+def checkpoint_evidence(
+    path: Path | None,
+    evidence: dict[str, Any],
+) -> None:
+    if path is not None:
+        write_evidence(path.resolve(), evidence)
 
 
 def decode_gdb_file_argument(argument: str) -> str:
@@ -320,7 +333,14 @@ def wait_for_stop(client: vfp.MiGdb, command: str) -> str:
         raise GateFailure(f"{command} did not start target execution")
     stopped = next((record for record in records if record.startswith("*stopped")), None)
     if stopped is None:
-        stopped = client.wait_for("*stopped")
+        try:
+            stopped = client.wait_for("*stopped")
+        except vfp.GateFailure as exc:
+            if "timed out waiting for GDB/MI" in str(exc):
+                raise StopWaitTimeout(
+                    f"{command} started, but no *stopped arrived"
+                ) from exc
+            raise
     if 'reason="exited' in stopped:
         raise GateFailure("diagnostic application exited during the live gate")
     return stopped
@@ -420,15 +440,62 @@ def require_no_breakpoints_gdb(client: vfp.MiGdb) -> None:
 
 
 def test_hidden_breakpoint_step_over(
-    client: vfp.MiGdb, symbols: LiveSymbols
+    client: vfp.MiGdb,
+    symbols: LiveSymbols,
+    diagnostic: dict[str, Any],
+    first_breakpoint_only: bool,
+    checkpoint: Callable[[], None],
 ) -> dict[str, Any]:
     breakpoint = insert_breakpoint(client, "step_target")
+    diagnostic["breakpoint"] = {
+        "number": breakpoint.number,
+        "symbol": breakpoint.symbol,
+        "address": f"0x{symbols.ordinary:08x}",
+    }
+    diagnostic["status_after_insert_before_continue"] = console_command(
+        client, "monitor status"
+    )
+    diagnostic["phase"] = "breakpoint_inserted_pre_continue"
+    diagnostic["continue_requested_utc"] = utc_now()
+    diagnostic["mi_before_continue"] = transcript_identity(
+        client.transcript
+    )
+    checkpoint()
+    stop_timed_out = False
     try:
-        first_stop = wait_for_stop(client, "-exec-continue")
+        try:
+            first_stop = wait_for_stop(client, "-exec-continue")
+        except StopWaitTimeout:
+            stop_timed_out = True
+            diagnostic["breakpoint_delete"] = (
+                "SKIPPED_AFTER_STOP_TIMEOUT"
+            )
+            diagnostic["mi_at_timeout"] = transcript_identity(
+                client.transcript
+            )
+            checkpoint()
+            raise
+        diagnostic["first_stop"] = first_stop
+        diagnostic["phase"] = "first_stop_received"
         require_breakpoint_stop(first_stop, breakpoint)
         first_pc, first_cpsr = pc_and_cpsr(client)
         if first_pc != symbols.ordinary or not (first_cpsr & (1 << 5)):
             raise GateFailure("ordinary Thumb breakpoint stopped at the wrong state/address")
+        diagnostic["status_after_continue"] = console_command(
+            client, "monitor status"
+        )
+        diagnostic["mi_after_continue"] = transcript_identity(
+            client.transcript
+        )
+        checkpoint()
+        if first_breakpoint_only:
+            return {
+                "result": "PASS",
+                "symbol": "step_target",
+                "address": f"0x{symbols.ordinary:08x}",
+                "first_pc": f"0x{first_pc:08x}",
+                "first_breakpoint_only": True,
+            }
 
         # Keeping the user breakpoint installed is intentional.  GDB must hide
         # it, execute the original instruction, reinsert it, and reach the next
@@ -448,7 +515,8 @@ def test_hidden_breakpoint_step_over(
             "E16_observed": False,
         }
     finally:
-        delete_breakpoint(client, breakpoint)
+        if not stop_timed_out:
+            delete_breakpoint(client, breakpoint)
 
 
 def test_exclusive_fixture(
@@ -690,6 +758,59 @@ def connect_rsp(host: str, port: int, timeout: float) -> monitor.RspClient:
     raise GateFailure(f"could not reconnect to RSP endpoint: {last_error}")
 
 
+def collect_post_failure_diagnostics(
+    host: str,
+    port: int,
+    timeout: float,
+    recovery_seconds: float,
+    allow_detach: bool,
+    result: dict[str, Any],
+    checkpoint: Callable[[], None],
+) -> dict[str, Any]:
+    result["phase"] = "waiting_for_abandoned_client_cleanup"
+    checkpoint()
+    time.sleep(recovery_seconds)
+    client = connect_rsp(host, port, timeout)
+    try:
+        result["phase"] = "raw_rsp_connected"
+        result["connected_utc"] = utc_now()
+        checkpoint()
+        result["qOffsets"] = client.request(b"qOffsets").decode(
+            "ascii", errors="replace"
+        )
+        checkpoint()
+        result["modules"] = monitor.monitor_request(client, "modules")
+        checkpoint()
+        result["status"] = monitor.monitor_request(client, "status")
+        checkpoint()
+        result["thread_info"] = monitor.collect_threads(client)
+        checkpoint()
+        result["stop_reply"] = client.request(b"?").decode(
+            "ascii", errors="replace"
+        )
+        checkpoint()
+        if not result["stop_reply"].startswith(("T", "S")):
+            raise GateFailure(
+                "post-failure raw RSP returned an invalid stop reply"
+            )
+        if allow_detach and breakpoint_count(result["status"]) == 0:
+            result["detach_reply"] = client.request(b"D").decode(
+                "ascii", errors="replace"
+            )
+            checkpoint()
+            if result["detach_reply"] != "OK":
+                raise GateFailure(
+                    "post-failure raw RSP detach was not acknowledged"
+                )
+        else:
+            result["detach_reply"] = "SKIPPED"
+        result["phase"] = "complete"
+        checkpoint()
+        return result
+    finally:
+        client.close()
+
+
 def cleanup_inserted_breakpoints(
     client: monitor.RspClient, inserted: list[tuple[int, int]]
 ) -> None:
@@ -859,6 +980,9 @@ def close_failed_gdb(
 def run_gdb_phases(
     args: argparse.Namespace, evidence: dict[str, Any]
 ) -> tuple[LiveSymbols, int, int]:
+    def checkpoint() -> None:
+        checkpoint_evidence(args.evidence, evidence)
+
     first = vfp.MiGdb(args.gdb, args.main_elf, args.timeout)
     first_progress = 0
     try:
@@ -869,9 +993,50 @@ def run_gdb_phases(
             "checked_before_first_breakpoint": True,
             "bytes": preflight_fixture_bytes(first, symbols),
         }
+        diagnostic = {
+            "phase": "pre_continue",
+            "live_symbols": {
+                "step_target": f"0x{symbols.ordinary:08x}",
+                "thumb_step_exclusive_site":
+                    f"0x{symbols.thumb_site:08x}",
+                "thumb_step_exclusive_after":
+                    f"0x{symbols.thumb_after:08x}",
+                "arm_step_exclusive_site":
+                    f"0x{symbols.arm_site:08x}",
+                "arm_step_exclusive_after":
+                    f"0x{symbols.arm_after:08x}",
+            },
+            "qOffsets": console_command(
+                first, "maintenance packet qOffsets"
+            ),
+            "modules_before_continue": console_command(
+                first, "monitor modules"
+            ),
+            "status_before_continue": console_command(
+                first, "monitor status"
+            ),
+        }
+        evidence["observations"]["focused_first_breakpoint"] = diagnostic
+        checkpoint()
         evidence["observations"]["hidden_breakpoint_step_over"] = (
-            test_hidden_breakpoint_step_over(first, symbols)
+            test_hidden_breakpoint_step_over(
+                first, symbols, diagnostic,
+                args.first_breakpoint_only,
+                checkpoint,
+            )
         )
+        if args.first_breakpoint_only:
+            require_no_breakpoints_gdb(first)
+            first_progress = evaluate_u32(first, "test_value")
+            first.detach()
+            evidence["sessions"].append(
+                {
+                    "kind": "focused_first_breakpoint_clean_detach",
+                    **transcript_identity(first.transcript),
+                }
+            )
+            first.quit()
+            return symbols, first_progress, first_progress
         evidence["observations"]["thumb_exclusive_step"] = test_exclusive_fixture(
             first,
             label="Thumb-2",
@@ -901,12 +1066,44 @@ def run_gdb_phases(
         )
         first.quit()
     except BaseException as exc:
-        evidence["sessions"].append(
-            {"kind": "stepping_register_failure", **transcript_identity(first.transcript)}
-        )
         # Individual transaction helpers restore before ordinary failures
         # propagate. An unresolved transaction must never send D.
-        close_failed_gdb(first, isinstance(exc, UnrestoredMutation), args.timeout)
+        abandon_only = isinstance(
+            exc, (UnrestoredMutation, StopWaitTimeout)
+        )
+        close_failed_gdb(first, abandon_only, args.timeout)
+        evidence["sessions"].append(
+            {
+                "kind": "stepping_register_failure",
+                **transcript_identity(first.transcript),
+            }
+        )
+        checkpoint()
+        if isinstance(exc, StopWaitTimeout):
+            diagnostic = evidence["observations"].setdefault(
+                "focused_first_breakpoint", {}
+            )
+            diagnostic["phase"] = "first_stop_timeout"
+            diagnostic["failure"] = str(exc)
+            post_failure: dict[str, Any] = {}
+            diagnostic["post_failure_raw_rsp"] = post_failure
+            checkpoint()
+            try:
+                collect_post_failure_diagnostics(
+                    args.host,
+                    args.port,
+                    args.timeout,
+                    args.recovery_seconds,
+                    allow_detach=True,
+                    result=post_failure,
+                    checkpoint=checkpoint,
+                )
+            except BaseException as diagnostic_exc:
+                diagnostic["post_failure_raw_rsp_error"] = {
+                    "type": type(diagnostic_exc).__name__,
+                    "message": str(diagnostic_exc),
+                }
+                checkpoint()
         raise
 
     time.sleep(args.recovery_seconds)
@@ -954,6 +1151,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--gdb", type=Path, default=resolve_default_gdb())
     parser.add_argument("--timeout", type=float, default=15.0)
     parser.add_argument("--recovery-seconds", type=float, default=1.0)
+    parser.add_argument(
+        "--first-breakpoint-only",
+        action="store_true",
+        help=(
+            "stop after one verified step_target breakpoint and clean "
+            "detach; use for the focused resume diagnostic"
+        ),
+    )
     parser.add_argument("--evidence", type=Path)
     parser.add_argument("--vpk", type=Path)
     parser.add_argument("--kernel-plugin", type=Path)
@@ -1035,6 +1240,11 @@ def main(argv: list[str] | None = None) -> int:
         evidence["safety"][
             "register_mutations_restored_before_resume_or_detach"
         ] = True
+        if args.first_breakpoint_only:
+            evidence["result"] = "PASS"
+            evidence["finished_utc"] = utc_now()
+            print("PASS: focused first-breakpoint diagnostic gate")
+            return 0
         evidence["observations"]["abrupt_disconnect_cleanup"] = (
             test_abrupt_disconnect_cleanup(
                 args.host,

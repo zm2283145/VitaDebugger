@@ -129,21 +129,59 @@ TCP listener accepted but did not answer `qSupported`, so the title was killed.
 No renew/`EndStop` injection was attempted, and the verified prior config/plugin
 were restored.
 
-The deterministic failure exposed a resume-tail ownership race introduced by
-the later nonblocking exception-lifecycle hardening, not a fixture-byte or ABI
-failure. Process `EndStop` can schedule the main thread into `step_target`
-before the server controller's previous exception callback releases the
-protocol and exception gates. The immediate UDF was consequently classified
-as nested contention instead of the next primary stop. The corrected build
-publishes an owner-qualified resume handoff before `EndStop`; only a different
-thread trapping in that bounded tail waits for all old callback ownership to
-retire. A host integration test forces that exact ordering.
+The first diagnosis identified a real host-reproducible resume-tail ownership
+race. Process `EndStop` can schedule the main thread into `step_target` before
+the server controller's previous exception callback releases the protocol and
+exception gates. The bounded owner-qualified handoff closes that modeled race,
+but it is not hardware-validated.
 
-For the next hardware attempt, repeat the same preflight and first
-`step_target` continue before running any later phase. Require the first
-`*stopped,reason="breakpoint-hit"` within the normal gate timeout, the expected
-thread and Thumb PC, a responsive `qSupported` after an intentional abandoned
-client, zero breakpoints, and a healthy stop session. Stop and restore the prior
-plugin/config on any timeout, predecessor/default fault behavior, unresponsive
-RSP handshake, residual trap byte, or failed cleanup; do not proceed to
-renew/`EndStop` injection until this regression gate passes.
+A second focused retail run of commit `c43c6c5` used VPK
+`27F66B561BD94C2BD9DA291C4C29F36969CF44C8B84C8792AAFB1C977AAB6EC6`,
+ELF
+`8129D74D27324A5C12349BBF22865C1E81B68EE22887F9AAC1EEAE0B68636EE7`,
+and unchanged SKPRX
+`D7553A52A458B38CAA9B0B8074028F6150AE1DB2DD223C3414E610F2B8C7F942`.
+ABI/status and exact fixture-byte preflight passed, but one verified
+`step_target` breakpoint plus one `-exec-continue` again produced no
+`*stopped` within 30 seconds. Killing only host GDB allowed abandoned-client
+cleanup: fresh raw RSP was responsive, reported zero software breakpoints and
+a healthy active stop session, and detached cleanly. The retained last fault
+was undefined instruction at `0x81029162`, but that run did not persist
+`qOffsets`, module ranges, or the runtime breakpoint address. The value cannot
+be mapped to the fixed ELF or reused as evidence; a reconnect synthetic stop
+may also have overwritten the single last-fault slot. The handoff-only root
+cause is therefore insufficient.
+
+The next run is diagnostic-only and must use
+`tools/gdb_step_register_gate.py --first-breakpoint-only --evidence <path>`.
+Before the one continue, schema v2 persists the complete MI records, raw
+`qOffsets` result, `monitor modules`, full `monitor status`, resolved live
+fixture addresses, breakpoint number/address, and a phase checkpoint
+atomically to the evidence file before execution. On a missing `*stopped`, it
+does not issue an MI breakpoint deletion or detach: it preserves the timeout,
+kills only the host GDB transport, reconnects through bounded raw RSP, and
+checkpoints each successfully collected `qOffsets`, modules, status, threads,
+and stop reply before attempting the next query. It detaches only when zero
+software breakpoints are proven. `monitor status` retains eight newest-first
+callback traces; their slash-separated values are:
+
+- the header reports callbacks omitted because all eight trace slots were
+  still active; each record reports whether its callback is still active;
+- `handoff=wait-seq/done-seq/result/attempts`, where result is `1` clear,
+  `2` same owner, `3` released after waiting, or `4` timeout;
+- `guard`, `session`, `protocol`, and `lock` are
+  `sequence/result`;
+- `predecessor=sequence/reason/invoked`, where reasons `1..5` are closed
+  guard, nested guard, unclaimable session, protocol contention, and state-lock
+  contention;
+- `publish=sequence/pc/signal/synthetic/breakpoint-match`;
+- `stop=begin-sequence/result/stopped-operation-sequence/result`;
+- `packet=wait-sequence/socket-poll-sequence/socket-wake-sequence/wake-result/`
+  `ready-sequence/status-query-sequence`;
+- `reply=attempt-sequence/socket-poll-sequence/socket-wake-sequence/`
+  `wake-result/result-sequence/result`, followed by callback `exit`.
+
+Stop after this focused diagnostic regardless of result. Do not run broader
+stepping or renew/`EndStop` injection until the retained trace proves which
+stage the application UDF reached and a separately reviewed fix passes this
+same first-stop gate.

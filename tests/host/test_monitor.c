@@ -45,6 +45,7 @@ static void check_parse(
 
 static struct uvdb_monitor_snapshot sample_snapshot(void)
 {
+    static struct uvdb_monitor_stop_trace stop_traces[1];
     struct uvdb_monitor_snapshot snapshot;
     memset(&snapshot, 0, sizeof(snapshot));
     snapshot.status.state = UVDB_MONITOR_STATE_CONNECTED;
@@ -72,6 +73,49 @@ static struct uvdb_monitor_snapshot sample_snapshot(void)
     snapshot.status.last_fault_status = 0x12u;
     snapshot.status.last_fault_address = 0x81001234u;
     snapshot.status.last_fault_pc = 0x81005678u;
+    snapshot.status.stop_trace_count = 1u;
+    snapshot.status.stop_trace_dropped = 2u;
+    stop_traces[0] =
+        (struct uvdb_monitor_stop_trace){
+            .generation = 7u,
+            .thread = 0x40010003,
+            .raw_pc = 0x81005678u,
+            .exception_type = 2,
+            .handoff_owner = 0x40010002u,
+            .handoff_wait_seq = 1u,
+            .handoff_done_seq = 2u,
+            .handoff_wait_attempts = 4u,
+            .handoff_wait_result =
+                UVDB_MONITOR_STOP_TRACE_WAIT_RELEASED,
+            .guard_seq = 3u,
+            .guard_result = 1,
+            .session_seq = 4u,
+            .session_claimable = 1,
+            .protocol_seq = 5u,
+            .protocol_result = 0,
+            .lock_seq = 6u,
+            .lock_result = 0,
+            .publish_seq = 7u,
+            .classified_pc = 0x81005678u,
+            .signal = 5,
+            .breakpoint_match = 1,
+            .stop_begin_seq = 8u,
+            .stop_begin_result = 0,
+            .stopped_operation_seq = 9u,
+            .stopped_operation_result = 0,
+            .main_loop_seq = 10u,
+            .packet_wait_seq = 11u,
+            .packet_ready_seq = 12u,
+            .status_query_seq = 13u,
+            .reply_attempt_seq = 14u,
+            .reply_socket_poll_seq = 15u,
+            .reply_socket_wake_seq = 16u,
+            .reply_socket_wake_result = 1,
+            .reply_result_seq = 17u,
+            .reply_result = 0,
+            .exit_seq = 18u,
+        };
+    snapshot.status.stop_traces = stop_traces;
     return snapshot;
 }
 
@@ -218,6 +262,8 @@ int main(void)
 
     struct uvdb_monitor_snapshot snapshot = sample_snapshot();
     struct uvdb_monitor_snapshot original = snapshot;
+    check(sizeof(snapshot) < 1024u,
+          "status snapshot keeps retained traces out of exception stack");
     result = render(UVDB_MONITOR_COMMAND_STATUS, &snapshot, output,
                     sizeof(output), &output_size);
     check(result == UVDB_MONITOR_RENDER_OK, "status renders");
@@ -226,7 +272,16 @@ int main(void)
           contains(output, output_size, "kernel: compatible") &&
           contains(output, output_size, "ABI=0x0001000b") &&
           contains(output, output_size, "active, healthy") &&
-          contains(output, output_size, "undefined-instruction"),
+          contains(output, output_size, "undefined-instruction") &&
+          contains(output, output_size,
+                   "stop-trace newest-first: dropped=2") &&
+          contains(output, output_size,
+                   "#7 thread=0x40010003 active=0 raw-pc=0x81005678") &&
+          contains(output, output_size, "handoff=1/2/3/4") &&
+          contains(output, output_size,
+                   "packet=11/0/0/0/12/13") &&
+          contains(output, output_size,
+                   "reply=14/15/16/1/17/0 exit=18"),
           "status includes debugger gates and fault state");
     check(!memcmp(&snapshot, &original, sizeof(snapshot)),
           "status rendering is read-only");

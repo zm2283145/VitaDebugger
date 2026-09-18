@@ -9,6 +9,7 @@
 #define UVDB_MONITOR_MAX_THREADS 64u
 #define UVDB_MONITOR_MAX_MODULES 128u
 #define UVDB_MONITOR_MAX_SEGMENTS 4u
+#define UVDB_MONITOR_STOP_TRACE_COUNT 8u
 
 enum uvdb_monitor_command {
     UVDB_MONITOR_COMMAND_NONE = 0,
@@ -39,6 +40,23 @@ enum uvdb_monitor_state {
     UVDB_MONITOR_STATE_ERROR,
 };
 
+enum uvdb_monitor_stop_trace_wait_result {
+    UVDB_MONITOR_STOP_TRACE_WAIT_NONE = 0,
+    UVDB_MONITOR_STOP_TRACE_WAIT_CLEAR,
+    UVDB_MONITOR_STOP_TRACE_WAIT_SAME_OWNER,
+    UVDB_MONITOR_STOP_TRACE_WAIT_RELEASED,
+    UVDB_MONITOR_STOP_TRACE_WAIT_TIMEOUT,
+};
+
+enum uvdb_monitor_stop_trace_predecessor_reason {
+    UVDB_MONITOR_STOP_TRACE_PREDECESSOR_NONE = 0,
+    UVDB_MONITOR_STOP_TRACE_PREDECESSOR_GUARD_CLOSED,
+    UVDB_MONITOR_STOP_TRACE_PREDECESSOR_GUARD_NESTED,
+    UVDB_MONITOR_STOP_TRACE_PREDECESSOR_SESSION_UNCLAIMABLE,
+    UVDB_MONITOR_STOP_TRACE_PREDECESSOR_PROTOCOL_CONTENTION,
+    UVDB_MONITOR_STOP_TRACE_PREDECESSOR_STATE_LOCK_CONTENTION,
+};
+
 /* The first display sample for a server-owned connection must be collected
  * after accept, but SceDisplay must never be called from the exception path.
  * This small state machine hands that sample to a deferred synthetic stop and
@@ -59,6 +77,53 @@ enum uvdb_monitor_display_stop_action {
 struct uvdb_monitor_display_stop {
     uint32_t generation;
     enum uvdb_monitor_display_stop_phase phase;
+};
+
+struct uvdb_monitor_stop_trace {
+    uint32_t generation;
+    int32_t active;
+    int32_t thread;
+    uint32_t raw_pc;
+    int32_t exception_type;
+    uint32_t handoff_owner;
+    uint32_t handoff_wait_seq;
+    uint32_t handoff_done_seq;
+    uint32_t handoff_wait_attempts;
+    int32_t handoff_wait_result;
+    uint32_t guard_seq;
+    int32_t guard_result;
+    uint32_t session_seq;
+    int32_t session_claimable;
+    uint32_t protocol_seq;
+    int32_t protocol_result;
+    uint32_t lock_seq;
+    int32_t lock_result;
+    uint32_t predecessor_seq;
+    int32_t predecessor_reason;
+    int32_t predecessor_invoked;
+    uint32_t publish_seq;
+    uint32_t classified_pc;
+    int32_t signal;
+    int32_t synthetic_trap;
+    int32_t breakpoint_match;
+    uint32_t stop_begin_seq;
+    int32_t stop_begin_result;
+    uint32_t stopped_operation_seq;
+    int32_t stopped_operation_result;
+    uint32_t main_loop_seq;
+    uint32_t packet_wait_seq;
+    uint32_t socket_poll_seq;
+    uint32_t socket_wake_seq;
+    int32_t socket_wake_result;
+    uint32_t packet_ready_seq;
+    uint32_t status_query_seq;
+    uint32_t reply_attempt_seq;
+    uint32_t reply_socket_poll_seq;
+    uint32_t reply_socket_wake_seq;
+    int32_t reply_socket_wake_result;
+    uint32_t reply_result_seq;
+    int32_t reply_result;
+    uint32_t exit_seq;
 };
 
 enum uvdb_monitor_thread_flag {
@@ -97,6 +162,9 @@ struct uvdb_monitor_status {
     uint32_t last_fault_status;
     uint32_t last_fault_address;
     uint32_t last_fault_pc;
+    const struct uvdb_monitor_stop_trace* stop_traces;
+    size_t stop_trace_count;
+    uint32_t stop_trace_dropped;
 };
 
 struct uvdb_monitor_thread {

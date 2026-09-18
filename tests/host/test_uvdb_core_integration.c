@@ -281,6 +281,11 @@ static void reset_core(void)
     uvdb_protocol_gate_init(&uvdb_protocol_gate);
     __atomic_store_n(&uvdb_resume_handoff_owner, 0u, __ATOMIC_RELEASE);
     __atomic_store_n(&uvdb_exception_admissions, 0u, __ATOMIC_RELEASE);
+    memset(uvdb_stop_traces, 0, sizeof(uvdb_stop_traces));
+    __atomic_store_n(&uvdb_stop_trace_generation, 0u, __ATOMIC_RELEASE);
+    __atomic_store_n(&uvdb_stop_trace_sequence, 0u, __ATOMIC_RELEASE);
+    __atomic_store_n(&uvdb_stop_trace_cursor, 0u, __ATOMIC_RELEASE);
+    __atomic_store_n(&uvdb_stop_trace_dropped, 0u, __ATOMIC_RELEASE);
     uvdb_exception_guard_init(&uvdb_exception_guard);
     memset(&uvdb_handlers, 0, sizeof(uvdb_handlers));
     memset(uvdb_breakpoints, 0, sizeof(uvdb_breakpoints));
@@ -313,6 +318,7 @@ static void reset_core(void)
 static void queue_receive(const char* bytes)
 {
     fake_receive_size = strlen(bytes);
+    fake_receive_offset = 0;
     memcpy(fake_receive, bytes, fake_receive_size);
 }
 
@@ -401,7 +407,7 @@ static void test_real_status_query_ordering(void)
     uvdb_lock();
     KuKernelExceptionContext context = {0};
     uvdb_main_loop(
-        &context, SIGTRAP, UVDB_FILEIO_CONTEXT_REAL_STOP, 0u);
+        &context, SIGTRAP, UVDB_FILEIO_CONTEXT_REAL_STOP, 0u, NULL);
     check(!uvdb_rsp_request_lifetime_is_active(&uvdb_request_lifetime) &&
               !fake_framed_send_while_borrowed,
           "real main loop releases request before response ACK wait");
@@ -426,7 +432,7 @@ static void test_real_corrupt_frame_recovery(void)
     queue_receive("$m0,1#00$m0,1#fa");
     uvdb_lock();
     char* packet = NULL;
-    size_t packet_size = recv_packet(&packet);
+    size_t packet_size = recv_packet(&packet, NULL);
     check(packet_size == 4u && packet && !memcmp(packet, "m0,1", 4u),
           "production receiver resynchronizes to valid frame");
     check(fake_transmit_size == 2u && fake_transmit[0] == '-' &&
@@ -443,7 +449,7 @@ static void test_real_corrupt_frame_recovery(void)
     queue_receive("$m0,1#00$m0,1#fa");
     uvdb_lock();
     packet = NULL;
-    packet_size = recv_packet(&packet);
+    packet_size = recv_packet(&packet, NULL);
     check(packet_size == 4u && fake_transmit_size == 0u,
           "no-ack production receiver suppresses corrupt-frame NACK");
     discard_packet(packet, packet_size);
@@ -481,6 +487,20 @@ static void test_exception_lock_contention_handoff(void)
     check(uvdb_state == UVDB_STATE_ERROR && uvdb_has_io_failure() &&
               __atomic_load_n(&uvdb_target_stopped, __ATOMIC_ACQUIRE) == 0,
           "lock-contention failure is explicit and does not invent a new stop");
+    const struct uvdb_monitor_stop_trace* lock_trace =
+        &uvdb_stop_traces[0];
+    check(lock_trace->generation == 1u &&
+              lock_trace->handoff_wait_seq > 0u &&
+              lock_trace->guard_seq > lock_trace->handoff_done_seq &&
+              lock_trace->protocol_seq > lock_trace->session_seq &&
+              lock_trace->lock_seq > lock_trace->protocol_seq &&
+              lock_trace->predecessor_seq > lock_trace->lock_seq &&
+              lock_trace->predecessor_reason ==
+                  UVDB_MONITOR_STOP_TRACE_PREDECESSOR_STATE_LOCK_CONTENTION &&
+              lock_trace->predecessor_invoked == 1 &&
+              lock_trace->publish_seq == 0u &&
+              lock_trace->exit_seq > lock_trace->predecessor_seq,
+          "lock-contention trace identifies predecessor dispatch before publication");
     uvdb_unlock();
 
     uvdb_lock_owner = uvdb_lock_owner_token(FAKE_OTHER_THREAD);
@@ -509,6 +529,16 @@ static void test_exception_lock_contention_handoff(void)
               __atomic_load_n(&uvdb_target_stopped,
                               __ATOMIC_ACQUIRE) == 0,
           "real handler fails protocol contention to predecessor once");
+    const struct uvdb_monitor_stop_trace* protocol_trace =
+        &uvdb_stop_traces[0];
+    check(protocol_trace->generation == 1u &&
+              protocol_trace->protocol_seq > protocol_trace->session_seq &&
+              protocol_trace->lock_seq == 0u &&
+              protocol_trace->predecessor_reason ==
+                  UVDB_MONITOR_STOP_TRACE_PREDECESSOR_PROTOCOL_CONTENTION &&
+              protocol_trace->predecessor_invoked == 1 &&
+              protocol_trace->publish_seq == 0u,
+          "protocol-contention trace stops before lock and publication");
     check(uvdb_protocol_gate_release(
               &uvdb_protocol_gate, other_owner) == 0,
           "contended protocol owner remains intact for its real owner");
@@ -991,7 +1021,7 @@ static void test_production_frame_boundaries_and_escapes(void)
     queue_rsp_payload(maximum_payload, sizeof(maximum_payload), 0);
     uvdb_lock();
     char* packet = NULL;
-    size_t packet_size = recv_packet(&packet);
+    size_t packet_size = recv_packet(&packet, NULL);
     check(packet_size == sizeof(maximum_payload) &&
               packet && packet[0] == 'q' &&
               packet[packet_size - 1u] == 'q' &&
@@ -1011,7 +1041,7 @@ static void test_production_frame_boundaries_and_escapes(void)
     fake_receive_size = sizeof(escaped_frame);
     uvdb_lock();
     packet = NULL;
-    packet_size = recv_packet(&packet);
+    packet_size = recv_packet(&packet, NULL);
     check(packet_size == 5u && packet &&
               !memcmp(packet, escaped_frame + 1u, packet_size),
           "production receiver retains escaped delimiters in one frame");
@@ -1027,7 +1057,7 @@ static void test_production_frame_boundaries_and_escapes(void)
     fake_receive_size = sizeof(fake_receive);
     uvdb_lock();
     packet = NULL;
-    check(recv_packet(&packet) == 0u && uvdb_has_io_failure() &&
+    check(recv_packet(&packet, NULL) == 0u && uvdb_has_io_failure() &&
               fake_transmit_size == 1u && fake_transmit[0] == '-',
           "production receiver rejects oversized unterminated input once");
     uvdb_unlock();
@@ -1055,7 +1085,7 @@ static void run_disconnect_during_command(
     };
     uvdb_lock();
     uvdb_main_loop(
-        &context, SIGTRAP, UVDB_FILEIO_CONTEXT_REAL_STOP, 0u);
+        &context, SIGTRAP, UVDB_FILEIO_CONTEXT_REAL_STOP, 0u, NULL);
     struct uvdb_rsp_frame response = {0};
     int response_result = fake_transmit_size > 1u
         ? uvdb_rsp_scan_frame(
@@ -1600,7 +1630,7 @@ static void test_detach_resume_publishes_handoff(void)
     uvdb_main_loop(
         &controller_context, SIGTRAP,
         UVDB_FILEIO_CONTEXT_REAL_STOP,
-        fake_resume_handoff_owner);
+        fake_resume_handoff_owner, NULL);
     check(__atomic_load_n(&uvdb_resume_handoff_owner,
                           __ATOMIC_ACQUIRE) ==
               fake_resume_handoff_owner &&
@@ -1658,7 +1688,7 @@ static void test_fileio_resume_publishes_handoff(void)
     uvdb_main_loop(
         &controller_context, SIGTRAP,
         UVDB_FILEIO_CONTEXT_REAL_STOP,
-        fake_resume_handoff_owner);
+        fake_resume_handoff_owner, NULL);
     check(controller_context.r0 == 1u &&
               __atomic_load_n(&uvdb_resume_handoff_owner,
                               __ATOMIC_ACQUIRE) ==
@@ -1728,7 +1758,7 @@ static void test_resume_handoff_accepts_immediate_breakpoint(void)
     uvdb_main_loop(
         &controller_context, SIGTRAP,
         UVDB_FILEIO_CONTEXT_REAL_STOP,
-        fake_resume_handoff_owner);
+        fake_resume_handoff_owner, NULL);
     check(__atomic_load_n(&uvdb_resume_handoff_owner,
                           __ATOMIC_ACQUIRE) ==
               fake_resume_handoff_owner &&
@@ -1767,6 +1797,51 @@ static void test_resume_handoff_accepts_immediate_breakpoint(void)
                           frame.payload_offset,
                       "T05thread:45;", frame.payload_size),
           "resume-tail breakpoint reports the selected T05 thread");
+    const struct uvdb_monitor_stop_trace* trace =
+        &uvdb_stop_traces[0];
+    check(trace->generation == 1u &&
+              trace->thread == FAKE_OTHER_THREAD &&
+              trace->raw_pc == FAKE_CODE_ADDRESS &&
+              trace->exception_type ==
+                  KU_KERNEL_EXCEPTION_TYPE_UNDEFINED_INSTRUCTION &&
+              trace->handoff_owner == fake_resume_handoff_owner &&
+              trace->handoff_wait_result ==
+                  UVDB_MONITOR_STOP_TRACE_WAIT_RELEASED &&
+              trace->handoff_wait_attempts > 0u &&
+              trace->handoff_done_seq > trace->handoff_wait_seq &&
+              trace->guard_seq > trace->handoff_done_seq &&
+              trace->session_seq > trace->guard_seq &&
+              trace->protocol_seq > trace->session_seq &&
+              trace->lock_seq > trace->protocol_seq,
+          "resume trace orders callback admission through ownership acquisition");
+    check(trace->publish_seq > trace->lock_seq &&
+              trace->classified_pc == FAKE_CODE_ADDRESS &&
+              trace->signal == SIGTRAP &&
+              trace->synthetic_trap == 0 &&
+              trace->breakpoint_match == 1 &&
+              trace->stop_begin_seq > trace->publish_seq &&
+              trace->stop_begin_result == 0 &&
+              trace->stopped_operation_seq > trace->stop_begin_seq &&
+              trace->stopped_operation_result == 0 &&
+              trace->main_loop_seq > trace->stopped_operation_seq,
+          "resume trace identifies breakpoint publication and stop ownership");
+    check(trace->packet_wait_seq > trace->main_loop_seq &&
+              trace->packet_ready_seq > trace->packet_wait_seq &&
+              trace->status_query_seq > trace->packet_ready_seq,
+          "resume trace distinguishes buffered status query");
+    check(trace->reply_attempt_seq > trace->status_query_seq &&
+              trace->reply_socket_poll_seq >
+                  trace->reply_attempt_seq &&
+              trace->reply_socket_wake_seq >
+                  trace->reply_socket_poll_seq &&
+              trace->reply_socket_wake_result > 0,
+          "resume trace distinguishes stop-reply socket ACK wake");
+    check(trace->reply_result_seq >
+                  trace->reply_socket_wake_seq &&
+              trace->reply_result == 0 &&
+              trace->exit_seq > trace->reply_result_seq &&
+              trace->predecessor_seq == 0u,
+          "resume trace records successful reply before clean callback exit");
     check(memcmp(fake_target_code, original, sizeof(original)) == 0 &&
               breakpoint_active_count() == 0 &&
               uvdb_exception_guard_is_idle(&uvdb_exception_guard) &&
@@ -1783,6 +1858,29 @@ static void test_resume_handoff_accepts_immediate_breakpoint(void)
               __atomic_load_n(&uvdb_resume_handoff_owner,
                               __ATOMIC_ACQUIRE) == 0u,
           "handoff disconnect cleanup restores bytes and all ownership");
+
+    KuKernelExceptionContext later_context = {
+        .pc = UINT32_C(0x81020000),
+        .exceptionType =
+            KU_KERNEL_EXCEPTION_TYPE_UNDEFINED_INSTRUCTION,
+    };
+    struct uvdb_monitor_stop_trace fallback_trace;
+    struct uvdb_stop_trace_handle later_trace =
+        uvdb_stop_trace_begin(
+            &later_context, FAKE_THREAD, &fallback_trace);
+    uvdb_stop_trace_finish(&later_trace);
+    struct uvdb_monitor_snapshot snapshot = {0};
+    uvdb_monitor_fill_status(&snapshot, SIGTRAP);
+    check(snapshot.status.stop_trace_count == 2u &&
+              snapshot.status.stop_traces[0].generation == 2u &&
+              snapshot.status.stop_traces[0].raw_pc ==
+                  later_context.pc &&
+              snapshot.status.stop_traces[1].generation == 1u &&
+              snapshot.status.stop_traces[1].publish_seq ==
+                  trace->publish_seq &&
+              snapshot.status.stop_traces[1].reply_result_seq ==
+                  trace->reply_result_seq,
+          "later reconnect diagnostics retain the prior breakpoint callback trace");
 }
 
 static void test_kernel_stop_failure_stress(void)
@@ -1926,6 +2024,49 @@ static void test_stale_lease_generation_and_disconnect_cleanup(void)
 }
 #endif
 
+static void test_stop_trace_preserves_active_slots(void)
+{
+    reset_core();
+    struct uvdb_stop_trace_handle
+        handles[UVDB_MONITOR_STOP_TRACE_COUNT];
+    struct uvdb_monitor_stop_trace
+        fallbacks[UVDB_MONITOR_STOP_TRACE_COUNT + 1u];
+    KuKernelExceptionContext context = {
+        .exceptionType =
+            KU_KERNEL_EXCEPTION_TYPE_UNDEFINED_INSTRUCTION,
+    };
+    for(size_t index = 0;
+        index < UVDB_MONITOR_STOP_TRACE_COUNT; ++index)
+    {
+        context.pc = UINT32_C(0x81020000) + (uint32_t)index * 2u;
+        handles[index] = uvdb_stop_trace_begin(
+            &context, FAKE_THREAD + (SceUID)index,
+            &fallbacks[index]);
+        check(handles[index].trace != &fallbacks[index] &&
+                  handles[index].trace->active == 1 &&
+                  handles[index].trace->generation == index + 1u,
+              "trace ring reserves each active callback slot");
+    }
+
+    context.pc = UINT32_C(0x81021000);
+    struct uvdb_stop_trace_handle overflow =
+        uvdb_stop_trace_begin(
+            &context, FAKE_THREAD, &fallbacks[
+                UVDB_MONITOR_STOP_TRACE_COUNT]);
+    uvdb_stop_trace_mark(
+        &overflow, &overflow.trace->publish_seq);
+    check(overflow.trace ==
+              &fallbacks[UVDB_MONITOR_STOP_TRACE_COUNT] &&
+              __atomic_load_n(&uvdb_stop_trace_dropped,
+                              __ATOMIC_ACQUIRE) == 1u &&
+              handles[0].trace->publish_seq == 0u,
+          "full trace ring drops persistence without recycling an active slot");
+    uvdb_stop_trace_finish(&overflow);
+    for(size_t index = 0;
+        index < UVDB_MONITOR_STOP_TRACE_COUNT; ++index)
+        uvdb_stop_trace_finish(&handles[index]);
+}
+
 int main(void)
 {
     test_real_status_query_ordering();
@@ -1955,6 +2096,7 @@ int main(void)
     test_connected_hup_during_shutdown();
     test_deterministic_multithread_lifecycle_stress();
     test_unload_fails_without_kernel_callback_fence();
+    test_stop_trace_preserves_active_slots();
 #ifdef UVDB_KERNEL_THREAD_CONTROL
     test_detach_resume_publishes_handoff();
     test_fileio_resume_publishes_handoff();

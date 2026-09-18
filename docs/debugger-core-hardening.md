@@ -232,7 +232,21 @@ Same-thread nested faults and contention outside a published resume tail still
 fail immediately. The integrated fake-kernel test deterministically interleaves
 a UDF callback into this window and verifies stop reporting, no predecessor
 handoff, exact breakpoint restoration on disconnect, and zero leaked gate or
-stop ownership. The bounded wait remains pending Vita timing validation.
+stop ownership. Two retail attempts nevertheless failed to report the first
+`step_target` breakpoint, including one with this handoff present. The handoff
+is therefore only host-modeled; it is not a sufficient hardware root-cause
+fix.
+
+`monitor status` now retains the newest eight exception callback traces across
+client cleanup and reconnect. Each trace has a monotonic callback generation
+and monotonic stage markers for entry metadata, handoff wait/outcome, guard,
+session, protocol and state-lock admission, predecessor dispatch, normalized
+fault publication, kernel stop acquisition, stopped-operation admission,
+protocol-loop entry, packet wait/readiness, socket poll/wake, stop-reply
+attempt/result, and callback exit. A later reconnect callback occupies a new
+slot instead of overwriting the prior failure as the single `last-fault` record
+did. The trace is diagnostic only: it does not relax ownership, retry a failed
+stage, resume a thread, or change cleanup policy.
 
 Terminal shutdown restores every kernel handler slot before closing callback
 admission. Captured predecessor tokens then remain immutable, the closed guard

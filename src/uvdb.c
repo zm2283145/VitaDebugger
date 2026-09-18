@@ -304,6 +304,12 @@ static int uvdb_lease_thread_ended;
 static struct uvdb_fault_info uvdb_last_fault = {
     .exception_type = UVDB_EXCEPTION_NONE,
 };
+static struct uvdb_monitor_stop_trace
+    uvdb_stop_traces[UVDB_MONITOR_STOP_TRACE_COUNT];
+static volatile uint32_t uvdb_stop_trace_generation;
+static volatile uint32_t uvdb_stop_trace_sequence;
+static volatile uint32_t uvdb_stop_trace_cursor;
+static volatile uint32_t uvdb_stop_trace_dropped;
 
 #define UVDB_REMOTE_SYSCALL_MAX_ARGS 64
 
@@ -325,6 +331,8 @@ static struct uvdb_monitor_thread
     uvdb_monitor_threads[UVDB_MONITOR_MAX_THREADS];
 static struct uvdb_monitor_module
     uvdb_monitor_modules[UVDB_MONITOR_MAX_MODULES];
+static struct uvdb_monitor_stop_trace
+    uvdb_monitor_stop_traces[UVDB_MONITOR_STOP_TRACE_COUNT];
 #ifdef UVDB_MONITOR_DISPLAY
 static struct uvdb_monitor_display uvdb_monitor_display_cache;
 static uint32_t uvdb_monitor_display_cache_generation;
@@ -391,6 +399,177 @@ static uint32_t uvdb_protocol_owner_for_thread(SceUID id)
     return owner ? owner : UINT32_C(0x7fffffff);
 }
 
+struct uvdb_stop_trace_handle {
+    struct uvdb_monitor_stop_trace* trace;
+    uint32_t generation;
+};
+
+static void uvdb_stop_trace_reset(
+    struct uvdb_monitor_stop_trace* trace)
+{
+#define UVDB_RESET_TRACE_FIELD(field) \
+    __atomic_store_n(&trace->field, 0, __ATOMIC_RELAXED)
+    UVDB_RESET_TRACE_FIELD(thread);
+    UVDB_RESET_TRACE_FIELD(raw_pc);
+    UVDB_RESET_TRACE_FIELD(exception_type);
+    UVDB_RESET_TRACE_FIELD(handoff_owner);
+    UVDB_RESET_TRACE_FIELD(handoff_wait_seq);
+    UVDB_RESET_TRACE_FIELD(handoff_done_seq);
+    UVDB_RESET_TRACE_FIELD(handoff_wait_attempts);
+    UVDB_RESET_TRACE_FIELD(handoff_wait_result);
+    UVDB_RESET_TRACE_FIELD(guard_seq);
+    UVDB_RESET_TRACE_FIELD(guard_result);
+    UVDB_RESET_TRACE_FIELD(session_seq);
+    UVDB_RESET_TRACE_FIELD(session_claimable);
+    UVDB_RESET_TRACE_FIELD(protocol_seq);
+    UVDB_RESET_TRACE_FIELD(protocol_result);
+    UVDB_RESET_TRACE_FIELD(lock_seq);
+    UVDB_RESET_TRACE_FIELD(lock_result);
+    UVDB_RESET_TRACE_FIELD(predecessor_seq);
+    UVDB_RESET_TRACE_FIELD(predecessor_reason);
+    UVDB_RESET_TRACE_FIELD(predecessor_invoked);
+    UVDB_RESET_TRACE_FIELD(publish_seq);
+    UVDB_RESET_TRACE_FIELD(classified_pc);
+    UVDB_RESET_TRACE_FIELD(signal);
+    UVDB_RESET_TRACE_FIELD(synthetic_trap);
+    UVDB_RESET_TRACE_FIELD(breakpoint_match);
+    UVDB_RESET_TRACE_FIELD(stop_begin_seq);
+    UVDB_RESET_TRACE_FIELD(stop_begin_result);
+    UVDB_RESET_TRACE_FIELD(stopped_operation_seq);
+    UVDB_RESET_TRACE_FIELD(stopped_operation_result);
+    UVDB_RESET_TRACE_FIELD(main_loop_seq);
+    UVDB_RESET_TRACE_FIELD(packet_wait_seq);
+    UVDB_RESET_TRACE_FIELD(socket_poll_seq);
+    UVDB_RESET_TRACE_FIELD(socket_wake_seq);
+    UVDB_RESET_TRACE_FIELD(socket_wake_result);
+    UVDB_RESET_TRACE_FIELD(packet_ready_seq);
+    UVDB_RESET_TRACE_FIELD(status_query_seq);
+    UVDB_RESET_TRACE_FIELD(reply_attempt_seq);
+    UVDB_RESET_TRACE_FIELD(reply_socket_poll_seq);
+    UVDB_RESET_TRACE_FIELD(reply_socket_wake_seq);
+    UVDB_RESET_TRACE_FIELD(reply_socket_wake_result);
+    UVDB_RESET_TRACE_FIELD(reply_result_seq);
+    UVDB_RESET_TRACE_FIELD(reply_result);
+    UVDB_RESET_TRACE_FIELD(exit_seq);
+#undef UVDB_RESET_TRACE_FIELD
+}
+
+static struct uvdb_stop_trace_handle uvdb_stop_trace_begin(
+    const KuKernelExceptionContext* ctx,
+    SceUID thread,
+    struct uvdb_monitor_stop_trace* fallback)
+{
+    struct uvdb_stop_trace_handle handle = {0};
+    uint32_t start = __atomic_fetch_add(
+        &uvdb_stop_trace_cursor, 1u, __ATOMIC_RELAXED);
+    struct uvdb_monitor_stop_trace* trace = NULL;
+    for(size_t offset = 0;
+        offset < UVDB_MONITOR_STOP_TRACE_COUNT; ++offset)
+    {
+        struct uvdb_monitor_stop_trace* candidate =
+            &uvdb_stop_traces[
+                (start + (uint32_t)offset) %
+                UVDB_MONITOR_STOP_TRACE_COUNT];
+        int32_t expected = 0;
+        if(__atomic_compare_exchange_n(
+               &candidate->active, &expected, 1, 0,
+               __ATOMIC_ACQ_REL, __ATOMIC_RELAXED))
+        {
+            trace = candidate;
+            break;
+        }
+    }
+    if(!trace)
+    {
+        __atomic_add_fetch(
+            &uvdb_stop_trace_dropped, 1u, __ATOMIC_RELAXED);
+        trace = fallback;
+        if(!trace)
+            return handle;
+        memset(trace, 0, sizeof(*trace));
+        trace->active = 1;
+    }
+    uint32_t generation = __atomic_add_fetch(
+        &uvdb_stop_trace_generation, 1u, __ATOMIC_RELAXED);
+    if(!generation)
+        generation = __atomic_add_fetch(
+            &uvdb_stop_trace_generation, 1u, __ATOMIC_RELAXED);
+    __atomic_store_n(&trace->generation, 0u, __ATOMIC_RELEASE);
+    uvdb_stop_trace_reset(trace);
+    __atomic_store_n(&trace->thread, thread, __ATOMIC_RELAXED);
+    if(ctx)
+    {
+        __atomic_store_n(&trace->raw_pc, ctx->pc, __ATOMIC_RELAXED);
+        __atomic_store_n(
+            &trace->exception_type, (int32_t)ctx->exceptionType,
+            __ATOMIC_RELAXED);
+    }
+    __atomic_store_n(&trace->generation, generation, __ATOMIC_RELEASE);
+    handle.trace = trace;
+    handle.generation = generation;
+    return handle;
+}
+
+static int uvdb_stop_trace_is_current(
+    const struct uvdb_stop_trace_handle* handle)
+{
+    return handle && handle->trace && handle->generation &&
+        __atomic_load_n(&handle->trace->active,
+                        __ATOMIC_ACQUIRE) &&
+        __atomic_load_n(&handle->trace->generation,
+                        __ATOMIC_ACQUIRE) == handle->generation;
+}
+
+static void uvdb_stop_trace_mark(
+    const struct uvdb_stop_trace_handle* handle,
+    uint32_t* field)
+{
+    if(!uvdb_stop_trace_is_current(handle) || !field)
+        return;
+    uint32_t sequence = __atomic_add_fetch(
+        &uvdb_stop_trace_sequence, 1u, __ATOMIC_RELAXED);
+    if(!sequence)
+        sequence = __atomic_add_fetch(
+            &uvdb_stop_trace_sequence, 1u, __ATOMIC_RELAXED);
+    __atomic_store_n(field, sequence, __ATOMIC_RELEASE);
+}
+
+static void uvdb_stop_trace_set_u32(
+    const struct uvdb_stop_trace_handle* handle,
+    uint32_t* field,
+    uint32_t value)
+{
+    if(uvdb_stop_trace_is_current(handle) && field)
+        __atomic_store_n(field, value, __ATOMIC_RELEASE);
+}
+
+static void uvdb_stop_trace_set_i32(
+    const struct uvdb_stop_trace_handle* handle,
+    int32_t* field,
+    int32_t value)
+{
+    if(uvdb_stop_trace_is_current(handle) && field)
+        __atomic_store_n(field, value, __ATOMIC_RELEASE);
+}
+
+static void uvdb_stop_trace_finish(
+    const struct uvdb_stop_trace_handle* handle)
+{
+    if(!uvdb_stop_trace_is_current(handle))
+        return;
+    uvdb_stop_trace_mark(handle, &handle->trace->exit_seq);
+    __atomic_store_n(
+        &handle->trace->active, 0, __ATOMIC_RELEASE);
+}
+
+static int uvdb_stop_trace_waiting_for_status(
+    const struct uvdb_stop_trace_handle* handle)
+{
+    return uvdb_stop_trace_is_current(handle) &&
+        __atomic_load_n(&handle->trace->status_query_seq,
+                        __ATOMIC_ACQUIRE) == 0u;
+}
+
 #define UVDB_RESUME_HANDOFF_WAIT_ATTEMPTS 5000u
 #define UVDB_RESUME_HANDOFF_WAIT_DELAY_US 1000u
 
@@ -410,21 +589,62 @@ static void uvdb_resume_handoff_finish(uint32_t owner)
             __ATOMIC_RELEASE, __ATOMIC_RELAXED);
 }
 
-static int uvdb_resume_handoff_wait(uint32_t contender)
+static int uvdb_resume_handoff_wait(
+    uint32_t contender,
+    const struct uvdb_stop_trace_handle* trace_handle)
 {
     /* EndStop can schedule a peer before the controller's exception callback
      * has released its protocol and exception gates. Only that published,
      * cross-thread resume tail may wait; same-thread nested faults retain the
      * immediate fail-closed path. */
+    uvdb_stop_trace_mark(
+        trace_handle, &trace_handle->trace->handoff_wait_seq);
+    uint32_t owner = __atomic_load_n(
+        &uvdb_resume_handoff_owner, __ATOMIC_ACQUIRE);
+    uvdb_stop_trace_set_u32(
+        trace_handle, &trace_handle->trace->handoff_owner, owner);
+    if(!owner)
+    {
+        uvdb_stop_trace_set_i32(
+            trace_handle, &trace_handle->trace->handoff_wait_result,
+            UVDB_MONITOR_STOP_TRACE_WAIT_CLEAR);
+        uvdb_stop_trace_mark(
+            trace_handle, &trace_handle->trace->handoff_done_seq);
+        return 0;
+    }
+    if(owner == contender)
+    {
+        uvdb_stop_trace_set_i32(
+            trace_handle, &trace_handle->trace->handoff_wait_result,
+            UVDB_MONITOR_STOP_TRACE_WAIT_SAME_OWNER);
+        uvdb_stop_trace_mark(
+            trace_handle, &trace_handle->trace->handoff_done_seq);
+        return 0;
+    }
     for(unsigned int attempt = 0;
         attempt < UVDB_RESUME_HANDOFF_WAIT_ATTEMPTS; ++attempt)
     {
-        uint32_t owner = __atomic_load_n(
-            &uvdb_resume_handoff_owner, __ATOMIC_ACQUIRE);
-        if(!owner || owner == contender)
-            return 0;
+        uvdb_stop_trace_set_u32(
+            trace_handle, &trace_handle->trace->handoff_wait_attempts,
+            attempt + 1u);
         sceKernelDelayThread(UVDB_RESUME_HANDOFF_WAIT_DELAY_US);
+        owner = __atomic_load_n(
+            &uvdb_resume_handoff_owner, __ATOMIC_ACQUIRE);
+        if(!owner)
+        {
+            uvdb_stop_trace_set_i32(
+                trace_handle, &trace_handle->trace->handoff_wait_result,
+                UVDB_MONITOR_STOP_TRACE_WAIT_RELEASED);
+            uvdb_stop_trace_mark(
+                trace_handle, &trace_handle->trace->handoff_done_seq);
+            return 0;
+        }
     }
+    uvdb_stop_trace_set_i32(
+        trace_handle, &trace_handle->trace->handoff_wait_result,
+        UVDB_MONITOR_STOP_TRACE_WAIT_TIMEOUT);
+    uvdb_stop_trace_mark(
+        trace_handle, &trace_handle->trace->handoff_done_seq);
     return -1;
 }
 
@@ -1572,7 +1792,9 @@ int uvdb_prepare_unload(void)
     return result;
 }
 
-static size_t recv_packet(char** data)
+static size_t recv_packet(
+    char** data,
+    const struct uvdb_stop_trace_handle* trace_handle)
 {
     if(!data)
         return 0;
@@ -1598,6 +1820,10 @@ static size_t recv_packet(char** data)
             }
             *data = in_buf.buf + frame.payload_offset;
             in_buf.buf[frame.payload_offset + frame.payload_size] = 0;
+            if(uvdb_stop_trace_waiting_for_status(trace_handle))
+                uvdb_stop_trace_mark(
+                    trace_handle,
+                    &trace_handle->trace->packet_ready_seq);
             return frame.payload_size;
         }
         if(result == UVDB_RSP_FRAME_DISCARD)
@@ -1626,7 +1852,22 @@ static size_t recv_packet(char** data)
         }
 
         char* unused = NULL;
-        if(!buffer_poll(&in_buf, &unused) && uvdb_has_io_failure())
+        if(uvdb_stop_trace_waiting_for_status(trace_handle))
+            uvdb_stop_trace_mark(
+                trace_handle,
+                &trace_handle->trace->socket_poll_seq);
+        size_t received = buffer_poll(&in_buf, &unused);
+        if(uvdb_stop_trace_waiting_for_status(trace_handle))
+        {
+            uvdb_stop_trace_set_i32(
+                trace_handle,
+                &trace_handle->trace->socket_wake_result,
+                received ? (int32_t)received : -1);
+            uvdb_stop_trace_mark(
+                trace_handle,
+                &trace_handle->trace->socket_wake_seq);
+        }
+        if(!received && uvdb_has_io_failure())
             return 0;
     }
 }
@@ -1657,7 +1898,8 @@ static void discard_packet(char* data, size_t sz)
         uvdb_note_io_failure();
 }
 
-static int send_packet(void)
+static int send_packet_traced(
+    const struct uvdb_stop_trace_handle* trace_handle)
 {
     /* Waiting for the peer's ACK may compact/refill in_buf. Never retain a
      * payload pointer into that buffer across the wait. */
@@ -1693,9 +1935,29 @@ static int send_packet(void)
         if(in_buf.size)
             buffer_popleft(&in_buf, in_buf.size);
         char* unused = NULL;
-        if(!buffer_poll(&in_buf, &unused) && uvdb_has_io_failure())
+        if(uvdb_stop_trace_is_current(trace_handle))
+            uvdb_stop_trace_mark(
+                trace_handle,
+                &trace_handle->trace->reply_socket_poll_seq);
+        size_t received = buffer_poll(&in_buf, &unused);
+        if(uvdb_stop_trace_is_current(trace_handle))
+        {
+            uvdb_stop_trace_set_i32(
+                trace_handle,
+                &trace_handle->trace->reply_socket_wake_result,
+                received ? (int32_t)received : -1);
+            uvdb_stop_trace_mark(
+                trace_handle,
+                &trace_handle->trace->reply_socket_wake_seq);
+        }
+        if(!received && uvdb_has_io_failure())
             return -1;
     }
+}
+
+static int send_packet(void)
+{
+    return send_packet_traced(NULL);
 }
 
 #define IS(s) (sz == sizeof(s) - 1 && !memcmp(pkt, s, sizeof(s) - 1))
@@ -3006,7 +3268,9 @@ static size_t safe_memcpy(char* dst, const char* src, size_t sz)
     return ans;
 }
 
-static int send_stop_reply(int signal)
+static int send_stop_reply(
+    int signal,
+    const struct uvdb_stop_trace_handle* trace_handle)
 {
     buffer_start_packet(&out_buf);
     uint8_t prefix[3] = {'T', int2hex(signal >> 4), int2hex(signal & 15)};
@@ -3014,7 +3278,28 @@ static int send_stop_reply(int signal)
     buffer_write(&out_buf, STRING("thread:"));
     write_hex_uint32((uint32_t)uvdb_selection.stopped);
     buffer_write(&out_buf, STRING(";"));
-    return send_packet();
+    int trace_this_reply =
+        uvdb_stop_trace_is_current(trace_handle) &&
+        __atomic_load_n(
+            &trace_handle->trace->reply_attempt_seq,
+            __ATOMIC_ACQUIRE) == 0u;
+    const struct uvdb_stop_trace_handle* reply_trace =
+        trace_this_reply ? trace_handle : NULL;
+    if(reply_trace)
+        uvdb_stop_trace_mark(
+            reply_trace,
+            &reply_trace->trace->reply_attempt_seq);
+    int result = send_packet_traced(reply_trace);
+    if(reply_trace)
+    {
+        uvdb_stop_trace_set_i32(
+            reply_trace, &reply_trace->trace->reply_result,
+            result);
+        uvdb_stop_trace_mark(
+            reply_trace,
+            &reply_trace->trace->reply_result_seq);
+    }
+    return result;
 }
 
 static int uvdb_pump_console_before_stop(void)
@@ -3040,8 +3325,15 @@ static int uvdb_pump_console_before_stop(void)
  * when stopped inventory could not be refreshed (the caller retains the
  * existing stop failure policy), and -1 for transport/lifetime failure. */
 static int uvdb_handle_status_query_request(
-    char* packet, size_t packet_size, int stop_signal)
+    char* packet,
+    size_t packet_size,
+    int stop_signal,
+    const struct uvdb_stop_trace_handle* trace_handle)
 {
+    if(uvdb_stop_trace_is_current(trace_handle))
+        uvdb_stop_trace_mark(
+            trace_handle,
+            &trace_handle->trace->status_query_seq);
     if(uvdb_refresh_stopped_inventory() < 0)
         return -2;
     if(!out_buf.size)
@@ -3058,7 +3350,7 @@ static int uvdb_handle_status_query_request(
     /* send_packet waits for '+' in ACK mode and may compact in_buf. Release
      * the current payload borrow before constructing and sending Txx. */
     discard_packet(packet, packet_size);
-    return send_stop_reply(stop_signal);
+    return send_stop_reply(stop_signal, trace_handle);
 }
 
 #ifdef UVDB_KERNEL_THREAD_CONTROL
@@ -3365,6 +3657,70 @@ static void uvdb_monitor_copy_name(
     destination[count] = 0;
 }
 
+static int uvdb_copy_stop_trace(
+    const struct uvdb_monitor_stop_trace* source,
+    uint32_t expected_generation,
+    struct uvdb_monitor_stop_trace* destination)
+{
+    if(!source || !destination || !expected_generation ||
+       __atomic_load_n(&source->generation,
+                       __ATOMIC_ACQUIRE) != expected_generation)
+        return 0;
+
+#define UVDB_COPY_TRACE_FIELD(field) \
+    destination->field = __atomic_load_n( \
+        &source->field, __ATOMIC_ACQUIRE)
+    UVDB_COPY_TRACE_FIELD(generation);
+    UVDB_COPY_TRACE_FIELD(active);
+    UVDB_COPY_TRACE_FIELD(thread);
+    UVDB_COPY_TRACE_FIELD(raw_pc);
+    UVDB_COPY_TRACE_FIELD(exception_type);
+    UVDB_COPY_TRACE_FIELD(handoff_owner);
+    UVDB_COPY_TRACE_FIELD(handoff_wait_seq);
+    UVDB_COPY_TRACE_FIELD(handoff_done_seq);
+    UVDB_COPY_TRACE_FIELD(handoff_wait_attempts);
+    UVDB_COPY_TRACE_FIELD(handoff_wait_result);
+    UVDB_COPY_TRACE_FIELD(guard_seq);
+    UVDB_COPY_TRACE_FIELD(guard_result);
+    UVDB_COPY_TRACE_FIELD(session_seq);
+    UVDB_COPY_TRACE_FIELD(session_claimable);
+    UVDB_COPY_TRACE_FIELD(protocol_seq);
+    UVDB_COPY_TRACE_FIELD(protocol_result);
+    UVDB_COPY_TRACE_FIELD(lock_seq);
+    UVDB_COPY_TRACE_FIELD(lock_result);
+    UVDB_COPY_TRACE_FIELD(predecessor_seq);
+    UVDB_COPY_TRACE_FIELD(predecessor_reason);
+    UVDB_COPY_TRACE_FIELD(predecessor_invoked);
+    UVDB_COPY_TRACE_FIELD(publish_seq);
+    UVDB_COPY_TRACE_FIELD(classified_pc);
+    UVDB_COPY_TRACE_FIELD(signal);
+    UVDB_COPY_TRACE_FIELD(synthetic_trap);
+    UVDB_COPY_TRACE_FIELD(breakpoint_match);
+    UVDB_COPY_TRACE_FIELD(stop_begin_seq);
+    UVDB_COPY_TRACE_FIELD(stop_begin_result);
+    UVDB_COPY_TRACE_FIELD(stopped_operation_seq);
+    UVDB_COPY_TRACE_FIELD(stopped_operation_result);
+    UVDB_COPY_TRACE_FIELD(main_loop_seq);
+    UVDB_COPY_TRACE_FIELD(packet_wait_seq);
+    UVDB_COPY_TRACE_FIELD(socket_poll_seq);
+    UVDB_COPY_TRACE_FIELD(socket_wake_seq);
+    UVDB_COPY_TRACE_FIELD(socket_wake_result);
+    UVDB_COPY_TRACE_FIELD(packet_ready_seq);
+    UVDB_COPY_TRACE_FIELD(status_query_seq);
+    UVDB_COPY_TRACE_FIELD(reply_attempt_seq);
+    UVDB_COPY_TRACE_FIELD(reply_socket_poll_seq);
+    UVDB_COPY_TRACE_FIELD(reply_socket_wake_seq);
+    UVDB_COPY_TRACE_FIELD(reply_socket_wake_result);
+    UVDB_COPY_TRACE_FIELD(reply_result_seq);
+    UVDB_COPY_TRACE_FIELD(reply_result);
+    UVDB_COPY_TRACE_FIELD(exit_seq);
+#undef UVDB_COPY_TRACE_FIELD
+
+    return destination->generation == expected_generation &&
+        __atomic_load_n(&source->generation,
+                        __ATOMIC_ACQUIRE) == expected_generation;
+}
+
 static void uvdb_monitor_fill_status(
     struct uvdb_monitor_snapshot* snapshot,
     int stop_signal)
@@ -3421,6 +3777,38 @@ static void uvdb_monitor_fill_status(
         status->last_fault_address = uvdb_last_fault.fault_address;
         status->last_fault_pc = uvdb_last_fault.pc;
     }
+
+    for(size_t index = 0;
+        index < UVDB_MONITOR_STOP_TRACE_COUNT; ++index)
+    {
+        const struct uvdb_monitor_stop_trace* source =
+            &uvdb_stop_traces[index];
+        uint32_t generation = __atomic_load_n(
+            &source->generation, __ATOMIC_ACQUIRE);
+        struct uvdb_monitor_stop_trace* destination =
+            &uvdb_monitor_stop_traces[status->stop_trace_count];
+        memset(destination, 0, sizeof(*destination));
+        if(uvdb_copy_stop_trace(source, generation, destination))
+            ++status->stop_trace_count;
+    }
+    for(size_t index = 1; index < status->stop_trace_count; ++index)
+    {
+        struct uvdb_monitor_stop_trace value =
+            uvdb_monitor_stop_traces[index];
+        size_t insert = index;
+        while(insert &&
+              uvdb_monitor_stop_traces[insert - 1u].generation <
+                  value.generation)
+        {
+            uvdb_monitor_stop_traces[insert] =
+                uvdb_monitor_stop_traces[insert - 1u];
+            --insert;
+        }
+        uvdb_monitor_stop_traces[insert] = value;
+    }
+    status->stop_traces = uvdb_monitor_stop_traces;
+    status->stop_trace_dropped = __atomic_load_n(
+        &uvdb_stop_trace_dropped, __ATOMIC_ACQUIRE);
 }
 
 static void uvdb_monitor_fill_threads(
@@ -3826,7 +4214,8 @@ static void uvdb_main_loop(
     KuKernelExceptionContext* ctx,
     int stop_signal,
     enum uvdb_fileio_context fileio_context,
-    uint32_t resume_handoff_owner)
+    uint32_t resume_handoff_owner,
+    const struct uvdb_stop_trace_handle* trace_handle)
 {
 #ifdef UVDB_KERNEL_VFP_READS
     // Negotiate the extended register shape only with the exact matching ABI
@@ -3834,10 +4223,18 @@ static void uvdb_main_loop(
     // plugin transparently retains the legacy core-only packet contract.
     uvdb_refresh_rsp_vfp_capability();
 #endif
+    if(uvdb_stop_trace_is_current(trace_handle))
+        uvdb_stop_trace_mark(
+            trace_handle,
+            &trace_handle->trace->main_loop_seq);
     for(;;)
     {
         char* pkt;
-        size_t sz = recv_packet(&pkt);
+        if(uvdb_stop_trace_waiting_for_status(trace_handle))
+            uvdb_stop_trace_mark(
+                trace_handle,
+                &trace_handle->trace->packet_wait_seq);
+        size_t sz = recv_packet(&pkt, trace_handle);
 #ifdef UVDB_KERNEL_THREAD_CONTROL
         if(__atomic_load_n(&uvdb_stop_failed, __ATOMIC_SEQ_CST))
         {
@@ -3917,7 +4314,7 @@ static void uvdb_main_loop(
         else if(IS("?"))
         {
             int status_result = uvdb_handle_status_query_request(
-                pkt, sz, stop_signal);
+                pkt, sz, stop_signal, trace_handle);
             if(status_result == -2)
                 return;
             if(status_result < 0)
@@ -4405,7 +4802,8 @@ static void uvdb_main_loop(
                 out_buf.size--;
                 discard_packet(pkt, sz);
                 stop_signal = transition.stop_signal;
-                if(send_stop_reply(transition.stop_signal) < 0)
+                if(send_stop_reply(
+                       transition.stop_signal, trace_handle) < 0)
                 {
                     uvdb_fail_stopped_client();
                     return;
@@ -4498,11 +4896,12 @@ packet_complete:
 static void uvdb_remote_syscall_stopped(
     KuKernelExceptionContext* ctx,
     struct uvdb_remote_syscall_request* request,
-    uint32_t resume_handoff_owner)
+    uint32_t resume_handoff_owner,
+    const struct uvdb_stop_trace_handle* trace_handle)
 {
     request->result = -1;
     char* packet = NULL;
-    size_t packet_size = recv_packet(&packet);
+    size_t packet_size = recv_packet(&packet, trace_handle);
     if(uvdb_has_io_failure() || packet_size != 1u || !packet ||
        packet[0] != '?')
         goto done;
@@ -4532,7 +4931,8 @@ static void uvdb_remote_syscall_stopped(
         UVDB_FILEIO_CONTEXT_UNSTOPPED
 #endif
         ,
-        resume_handoff_owner
+        resume_handoff_owner,
+        trace_handle
     );
     if(!uvdb_has_io_failure())
         request->result = (int)ctx->r0;
@@ -4658,9 +5058,27 @@ static int uvdb_exception_session_claimable(void)
 }
 
 static void uvdb_handle_unclaimed_exception(
-    KuKernelExceptionContext* ctx)
+    KuKernelExceptionContext* ctx,
+    const struct uvdb_stop_trace_handle* trace_handle,
+    enum uvdb_monitor_stop_trace_predecessor_reason reason)
 {
-    if(!uvdb_chain_previous_exception_handler(ctx))
+    if(uvdb_stop_trace_is_current(trace_handle))
+    {
+        uvdb_stop_trace_set_i32(
+            trace_handle,
+            &trace_handle->trace->predecessor_reason,
+            reason);
+        uvdb_stop_trace_mark(
+            trace_handle,
+            &trace_handle->trace->predecessor_seq);
+    }
+    int invoked = uvdb_chain_previous_exception_handler(ctx);
+    if(uvdb_stop_trace_is_current(trace_handle))
+        uvdb_stop_trace_set_i32(
+            trace_handle,
+            &trace_handle->trace->predecessor_invoked,
+            invoked);
+    if(!invoked)
     {
         uvdb_exception_guard_note_unhandled(&uvdb_exception_guard);
 #ifdef UVDB_EXPERIMENTAL_NESTED_FAULT_EXIT
@@ -4684,16 +5102,19 @@ static void uvdb_fail_exception_without_state_lock(
     uint32_t exception_type,
     int guard_result,
     uint32_t protocol_owner,
-    int owns_protocol)
+    int owns_protocol,
+    const struct uvdb_stop_trace_handle* trace_handle,
+    enum uvdb_monitor_stop_trace_predecessor_reason reason)
 {
     uvdb_note_io_failure();
     __atomic_store_n(&uvdb_state, UVDB_STATE_ERROR, __ATOMIC_RELEASE);
     if(owns_protocol)
         (void)uvdb_protocol_gate_release(
             &uvdb_protocol_gate, protocol_owner);
-    uvdb_handle_unclaimed_exception(ctx);
+    uvdb_handle_unclaimed_exception(ctx, trace_handle, reason);
     (void)uvdb_exception_guard_leave(
         &uvdb_exception_guard, exception_type, guard_result);
+    uvdb_stop_trace_finish(trace_handle);
 }
 
 static void exception_handler(KuKernelExceptionContext* ctx)
@@ -4703,12 +5124,20 @@ static void exception_handler(KuKernelExceptionContext* ctx)
     __atomic_add_fetch(&uvdb_exception_admissions, 1u,
                        __ATOMIC_ACQ_REL);
     SceUID exception_thread = sceKernelGetThreadId();
+    struct uvdb_monitor_stop_trace fallback_trace;
+    struct uvdb_stop_trace_handle trace =
+        uvdb_stop_trace_begin(
+            ctx, exception_thread, &fallback_trace);
     const uint32_t protocol_owner =
         uvdb_protocol_owner_for_thread(exception_thread);
-    (void)uvdb_resume_handoff_wait(protocol_owner);
+    (void)uvdb_resume_handoff_wait(protocol_owner, &trace);
     const uint32_t exception_type = ctx->exceptionType;
     int guard_result = uvdb_exception_guard_enter(
         &uvdb_exception_guard, exception_type);
+    uvdb_stop_trace_set_i32(
+        &trace, &trace.trace->guard_result, guard_result);
+    uvdb_stop_trace_mark(
+        &trace, &trace.trace->guard_seq);
     __atomic_sub_fetch(&uvdb_exception_admissions, 1u,
                        __ATOMIC_RELEASE);
     if(guard_result == UVDB_EXCEPTION_GUARD_CLOSED)
@@ -4718,15 +5147,19 @@ static void exception_handler(KuKernelExceptionContext* ctx)
          * remain immutable through quiescence, and this full callback is still
          * counted. With a NULL predecessor, returning re-dispatches the fault
          * through the now-restored kernel default rather than our old slot. */
-        uvdb_handle_unclaimed_exception(ctx);
+        uvdb_handle_unclaimed_exception(
+            ctx, &trace,
+            UVDB_MONITOR_STOP_TRACE_PREDECESSOR_GUARD_CLOSED);
         (void)uvdb_exception_guard_leave(
             &uvdb_exception_guard, exception_type, guard_result);
+        uvdb_stop_trace_finish(&trace);
         return;
     }
     if(guard_result == UVDB_EXCEPTION_GUARD_INVALID)
     {
         uvdb_note_io_failure();
         __atomic_store_n(&uvdb_state, UVDB_STATE_ERROR, __ATOMIC_RELEASE);
+        uvdb_stop_trace_finish(&trace);
         return;
     }
     if(guard_result == UVDB_EXCEPTION_GUARD_NESTED)
@@ -4737,9 +5170,12 @@ static void exception_handler(KuKernelExceptionContext* ctx)
          * again because begin_chain is serialized. */
         uvdb_note_io_failure();
         __atomic_store_n(&uvdb_state, UVDB_STATE_ERROR, __ATOMIC_RELEASE);
-        uvdb_handle_unclaimed_exception(ctx);
+        uvdb_handle_unclaimed_exception(
+            ctx, &trace,
+            UVDB_MONITOR_STOP_TRACE_PREDECESSOR_GUARD_NESTED);
         (void)uvdb_exception_guard_leave(
             &uvdb_exception_guard, exception_type, guard_result);
+        uvdb_stop_trace_finish(&trace);
         return;
     }
 
@@ -4750,23 +5186,39 @@ static void exception_handler(KuKernelExceptionContext* ctx)
     /* A detached, closing, or not-yet-connected debugger has no protocol
      * peer that could claim this stop. Give the captured application handler
      * its one guarded opportunity before touching the exception context. */
-    if(!uvdb_exception_session_claimable())
+    int session_claimable = uvdb_exception_session_claimable();
+    uvdb_stop_trace_set_i32(
+        &trace, &trace.trace->session_claimable,
+        session_claimable);
+    uvdb_stop_trace_mark(
+        &trace, &trace.trace->session_seq);
+    if(!session_claimable)
     {
         __atomic_store_n(&uvdb_state, UVDB_STATE_ERROR, __ATOMIC_RELEASE);
-        uvdb_handle_unclaimed_exception(ctx);
+        uvdb_handle_unclaimed_exception(
+            ctx, &trace,
+            UVDB_MONITOR_STOP_TRACE_PREDECESSOR_SESSION_UNCLAIMABLE);
         (void)uvdb_exception_guard_leave(
             &uvdb_exception_guard, exception_type, guard_result);
+        uvdb_stop_trace_finish(&trace);
         return;
     }
 
-    if(uvdb_protocol_gate_try_acquire(
-           &uvdb_protocol_gate, protocol_owner) !=
-       UVDB_PROTOCOL_GATE_ACQUIRED)
+    int protocol_result = uvdb_protocol_gate_try_acquire(
+        &uvdb_protocol_gate, protocol_owner);
+    uvdb_stop_trace_set_i32(
+        &trace, &trace.trace->protocol_result,
+        protocol_result);
+    uvdb_stop_trace_mark(
+        &trace, &trace.trace->protocol_seq);
+    if(protocol_result != UVDB_PROTOCOL_GATE_ACQUIRED)
     {
         /* A remote File-I/O operation or simultaneous stopped handler already
          * owns the shared RSP buffers. Never wait from exception context. */
         uvdb_fail_exception_without_state_lock(
-            ctx, exception_type, guard_result, protocol_owner, 0);
+            ctx, exception_type, guard_result, protocol_owner, 0,
+            &trace,
+            UVDB_MONITOR_STOP_TRACE_PREDECESSOR_PROTOCOL_CONTENTION);
         return;
     }
 
@@ -4776,11 +5228,17 @@ static void exception_handler(KuKernelExceptionContext* ctx)
      * also unsafe to inspect breakpoint or controller state before ownership
      * is established. Fail closed and give the captured predecessor its one
      * guarded opportunity to handle the original context. */
-    if(uvdb_try_lock_for_thread(exception_thread) !=
-       UVDB_TRY_LOCK_ACQUIRED)
+    int lock_result = uvdb_try_lock_for_thread(exception_thread);
+    uvdb_stop_trace_set_i32(
+        &trace, &trace.trace->lock_result, lock_result);
+    uvdb_stop_trace_mark(
+        &trace, &trace.trace->lock_seq);
+    if(lock_result != UVDB_TRY_LOCK_ACQUIRED)
     {
         uvdb_fail_exception_without_state_lock(
-            ctx, exception_type, guard_result, protocol_owner, 1);
+            ctx, exception_type, guard_result, protocol_owner, 1,
+            &trace,
+            UVDB_MONITOR_STOP_TRACE_PREDECESSOR_STATE_LOCK_CONTENTION);
         return;
     }
 
@@ -4796,12 +5254,15 @@ static void exception_handler(KuKernelExceptionContext* ctx)
         pc |= 1;
     }
     int synthetic_trap = pc == uvdb_trap_address();
+    int breakpoint_match = 0;
     if(synthetic_trap)
     {
         pc = ctx->r0;
         signal = SIGTRAP;
     }
-    else if(ctx->exceptionType == KU_KERNEL_EXCEPTION_TYPE_UNDEFINED_INSTRUCTION && breakpoint_find(pc))
+    else if(ctx->exceptionType ==
+                KU_KERNEL_EXCEPTION_TYPE_UNDEFINED_INSTRUCTION &&
+            (breakpoint_match = breakpoint_find(pc) != NULL))
     {
         signal = SIGTRAP;
     }
@@ -4856,19 +5317,41 @@ static void exception_handler(KuKernelExceptionContext* ctx)
     uvdb_last_fault.pc = pc;
     uvdb_last_fault.lr = ctx->lr;
     uvdb_last_fault.sp = ctx->sp;
+    uvdb_stop_trace_set_u32(
+        &trace, &trace.trace->classified_pc, pc);
+    uvdb_stop_trace_set_i32(
+        &trace, &trace.trace->signal, signal);
+    uvdb_stop_trace_set_i32(
+        &trace, &trace.trace->synthetic_trap, synthetic_trap);
+    uvdb_stop_trace_set_i32(
+        &trace, &trace.trace->breakpoint_match, breakpoint_match);
+    uvdb_stop_trace_mark(
+        &trace, &trace.trace->publish_seq);
     uvdb_exception_thread = exception_thread;
     if(internal_controller)
         uvdb_thread_selection_note_resume(&uvdb_selection);
     else
         uvdb_thread_selection_note_stop(&uvdb_selection,
                                         exception_thread, NULL);
-    if(uvdb_kernel_begin_stop() < 0)
+    int stop_begin_result = uvdb_kernel_begin_stop();
+    uvdb_stop_trace_set_i32(
+        &trace, &trace.trace->stop_begin_result,
+        stop_begin_result);
+    uvdb_stop_trace_mark(
+        &trace, &trace.trace->stop_begin_seq);
+    if(stop_begin_result < 0)
     {
         uvdb_fail_stopped_client();
         uvdb_unlock();
         goto exception_done;
     }
-    if(uvdb_begin_stopped_operation() < 0)
+    int stopped_operation_result = uvdb_begin_stopped_operation();
+    uvdb_stop_trace_set_i32(
+        &trace, &trace.trace->stopped_operation_result,
+        stopped_operation_result);
+    uvdb_stop_trace_mark(
+        &trace, &trace.trace->stopped_operation_seq);
+    if(stopped_operation_result < 0)
     {
         uvdb_unlock();
         goto exception_done;
@@ -4912,10 +5395,11 @@ static void exception_handler(KuKernelExceptionContext* ctx)
        syscall_request->owner == exception_thread &&
        synthetic_trap)
         uvdb_remote_syscall_stopped(
-            ctx, syscall_request, protocol_owner);
+            ctx, syscall_request, protocol_owner, &trace);
     else
         uvdb_main_loop(ctx, reported_signal,
-                       UVDB_FILEIO_CONTEXT_REAL_STOP, protocol_owner);
+                       UVDB_FILEIO_CONTEXT_REAL_STOP, protocol_owner,
+                       &trace);
     uvdb_unlock();
 exception_done:
     (void)uvdb_protocol_gate_release(
@@ -4923,6 +5407,7 @@ exception_done:
     (void)uvdb_exception_guard_leave(
         &uvdb_exception_guard, exception_type, guard_result);
     uvdb_resume_handoff_finish(protocol_owner);
+    uvdb_stop_trace_finish(&trace);
 }
 
 int uvdb_remote_syscall(const char* name, int nargs, ...)

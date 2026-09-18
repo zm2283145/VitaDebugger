@@ -258,6 +258,19 @@ static void append_u64_decimal(struct monitor_builder* builder, uint64_t value)
         append_char(builder, digits[--count]);
 }
 
+static void append_i32_decimal(
+    struct monitor_builder* builder,
+    int32_t value)
+{
+    if(value < 0)
+    {
+        append_char(builder, '-');
+        append_u64_decimal(builder, (uint64_t)(-(int64_t)value));
+    }
+    else
+        append_u64_decimal(builder, (uint32_t)value);
+}
+
 static void append_hex32(struct monitor_builder* builder, uint32_t value)
 {
     static const char digits[] = "0123456789abcdef";
@@ -404,6 +417,111 @@ static void render_status(
         append_hex32(builder, status->last_fault_pc);
     }
     append_char(builder, '\n');
+
+    size_t trace_count = status->stop_traces ?
+        status->stop_trace_count : 0u;
+    if(trace_count > UVDB_MONITOR_STOP_TRACE_COUNT)
+        trace_count = UVDB_MONITOR_STOP_TRACE_COUNT;
+    append_string(builder, "  stop-trace newest-first: dropped=");
+    append_u64_decimal(builder, status->stop_trace_dropped);
+    if(!trace_count)
+        append_string(builder, ", none");
+    append_char(builder, '\n');
+    for(size_t i = 0; i < trace_count; ++i)
+    {
+        const struct uvdb_monitor_stop_trace* trace =
+            &status->stop_traces[i];
+        append_string(builder, "    #");
+        append_u64_decimal(builder, trace->generation);
+        append_string(builder, " thread=");
+        append_thread_selector(builder, trace->thread);
+        append_string(builder, " active=");
+        append_i32_decimal(builder, trace->active);
+        append_string(builder, " raw-pc=");
+        append_hex32(builder, trace->raw_pc);
+        append_string(builder, " type=");
+        append_i32_decimal(builder, trace->exception_type);
+        append_string(builder, " handoff=");
+        append_u64_decimal(builder, trace->handoff_wait_seq);
+        append_char(builder, '/');
+        append_u64_decimal(builder, trace->handoff_done_seq);
+        append_char(builder, '/');
+        append_i32_decimal(builder, trace->handoff_wait_result);
+        append_char(builder, '/');
+        append_u64_decimal(builder, trace->handoff_wait_attempts);
+        append_string(builder, " owner=");
+        append_hex32(builder, trace->handoff_owner);
+        append_string(builder, " guard=");
+        append_u64_decimal(builder, trace->guard_seq);
+        append_char(builder, '/');
+        append_i32_decimal(builder, trace->guard_result);
+        append_string(builder, " session=");
+        append_u64_decimal(builder, trace->session_seq);
+        append_char(builder, '/');
+        append_i32_decimal(builder, trace->session_claimable);
+        append_string(builder, " protocol=");
+        append_u64_decimal(builder, trace->protocol_seq);
+        append_char(builder, '/');
+        append_i32_decimal(builder, trace->protocol_result);
+        append_string(builder, " lock=");
+        append_u64_decimal(builder, trace->lock_seq);
+        append_char(builder, '/');
+        append_i32_decimal(builder, trace->lock_result);
+        append_string(builder, " predecessor=");
+        append_u64_decimal(builder, trace->predecessor_seq);
+        append_char(builder, '/');
+        append_i32_decimal(builder, trace->predecessor_reason);
+        append_char(builder, '/');
+        append_i32_decimal(builder, trace->predecessor_invoked);
+        append_string(builder, " publish=");
+        append_u64_decimal(builder, trace->publish_seq);
+        append_char(builder, '/');
+        append_hex32(builder, trace->classified_pc);
+        append_char(builder, '/');
+        append_i32_decimal(builder, trace->signal);
+        append_char(builder, '/');
+        append_i32_decimal(builder, trace->synthetic_trap);
+        append_char(builder, '/');
+        append_i32_decimal(builder, trace->breakpoint_match);
+        append_string(builder, " stop=");
+        append_u64_decimal(builder, trace->stop_begin_seq);
+        append_char(builder, '/');
+        append_i32_decimal(builder, trace->stop_begin_result);
+        append_char(builder, '/');
+        append_u64_decimal(builder, trace->stopped_operation_seq);
+        append_char(builder, '/');
+        append_i32_decimal(builder, trace->stopped_operation_result);
+        append_string(builder, " loop=");
+        append_u64_decimal(builder, trace->main_loop_seq);
+        append_string(builder, " packet=");
+        append_u64_decimal(builder, trace->packet_wait_seq);
+        append_char(builder, '/');
+        append_u64_decimal(builder, trace->socket_poll_seq);
+        append_char(builder, '/');
+        append_u64_decimal(builder, trace->socket_wake_seq);
+        append_char(builder, '/');
+        append_i32_decimal(builder, trace->socket_wake_result);
+        append_char(builder, '/');
+        append_u64_decimal(builder, trace->packet_ready_seq);
+        append_char(builder, '/');
+        append_u64_decimal(builder, trace->status_query_seq);
+        append_string(builder, " reply=");
+        append_u64_decimal(builder, trace->reply_attempt_seq);
+        append_char(builder, '/');
+        append_u64_decimal(builder, trace->reply_socket_poll_seq);
+        append_char(builder, '/');
+        append_u64_decimal(builder, trace->reply_socket_wake_seq);
+        append_char(builder, '/');
+        append_i32_decimal(
+            builder, trace->reply_socket_wake_result);
+        append_char(builder, '/');
+        append_u64_decimal(builder, trace->reply_result_seq);
+        append_char(builder, '/');
+        append_i32_decimal(builder, trace->reply_result);
+        append_string(builder, " exit=");
+        append_u64_decimal(builder, trace->exit_seq);
+        append_char(builder, '\n');
+    }
 }
 
 static void append_thread_flags(

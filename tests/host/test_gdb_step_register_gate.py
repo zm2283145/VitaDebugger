@@ -228,6 +228,121 @@ class StepRegisterGateTests(unittest.TestCase):
         self.assertEqual(clean.emergency_calls, 1)
         self.assertFalse(clean.process.killed)
 
+    def test_stop_timeout_is_distinct_from_other_mi_failures(self):
+        class FakeMi:
+            token = 3
+
+            def command(self, command):
+                self.command_seen = command
+                return "3^running", []
+
+            def wait_for(self, prefix):
+                self.prefix_seen = prefix
+                raise GATE.vfp.GateFailure("timed out waiting for GDB/MI")
+
+        client = FakeMi()
+        with self.assertRaisesRegex(
+            GATE.StopWaitTimeout, "no \\*stopped"
+        ):
+            GATE.wait_for_stop(client, "-exec-continue")
+        self.assertEqual(client.command_seen, "-exec-continue")
+        self.assertEqual(client.prefix_seen, "*stopped")
+
+    def test_stop_timeout_skips_mi_delete_and_preserves_subtype(self):
+        diagnostic = {}
+        checkpoints = []
+        client = type("FakeMi", (), {"transcript": []})()
+        symbols = GATE.LiveSymbols(
+            0x81001000, 0x20, 0x24, 0x100, 0x30, 0x34, 0x104
+        )
+        with (
+            patch.object(
+                GATE,
+                "insert_breakpoint",
+                return_value=GATE.Breakpoint("7", "step_target"),
+            ),
+            patch.object(GATE, "console_command", return_value="status\n"),
+            patch.object(
+                GATE,
+                "wait_for_stop",
+                side_effect=GATE.StopWaitTimeout("no stop"),
+            ),
+            patch.object(GATE, "delete_breakpoint") as delete,
+        ):
+            with self.assertRaises(GATE.StopWaitTimeout):
+                GATE.test_hidden_breakpoint_step_over(
+                    client, symbols, diagnostic, True,
+                    lambda: checkpoints.append(dict(diagnostic)),
+                )
+        delete.assert_not_called()
+        self.assertEqual(
+            diagnostic["breakpoint_delete"],
+            "SKIPPED_AFTER_STOP_TIMEOUT",
+        )
+        self.assertTrue(checkpoints)
+
+    def test_post_failure_diagnostic_persists_raw_state_before_detach(self):
+        class FakeRsp:
+            def __init__(self):
+                self.requests = []
+                self.closed = False
+
+            def request(self, payload):
+                self.requests.append(payload)
+                return {
+                    b"qOffsets": b"Text=20000;Data=20000;Bss=20000",
+                    b"?": b"T05thread:40010003;",
+                    b"D": b"OK",
+                }[payload]
+
+            def close(self):
+                self.closed = True
+
+        client = FakeRsp()
+        result = {}
+        checkpoints = []
+        with (
+            patch.object(GATE, "connect_rsp", return_value=client),
+            patch.object(GATE.time, "sleep"),
+            patch.object(
+                GATE.monitor,
+                "monitor_request",
+                side_effect=[
+                    "module ranges\n",
+                    "software-breakpoints: 0\nstop-trace newest-first:\n",
+                ],
+            ),
+            patch.object(
+                GATE.monitor,
+                "collect_threads",
+                return_value=[0x40010003],
+            ),
+        ):
+            returned = GATE.collect_post_failure_diagnostics(
+                "vita.test", 1234, 5.0, 1.0, True,
+                result, lambda: checkpoints.append(dict(result))
+            )
+        self.assertIs(returned, result)
+        self.assertEqual(
+            result["qOffsets"], "Text=20000;Data=20000;Bss=20000"
+        )
+        self.assertIn("stop-trace", result["status"])
+        self.assertEqual(result["detach_reply"], "OK")
+        self.assertEqual(client.requests, [b"qOffsets", b"?", b"D"])
+        self.assertTrue(client.closed)
+        self.assertGreaterEqual(len(checkpoints), 7)
+        self.assertEqual(
+            checkpoints[0]["phase"],
+            "waiting_for_abandoned_client_cleanup",
+        )
+
+    def test_transcript_identity_retains_exact_records(self):
+        evidence = GATE.transcript_identity(["1^running", "*running"])
+        self.assertEqual(
+            evidence["mi_records"], ["1^running", "*running"]
+        )
+        self.assertEqual(evidence["mi_record_count"], 2)
+
     def test_physical_udf_and_error_detach_gate_are_byte_exact(self):
         with patch.object(GATE, "read_memory", return_value=b"\x00\xde"):
             GATE.require_physical_udf(object(), "thumb", 0x1000, 2)
