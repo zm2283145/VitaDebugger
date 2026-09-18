@@ -41,6 +41,8 @@ struct mock_platform {
     int fail_begin_access_call;
     int fail_retain_process;
     int fail_retain_thread;
+    int leak_process_on_failed_retain;
+    int leak_thread_on_failed_retain;
     int retry_release_call;
     int ambiguous_release_call;
     int fail_write_core_call;
@@ -154,7 +156,14 @@ static int retain_process(
     struct mock_platform* mock = (struct mock_platform*)context;
     mock->retain_process_calls++;
     if(mock->fail_retain_process)
+    {
+        if(mock->leak_process_on_failed_retain)
+        {
+            mock->process_held = 1;
+            *reference = mock->process_reference;
+        }
         return mock->fail_retain_process;
+    }
     if(owner_pid != mock->process_reference.guid || mock->process_held)
         return -302;
     mock->process_held = 1;
@@ -169,7 +178,14 @@ static int retain_thread(
     struct mock_platform* mock = (struct mock_platform*)context;
     mock->retain_thread_calls++;
     if(mock->fail_retain_thread)
+    {
+        if(mock->leak_thread_on_failed_retain)
+        {
+            mock->thread_held = 1;
+            *reference = mock->thread_reference;
+        }
         return mock->fail_retain_thread;
+    }
     if(target_guid != mock->thread_reference.guid || mock->thread_held)
         return -303;
     mock->thread_held = 1;
@@ -624,6 +640,69 @@ static void test_partial_retain_unwind(void)
           "invalid retained process/thread relation unwinds both references");
 }
 
+static void test_failed_retain_contract_quarantine(void)
+{
+    struct mock_platform mock = make_mock();
+    mock.fail_retain_process = -411;
+    mock.leak_process_on_failed_retain = 1;
+    struct vd_thread_mutation_provider_ops ops = make_ops(&mock);
+    struct vd_thread_mutation_provider provider = {0};
+    vdThreadMutationProviderInit(&provider, &ops);
+    struct vd_thread_mutation_session session;
+    vdThreadMutationInit(&session);
+    const struct vd_thread_mutation_identity owner = identity();
+    const struct vd_kernel_thread_mutation_begin_request begin =
+        begin_request(VD_KERNEL_THREAD_MUTATION_CORE);
+    struct vd_kernel_thread_mutation_handle handle;
+    check(vdThreadMutationBegin(
+              &session, &owner, &begin,
+              vdThreadMutationProviderBackend(&provider), &handle) == -411,
+          "process retain failure is returned unchanged");
+    const int releases_before = mock.release_calls;
+    check(!vdThreadMutationIsActive(&session) &&
+              provider.acquisition_uncertain &&
+              provider.release_uncertain && provider.release_pending &&
+              mock.process_held &&
+              vdThreadMutationSupportedBanks(
+                  vdThreadMutationProviderBackend(&provider)) == 0 &&
+              vdThreadMutationProviderDrain(&provider) == -411 &&
+              vdThreadMutationProviderPrepareUnload(&provider) == -411 &&
+              mock.release_calls == releases_before,
+          "failed process retain with output is quarantined without release");
+
+    mock = make_mock();
+    mock.fail_retain_thread = -412;
+    mock.leak_thread_on_failed_retain = 1;
+    ops = make_ops(&mock);
+    provider = (struct vd_thread_mutation_provider){0};
+    vdThreadMutationProviderInit(&provider, &ops);
+    vdThreadMutationInit(&session);
+    check(vdThreadMutationBegin(
+              &session, &owner, &begin,
+              vdThreadMutationProviderBackend(&provider), &handle) == -412,
+          "thread retain failure is returned unchanged");
+    check(provider.acquisition_uncertain &&
+              mock.process_held && mock.thread_held &&
+              mock.release_calls == 0 &&
+              vdThreadMutationProviderDrain(&provider) == -412,
+          "failed thread retain with output quarantines both references");
+
+    mock = make_mock();
+    mock.thread_reference.object = MOCK_PROCESS_OBJECT;
+    ops = make_ops(&mock);
+    provider = (struct vd_thread_mutation_provider){0};
+    vdThreadMutationProviderInit(&provider, &ops);
+    vdThreadMutationInit(&session);
+    check(vdThreadMutationBegin(
+              &session, &owner, &begin,
+              vdThreadMutationProviderBackend(&provider), &handle) ==
+              VD_KERNEL_ERROR_MUTATION_TARGET &&
+              provider.acquisition_uncertain &&
+              mock.process_held && mock.thread_held &&
+              mock.release_calls == 0,
+          "successful retain with aliased objects is fatally quarantined");
+}
+
 static void test_rollback_and_transient_liveness(void)
 {
     struct mock_platform mock = make_mock();
@@ -782,6 +861,34 @@ static void test_target_exit_and_unknown_state(void)
               core_same(&mock.core, &original) &&
               !vdThreadMutationIsActive(&session),
           "later exact-target proof completes deferred restoration");
+
+    mock = make_mock();
+    ops = make_ops(&mock);
+    provider = (struct vd_thread_mutation_provider){0};
+    vdThreadMutationProviderInit(&provider, &ops);
+    backend = vdThreadMutationProviderBackend(&provider);
+    vdThreadMutationInit(&session);
+    check(vdThreadMutationBegin(&session, &owner, &begin, backend,
+                                &handle) == 0,
+          "begin parent-change fixture");
+    write = write_request(&handle, VD_KERNEL_THREAD_MUTATION_CORE, 0u,
+                          0x10203040u, 0u);
+    check(vdThreadMutationStage(&session, &owner, &write, backend) == 0,
+          "stage before retained parent change");
+    mock.relationship_valid = 0;
+    const int parent_change_writes = mock.write_core_calls;
+    check(vdThreadMutationCleanup(&session, owner.owner_pid,
+                                  owner.stop_token, backend) ==
+              VD_KERNEL_ERROR_MUTATION_RESTORE &&
+              vdThreadMutationIsActive(&session) &&
+              mock.write_core_calls == parent_change_writes &&
+              mock.process_held && mock.thread_held,
+          "parent change is unknown and preserves the stopped restore lease");
+    mock.relationship_valid = 1;
+    check(vdThreadMutationCleanup(&session, owner.owner_pid,
+                                  owner.stop_token, backend) == 0 &&
+              !vdThreadMutationIsActive(&session),
+          "watchdog retry restores after the parent relation is re-proven");
 }
 
 static void test_release_drain(void)
@@ -852,14 +959,76 @@ static void test_release_drain(void)
           "reinitialization cannot discard an ambiguous cleanup obligation");
 }
 
+static void test_disconnect_timeout_watchdog_and_unload(void)
+{
+    struct mock_platform mock = make_mock();
+    struct vd_thread_mutation_provider_ops ops = make_ops(&mock);
+    struct vd_thread_mutation_provider provider = {0};
+    vdThreadMutationProviderInit(&provider, &ops);
+    const struct vd_thread_mutation_backend* backend =
+        vdThreadMutationProviderBackend(&provider);
+    struct vd_thread_mutation_session session;
+    vdThreadMutationInit(&session);
+    const struct vd_thread_mutation_identity owner = identity();
+    const struct vd_kernel_thread_mutation_begin_request begin =
+        begin_request(VD_KERNEL_THREAD_MUTATION_CORE);
+    struct vd_kernel_thread_mutation_handle handle;
+    const struct vd_thread_registers original = mock.core;
+    check(vdThreadMutationBegin(&session, &owner, &begin, backend,
+                                &handle) == 0,
+          "begin disconnect-timeout fixture");
+    struct vd_kernel_thread_mutation_write_request write = write_request(
+        &handle, VD_KERNEL_THREAD_MUTATION_CORE, 4u, 0x55667788u, 0u);
+    check(vdThreadMutationStage(&session, &owner, &write, backend) == 0,
+          "stage one callee-saved register before disconnect");
+
+    check(vdThreadMutationProviderPrepareUnload(&provider) ==
+              VD_KERNEL_ERROR_MUTATION_BUSY &&
+              !vdThreadMutationProviderReady(&provider),
+          "plugin unload blocks admission and waits for the active lease");
+    mock.target_state = -1;
+    const int writes_before = mock.write_core_calls;
+    check(vdThreadMutationCleanup(&session, owner.owner_pid,
+                                  owner.stop_token, backend) ==
+              VD_KERNEL_ERROR_MUTATION_RESTORE &&
+              vdThreadMutationIsActive(&session) &&
+              mock.write_core_calls == writes_before,
+          "disconnect timeout with failed inventory keeps the target stopped");
+    mock.target_state = 1;
+    mock.retry_release_call = mock.release_calls + 1;
+    check(vdThreadMutationCleanup(&session, owner.owner_pid,
+                                  owner.stop_token, backend) == 0 &&
+              core_same(&mock.core, &original) &&
+              !vdThreadMutationIsActive(&session) &&
+              provider.release_pending && mock.thread_held &&
+              mock.process_held,
+          "watchdog restores exactly before quarantining a retained release");
+    check(vdThreadMutationProviderPrepareUnload(&provider) ==
+              VD_KERNEL_ERROR_MUTATION_RESTORE,
+          "unload remains blocked while retained cleanup is pending");
+    mock.retry_release_call = 0;
+    check(vdThreadMutationProviderDrain(&provider) == 0 &&
+              !mock.thread_held && !mock.process_held &&
+              vdThreadMutationProviderPrepareUnload(&provider) == 0 &&
+              !vdThreadMutationProviderReady(&provider) &&
+              vdThreadMutationSupportedBanks(backend) == 0,
+          "watchdog drain permits unload without re-enabling writes");
+    check(vdThreadMutationBegin(&session, &owner, &begin, backend,
+                                &handle) ==
+              VD_KERNEL_ERROR_MUTATION_UNSUPPORTED,
+          "terminal unload state rejects reconnect transactions");
+}
+
 int main(void)
 {
     test_binding_gate();
     test_exact_reference_core_and_vfp();
     test_partial_retain_unwind();
+    test_failed_retain_contract_quarantine();
     test_rollback_and_transient_liveness();
     test_target_exit_and_unknown_state();
     test_release_drain();
+    test_disconnect_timeout_watchdog_and_unload();
     if(failures)
         return 1;
     puts("PASS: verified-setter retained-target provider lifecycle");

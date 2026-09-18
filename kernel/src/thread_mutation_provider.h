@@ -157,6 +157,8 @@ struct vd_thread_mutation_provider {
     int release_pending;
     int release_retryable;
     int release_uncertain;
+    int acquisition_uncertain;
+    int shutdown_requested;
     int last_release_error;
 };
 
@@ -181,6 +183,17 @@ const struct vd_thread_mutation_backend* vdThreadMutationProviderBackend(
  * non-drainable quarantine.
  */
 int vdThreadMutationProviderDrain(
+    struct vd_thread_mutation_provider* provider);
+
+/*
+ * Permanently disable new transactions before the adapter/plugin unloads.
+ * The caller must serialize this with all provider entry points. A busy or
+ * cleanup error means the adapter must remain loaded so its callbacks and
+ * retained references stay valid. Retryable releases may still be drained
+ * after shutdown is requested; ambiguous acquisition/release effects are a
+ * non-drainable quarantine.
+ */
+int vdThreadMutationProviderPrepareUnload(
     struct vd_thread_mutation_provider* provider);
 
 int vdThreadMutationProviderReady(

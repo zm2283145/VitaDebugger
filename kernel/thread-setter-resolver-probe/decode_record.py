@@ -4,14 +4,13 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import struct
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-MAGIC = 0x56545352
-VERSION = 1
+MAGIC = 0x56545052
+VERSION = 2
 SIZE = 640
 SEGMENT_COUNT = 4
 TARGET_COUNT = 4
@@ -24,23 +23,24 @@ EXECUTE_PERMISSION = 1
 
 STATE_ATTEMPTED = 1
 STATE_KERNEL_ENTERED = 2
-STATE_COMPLETE = 3
+STATE_FIRMWARE_RECORDED = 3
+STATE_MODULE_RECORDED = 4
+STATE_TARGET_RECORDED = 5
+STATE_COMPLETE = 6
 
 RESULT_NAMES = {
     0: "PASS",
     -100: "not run",
     -1: "module lookup failed",
-    -2: "module info failed",
     -3: "module identity mismatch",
-    -4: "export table is unbounded",
     -5: "one or more exports missing",
-    -6: "export outside module",
-    -7: "export not executable",
-    -8: "code window unavailable",
 }
 STATE_NAMES = {
     STATE_ATTEMPTED: "loader armed",
     STATE_KERNEL_ENTERED: "kernel entered",
+    STATE_FIRMWARE_RECORDED: "firmware recorded",
+    STATE_MODULE_RECORDED: "module recorded",
+    STATE_TARGET_RECORDED: "target recorded",
     STATE_COMPLETE: "complete",
 }
 
@@ -53,7 +53,13 @@ FLAG_ALL_RESOLVED = 1 << 5
 FLAG_ALL_EXECUTABLE = 1 << 6
 FLAG_ALL_CAPTURED = 1 << 7
 FLAG_COMPLETE = 1 << 8
-RECORD_FLAGS_ALLOWED = (1 << 9) - 1
+RECORD_FLAGS_ALLOWED = (
+    FLAG_FIRMWARE_QUERY_OK
+    | FLAG_MODULE_LOOKUP_OK
+    | FLAG_MODULE_NAME_OK
+    | FLAG_ALL_RESOLVED
+    | FLAG_COMPLETE
+)
 
 TARGET_RESOLVED = 1 << 0
 TARGET_THUMB = 1 << 1
@@ -61,7 +67,7 @@ TARGET_IN_SEGMENT = 1 << 2
 TARGET_EXECUTABLE = 1 << 3
 TARGET_WINDOW_BOUNDED = 1 << 4
 TARGET_CAPTURED = 1 << 5
-TARGET_FLAGS_ALLOWED = (1 << 6) - 1
+TARGET_FLAGS_ALLOWED = TARGET_RESOLVED | TARGET_THUMB
 
 EXPECTED_MODULE = "SceKernelThreadMgr"
 EXPECTED_TARGETS = (
@@ -116,6 +122,7 @@ class Record:
     executable_count: int
     captured_count: int
     lookup_library_nid: int
+    completed_target_count: int
     segments: tuple[Segment, ...]
     targets: tuple[Target, ...]
 
@@ -160,20 +167,12 @@ def exports_bounded(record: Record) -> bool:
 def expected_result(record: Record) -> int:
     if record.module_lookup_result < 0:
         return -1
-    if record.module_info_result < 0:
-        return -2
     if record.module_name != EXPECTED_MODULE:
         return -3
-    if not exports_bounded(record):
-        return -4
+    if record.completed_target_count != TARGET_COUNT:
+        return NOT_RUN
     if record.resolved_count != TARGET_COUNT:
         return -5
-    if any(not (target.flags & TARGET_IN_SEGMENT) for target in record.targets):
-        return -6
-    if record.executable_count != TARGET_COUNT:
-        return -7
-    if record.captured_count != TARGET_COUNT:
-        return -8
     return 0
 
 
@@ -228,6 +227,7 @@ def parse_record_bytes(data: bytes, path: Path | None = None) -> Record:
         executable_count=u32(data, 104),
         captured_count=u32(data, 108),
         lookup_library_nid=u32(data, 112),
+        completed_target_count=u32(data, 116),
         segments=segments,
         targets=tuple(targets),
     )
@@ -242,7 +242,7 @@ def parse(path: Path) -> Record:
 def validate_semantics(record: Record, data: bytes) -> None:
     if record.lookup_library_nid != ANY_LIBRARY:
         raise ValueError("lookup library is not TAI_ANY_LIBRARY")
-    if any(data[116:128]) or any(data[592:640]):
+    if any(data[120:128]) or any(data[592:640]):
         raise ValueError("reserved bytes are nonzero")
     for target, expected in zip(record.targets, EXPECTED_TARGETS):
         if (target.kind, target.nid) != expected[:2]:
@@ -250,6 +250,12 @@ def validate_semantics(record: Record, data: bytes) -> None:
 
     if record.state in (STATE_ATTEMPTED, STATE_KERNEL_ENTERED):
         validate_attempt(record)
+    elif record.state in (
+        STATE_FIRMWARE_RECORDED,
+        STATE_MODULE_RECORDED,
+        STATE_TARGET_RECORDED,
+    ):
+        validate_progress(record)
     elif record.state == STATE_COMPLETE:
         validate_complete(record)
     else:
@@ -271,6 +277,7 @@ def validate_attempt(record: Record) -> None:
         or record.module_name
         or any((record.segment_count, record.resolved_count,
                 record.executable_count, record.captured_count))
+        or record.completed_target_count
         or any(any(asdict(segment).values()) for segment in record.segments)
     ):
         raise ValueError("attempt payload is not empty")
@@ -288,24 +295,21 @@ def validate_attempt(record: Record) -> None:
             raise ValueError("attempt target payload is not empty")
 
 
-def validate_complete(record: Record) -> None:
-    if record.flags & ~RECORD_FLAGS_ALLOWED or not (record.flags & FLAG_COMPLETE):
-        raise ValueError("complete record flags are invalid")
+def validate_firmware(record: Record) -> None:
     if record.firmware_result == NOT_ATTEMPTED:
         raise ValueError("firmware metadata query was not attempted")
-    if (record.firmware_result >= 0) != bool(record.flags & FLAG_FIRMWARE_QUERY_OK):
-        raise ValueError("firmware metadata flag disagrees with result")
     if (record.firmware_result >= 0 and record.firmware_version == 0) or (
         record.firmware_result < 0 and record.firmware_version != 0
     ):
         raise ValueError("firmware metadata payload is inconsistent")
+
+
+def validate_module(record: Record) -> None:
     if record.module_lookup_result == NOT_ATTEMPTED:
         raise ValueError("module lookup was not attempted")
-
     if record.module_lookup_result < 0:
         if (
-            record.module_info_result != NOT_ATTEMPTED
-            or record.module_id != 0
+            record.module_id != 0
             or record.module_nid != 0
             or record.exports_start != 0
             or record.exports_end != 0
@@ -313,58 +317,30 @@ def validate_complete(record: Record) -> None:
         ):
             raise ValueError("failed module lookup leaked partial metadata")
     elif (
-        record.module_info_result == NOT_ATTEMPTED
-        or record.module_id == 0
+        record.module_id <= 0
         or record.module_nid == 0
-        or record.exports_start == 0
-        or record.exports_end == 0
+        or not record.module_name
     ):
         raise ValueError("successful module lookup metadata is incomplete")
 
-    active_segments = 0
-    for segment in record.segments:
-        if not any(asdict(segment).values()):
-            continue
-        if (
-            segment.base == 0
-            or segment.memsz == 0
-            or segment.filesz > segment.memsz
-            or segment.base + segment.memsz > 0xFFFFFFFF
-        ):
-            raise ValueError("module segment is invalid")
-        active_segments += 1
-    if active_segments != record.segment_count:
-        raise ValueError("module segment count is inconsistent")
-    if record.module_info_result < 0 and active_segments != 0:
-        raise ValueError("failed module info contains segments")
-    if record.module_info_result >= 0 and (
-        record.module_lookup_result < 0 or active_segments == 0
-    ):
-        raise ValueError("successful module info has no segments")
 
-    discovery_mask = (
-        FLAG_MODULE_LOOKUP_OK
-        | FLAG_MODULE_INFO_OK
-        | FLAG_MODULE_NAME_OK
-        | FLAG_EXPORTS_BOUNDED
-    )
-    lookup_expected = record.flags & discovery_mask == discovery_mask
-    resolved = executable = captured = 0
-    for target in record.targets:
-        if target.flags & ~TARGET_FLAGS_ALLOWED:
-            raise ValueError("target flags are invalid")
-        if (target.lookup_result != NOT_ATTEMPTED) != lookup_expected:
+def validate_targets(record: Record, completed: int) -> int:
+    resolved = 0
+    for index, target in enumerate(record.targets):
+        attempted = index < completed
+        if (target.lookup_result != NOT_ATTEMPTED) != attempted:
             raise ValueError("target lookup lifecycle is inconsistent")
-        if target.lookup_result < 0:
-            if (
-                target.flags
-                or target.raw_address
-                or target.code_address
-                or target.segment_index != -1
-                or target.segment_offset
-                or target.code_size
-                or any(target.code)
-            ):
+        if target.flags & ~(TARGET_RESOLVED | TARGET_THUMB):
+            raise ValueError("target has forbidden trust or capture flags")
+        if (
+            target.segment_index != -1
+            or target.segment_offset
+            or target.code_size
+            or any(target.code)
+        ):
+            raise ValueError("non-dereferencing target contains code metadata")
+        if not attempted or target.lookup_result < 0:
+            if target.flags or target.raw_address or target.code_address:
                 raise ValueError("failed target lookup contains payload")
             continue
         if (
@@ -376,55 +352,71 @@ def validate_complete(record: Record) -> None:
         ):
             raise ValueError("resolved target address is inconsistent")
         resolved += 1
-        if not (target.flags & TARGET_IN_SEGMENT):
-            if (
-                target.segment_index != -1
-                or target.segment_offset
-                or target.flags & (TARGET_EXECUTABLE | TARGET_WINDOW_BOUNDED | TARGET_CAPTURED)
-                or target.code_size
-                or any(target.code)
-            ):
-                raise ValueError("out-of-module target contains code metadata")
-            continue
-        if not 0 <= target.segment_index < SEGMENT_COUNT:
-            raise ValueError("target segment index is invalid")
-        segment = record.segments[target.segment_index]
-        if (
-            target.segment_offset >= segment.memsz
-            or target.code_address != segment.base + target.segment_offset
-        ):
-            raise ValueError("target segment mapping is invalid")
-        expected_executable = bool(segment.permissions & EXECUTE_PERMISSION)
-        if bool(target.flags & TARGET_EXECUTABLE) != expected_executable:
-            raise ValueError("target executable flag disagrees with segment")
-        if expected_executable:
-            executable += 1
-        expected_window = expected_executable and range_within(
-            target.code_address, CODE_BYTES, segment.base, segment.memsz
-        )
-        if bool(target.flags & TARGET_WINDOW_BOUNDED) != expected_window:
-            raise ValueError("target code-window flag is inconsistent")
-        if target.flags & TARGET_CAPTURED:
-            if not expected_window or target.code_size != CODE_BYTES:
-                raise ValueError("captured target window is invalid")
-            captured += 1
-        elif target.code_size or any(target.code):
-            raise ValueError("uncaptured target contains code bytes")
-
-    if (record.resolved_count, record.executable_count, record.captured_count) != (
-        resolved,
-        executable,
-        captured,
-    ):
+    if record.resolved_count != resolved:
         raise ValueError("target counters are inconsistent")
+    return resolved
+
+
+def validate_common_prerequisite(record: Record) -> None:
+    if (
+        record.module_info_result != NOT_ATTEMPTED
+        or record.segment_count
+        or record.executable_count
+        or record.captured_count
+        or any(any(asdict(segment).values()) for segment in record.segments)
+    ):
+        raise ValueError("prerequisite record contains dereference metadata")
+
+
+def validate_progress(record: Record) -> None:
+    if record.result != NOT_RUN or record.flags:
+        raise ValueError("progress result or flags are invalid")
+    validate_common_prerequisite(record)
+    validate_firmware(record)
+    if record.state == STATE_FIRMWARE_RECORDED:
+        if (
+            record.completed_target_count
+            or record.module_lookup_result != NOT_ATTEMPTED
+            or record.module_id
+            or record.module_nid
+            or record.exports_start
+            or record.exports_end
+            or record.module_name
+        ):
+            raise ValueError("firmware checkpoint contains later metadata")
+    else:
+        validate_module(record)
+    if record.state == STATE_TARGET_RECORDED:
+        if not 1 <= record.completed_target_count <= TARGET_COUNT:
+            raise ValueError("target checkpoint count is invalid")
+    elif record.completed_target_count:
+        raise ValueError("pre-target checkpoint has a target count")
+    validate_targets(record, record.completed_target_count)
+
+
+def validate_complete(record: Record) -> None:
+    forbidden_flags = (
+        FLAG_MODULE_INFO_OK
+        | FLAG_EXPORTS_BOUNDED
+        | FLAG_ALL_EXECUTABLE
+        | FLAG_ALL_CAPTURED
+    )
+    if (
+        record.flags & ~RECORD_FLAGS_ALLOWED
+        or record.flags & forbidden_flags
+        or not (record.flags & FLAG_COMPLETE)
+        or record.completed_target_count != TARGET_COUNT
+    ):
+        raise ValueError("complete record flags are invalid")
+    validate_common_prerequisite(record)
+    validate_firmware(record)
+    validate_module(record)
+    resolved = validate_targets(record, TARGET_COUNT)
     checks = (
         (FLAG_ALL_RESOLVED, resolved == TARGET_COUNT),
-        (FLAG_ALL_EXECUTABLE, executable == TARGET_COUNT),
-        (FLAG_ALL_CAPTURED, captured == TARGET_COUNT),
+        (FLAG_FIRMWARE_QUERY_OK, record.firmware_result >= 0),
         (FLAG_MODULE_LOOKUP_OK, record.module_lookup_result >= 0),
-        (FLAG_MODULE_INFO_OK, record.module_info_result >= 0),
         (FLAG_MODULE_NAME_OK, record.module_name == EXPECTED_MODULE),
-        (FLAG_EXPORTS_BOUNDED, exports_bounded(record)),
     )
     for flag, expected in checks:
         if bool(record.flags & flag) != expected:
@@ -455,14 +447,7 @@ def format_reported_firmware(value: int) -> str:
 
 
 def fingerprint(record: Record) -> str | None:
-    if record.state != STATE_COMPLETE or record.captured_count != TARGET_COUNT:
-        return None
-    digest = hashlib.sha256()
-    digest.update(struct.pack("<I", record.module_nid))
-    for target in record.targets:
-        digest.update(struct.pack("<3I", target.nid, target.code_address, target.flags))
-        digest.update(target.code)
-    return digest.hexdigest()
+    return None
 
 
 def extract(record: Record, directory: Path, actual_baseline: str) -> None:
@@ -471,11 +456,7 @@ def extract(record: Record, directory: Path, actual_baseline: str) -> None:
     directory.mkdir(parents=True, exist_ok=True)
     targets_json = []
     for target, (_kind, _nid, label) in zip(record.targets, EXPECTED_TARGETS):
-        if not (target.flags & TARGET_CAPTURED) or target.code_size != CODE_BYTES:
-            continue
         mode = "thumb" if target.flags & TARGET_THUMB else "arm"
-        filename = f"{label}-{target.nid:08x}-{mode}.bin"
-        (directory / filename).write_bytes(target.code)
         targets_json.append(
             {
                 "name": label,
@@ -484,11 +465,11 @@ def extract(record: Record, directory: Path, actual_baseline: str) -> None:
                 "raw_address": f"0x{target.raw_address:08X}",
                 "code_address": f"0x{target.code_address:08X}",
                 "instruction_set": mode,
-                "segment_index": target.segment_index,
-                "segment_offset": f"0x{target.segment_offset:X}",
-                "code_size": target.code_size,
-                "code_sha256": hashlib.sha256(target.code).hexdigest(),
-                "file": filename,
+                "address_is_authenticated": False,
+                "address_was_dereferenced": False,
+                "code_size": 0,
+                "code_sha256": None,
+                "file": None,
             }
         )
     metadata = {
@@ -517,6 +498,7 @@ def extract(record: Record, directory: Path, actual_baseline: str) -> None:
             if any(asdict(segment).values())
         ],
         "fixed_code_fingerprint_sha256": fingerprint(record),
+        "fingerprint_status": "unresolved; v2 captures no code bytes",
         "targets": targets_json,
     }
     (directory / "metadata.json").write_text(
@@ -579,36 +561,28 @@ def main() -> int:
             f"exports=0x{record.exports_start:08X}-0x{record.exports_end:08X} "
             f"library=0x{record.lookup_library_nid:08X}"
         )
-        print(
-            f"resolved/executable/captured={record.resolved_count}/"
-            f"{record.executable_count}/{record.captured_count} of {TARGET_COUNT}"
-        )
+        print(f"resolved={record.resolved_count} of {TARGET_COUNT} [presence only]")
         for target, (_kind, _nid, label) in zip(record.targets, EXPECTED_TARGETS):
             mode = "Thumb" if target.flags & TARGET_THUMB else "ARM"
-            code_hash = hashlib.sha256(target.code).hexdigest()[:16]
             print(
                 f"{label:8} nid=0x{target.nid:08X} lookup={target.lookup_result} "
                 f"raw=0x{target.raw_address:08X} code=0x{target.code_address:08X} "
-                f"seg={target.segment_index} flags=0x{target.flags:02X} "
-                f"sha256={code_hash}... mode={mode}"
+                f"flags=0x{target.flags:02X} mode={mode} "
+                "[untrusted; not dereferenced]"
             )
-        print(f"fixed_code_fingerprint_sha256={fingerprint(record) or '-'}")
+        print("fixed_code_fingerprint_sha256=- [not collected]")
+    elif record.state == STATE_TARGET_RECORDED:
+        print(
+            f"durable_target_checkpoints={record.completed_target_count}/"
+            f"{TARGET_COUNT}"
+        )
 
     if args.extract_dir:
         try:
             extract(record, args.extract_dir, args.actual_baseline)
         except ValueError as error:
             raise SystemExit(f"cannot extract: {error}") from error
-        print(f"extracted bounded windows and metadata to {args.extract_dir}")
-        for target, (_kind, _nid, label) in zip(record.targets, EXPECTED_TARGETS):
-            if not (target.flags & TARGET_CAPTURED):
-                continue
-            filename = next(args.extract_dir.glob(f"{label}-{target.nid:08x}-*.bin"))
-            mode = " -M force-thumb" if target.flags & TARGET_THUMB else ""
-            print(
-                "disassemble: arm-vita-eabi-objdump -D -b binary -m arm"
-                f"{mode} --adjust-vma=0x{target.code_address:08X} {filename}"
-            )
+        print(f"wrote non-dereferencing metadata to {args.extract_dir}")
     return 0
 
 

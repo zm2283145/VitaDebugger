@@ -1,150 +1,150 @@
 # Foreign-thread mutation provider
 
-Status: **host-only and fail-closed. No foreign-thread register setter has been
-verified safe on retail 3.65.** The production kernel companion continues to
-advertise zero writable foreign core/VFP banks.
+Status: **host-modeled and fail-closed. No foreign-thread register setter is
+verified safe on retail 3.65. Production advertises zero writable foreign core
+and VFP/NEON banks.**
 
-This layer connects the existing snapshot/stage/read-back/restore transaction
-to two capabilities that a future firmware-specific adapter must prove:
+The transaction/provider code models the safety contract a future
+firmware-specific adapter must satisfy. It does not cast a provisional NID,
+infer a function signature, write an internal thread-object field, or bind the
+host fake to the production kernel companion.
 
-1. an immutable, authenticated setter/getter binding; and
-2. retained references to the exact process and thread objects for the entire
-   transaction.
+## Evidence ledger
 
-It does not guess a firmware prototype, cast a provisional NID, inspect or
-write inferred thread-object fields, or make either writable bank available in
-`kernel/src/main.c`.
+Evidence was rechecked against the installed `C:\vitasdk` tree and repository
+history. The table separates declarations from unresolved hypotheses.
 
-## Current evidence boundary
+| Item | Strongest evidence | Established | Unresolved |
+| --- | --- | --- | --- |
+| core getter | `arm-vita-eabi/include/psp2kern/kernel/threadmgr/debugger.h`; `share/vita-headers/db/360/SceKernelThreadMgr.yml` | `int ksceKernelGetThreadCpuRegisters(SceUID, SceThreadCpuRegisters *)`; NID `0x5022689D`; `SceThreadCpuRegisters` size 0x90; two 0x48 entries; header says target must be suspended; zero success / negative error | Header warns the two entries may be current/exception rather than user/kernel; it does not define a setter contract |
+| VFP getter | same header/database | `int ksceKernelGetVfpRegisterForDebugger(SceUID, void *)`; NID `0x5CDE387A` | Public pointer is untyped; getter does not establish a write ABI or lazy-VFP ownership contract |
+| general core setter | installed headers/database search | No `ksceKernelSetThreadCpuRegisters` declaration or public kernel NID was found | Prototype, NID, context size/alignment, writable fields, attributes, process boundary, suspension contract, return semantics, firmware identity, and code fingerprint |
+| provisional core/VFP NIDs | repository history only | `0x64E89DE9` and `0x49A0B679` are fixed hypotheses in the disposable probe | Both are absent from the installed VitaSDK database; no signature or retail 3.65 implementation evidence exists |
+| VM-context setters | `share/vita-headers/db/360/SceLibKernel.yml` and `SceKernelThreadMgr.yml` | Names/NIDs `sceKernelSetThreadContextForVM` / `0x27E6DEDE` and `_sceKernelSetThreadContextForVM` / `0xD4785C41` exist in the 3.60 catalog | No installed header defines either prototype or context structure. VM-thread specialization, size/alignment, writable fields, preconditions, return semantics, kernel-call suitability, 3.65 identity, and VFP coverage are unknown |
+| object retain/release | `psp2kern/kernel/sysmem/uid_guid.h` | `ksceGUIDReferObject`, `ksceGUIDReferObjectWithClass`, and `ksceGUIDReleaseObject`; refer increments and release decrements an internal reference count | Release accepts a numeric GUID, not the retained pointer; failure effects and behavior after close/reuse are undocumented |
+| PUID/GUID conversion | `psp2kern/kernel/sysmem/uid_puid.h` | `kscePUIDOpenByGUID`, `kscePUIDClose`, and `kscePUIDtoGUID` declarations | No generation/non-reuse guarantee makes a later integer UID lookup equivalent to the originally retained object |
+| process/thread class | `psp2kern/kernel/processmgr.h`, `threadmgr/misc.h` | Process class returns `SceClass *`; thread UID class query returns `SceKernelIdListType` | No documented thread `SceClass *` is available for an atomic class-qualified retain |
+| retail fingerprints | preserved v1 failure record described in the prerequisite runbook | v1 reached `kernel entered`; source review proves no candidate getter/setter was invoked | No valid `SceKernelThreadMgr` module NID, segment map, candidate address, code bytes, or fingerprint was collected |
 
-VitaSDK declares the read-only
-`ksceKernelGetThreadCpuRegisters(SceUID, SceThreadCpuRegisters *)` and
-`ksceKernelGetVfpRegisterForDebugger(SceUID, void *)` functions. It does not
-declare a corresponding general foreign-thread core or VFP setter.
+The VitaSDK database directory name `360` identifies catalog provenance, not
+proof that the same private contract exists on retail 3.65. Emulator names,
+unimplemented stubs, Dev Wiki internal labels, and SGI-style
+`setCpuRegisterForDebugger` leads do not supply a verified public
+signature/NID. They are not promotion evidence.
 
-The provisional `0x64E89DE9` core-set and `0x49A0B679` VFP-set NIDs are absent
-from the installed VitaSDK database, have no established retail 3.65 prototype,
-and have never been invoked by this project. The paused resolver's newest valid
-hardware journal reached only `kernel entered`; the Vita powered off before its
-read-only metadata collector completed. That result proves neither candidate
-exists nor that either candidate is callable.
+The exact setter prototype/ABI requested by the roadmap is therefore
+**unresolved**. Since setter and lifetime prerequisites are both unproven, this
+change intentionally implements no mutation gate.
 
-`sceKernelSetThreadContextForVM` (`0x27E6DEDE`) and its internal
-`_sceKernelSetThreadContextForVM` (`0xD4785C41`) remain static-analysis leads.
-Their exact structures, thread-attribute restrictions, suspension contract,
-process boundary, return behavior, and VFP coverage are not established for
-retail 3.65. An emulator declaration or unimplemented emulator stub is not
-hardware verification.
+## Provider lifetime contract
 
-The pinned KVDB reference likewise leaves write-register support unavailable
-because the public SDK has no supported setter. KuBridge provides fault-context
-access for the current exception thread, not an arbitrary retained
-foreign-thread setter.
+`kernel/src/thread_mutation_provider.c` requires an adapter to:
 
-## Provider contract
-
-`kernel/src/thread_mutation_provider.c` is deliberately independent of Vita
-imports. A firmware adapter has to supply callbacks which:
-
-- resolve a fixed allowlist of functions and authenticate the complete module
-  and code fingerprint;
-- keep that exact binding pinned or otherwise stable and report replacement,
-  unload, or uncertainty;
-- make each process/thread retain operation atomic, unwind a retained process if
-  the following thread retain fails, and return opaque object plus generation
-  identities;
-- classify the retained pair as alive and debug-suspended, definitely
+- authenticate a fixed allowlist and complete module/code fingerprint;
+- keep the binding pinned and report replacement, unload, or uncertainty;
+- atomically retain the exact process and thread objects and return opaque
+  object plus nonzero generation identities;
+- unwind a retained process if the following thread retain fails;
+- classify the exact retained pair as alive/debug-suspended, definitely
   destroyed, or unknown without re-resolving the integer UID;
-- acquire adapter-owned serialization that atomically revalidates and pins the
-  binding, retained objects, parent relation, and suspended state across each
-  snapshot or setter call;
-- snapshot and set only through the authenticated binding and exact retained
-  thread reference; and
-- release the thread reference before the process reference.
+- atomically revalidate and pin binding, objects, parent relation, and suspend
+  state around every snapshot/setter call; and
+- release thread before process with explicit exactly-once semantics.
 
-The generic provider rejects missing addresses, zero fingerprints, unknown
-bank bits, missing callbacks, malformed references, a process/thread object
-alias, stale ownership, uncertain target state, and uncertain binding state.
-It disables all writable banks after binding/target uncertainty or a release
-failure. Provider storage is zero-initialized once; reinitialization cannot
-erase an active or quarantined lease.
+The provider rejects malformed identities, object aliasing, missing callbacks,
+unknown bank bits, zero fingerprints, stale ownership, uncertain parent/target
+state, and uncertain binding state. The original GUID is audit metadata only;
+an adapter must perform all access through the retained opaque object.
 
-Release results have explicit exactly-once semantics. Zero means released; the
-positive `VD_THREAD_REFERENCE_RELEASE_RETAINED` result means the adapter proves
-the reference is still held and a later retry is safe. A negative result has an
-unknown effect: the provider quarantines it and `vdThreadMutationProviderDrain()`
-will not blindly retry. A future Vita adapter must establish which result, if
-any, can safely represent each `ksceGUIDReleaseObject` failure. No new
-transaction is admitted and the adapter must not unload while either quarantine
-remains. An impossible release-identity mismatch is treated as a fatal invariant
-violation rather than guessing which transaction owns the references.
+Retention failures also obey a strict output contract: a negative retain result
+must leave its output entirely zero and hold no reference. If a callback returns
+failure with a nonzero reference, the provider cannot know whether the retain
+took effect. It now enters a permanent acquisition quarantine, does not guess
+whether to release, disables writable banks, rejects drain, and blocks unload.
 
-The provider deliberately supplies both the original GUID and the retained
-opaque reference. The GUID is for audit and ownership matching; an adapter must
-never use it to look up a fresh object for a later snapshot, write, or rollback.
-The interface therefore lets a correct adapter resist UID reuse, but cannot
-make an incorrect callback honor the retained object. Hardware promotion must
-verify that every concrete callback uses the opaque reference.
+Release results remain explicit:
 
-## Retained-object lead, not a completed adapter
+- `VD_THREAD_REFERENCE_RELEASED`: definite release;
+- `VD_THREAD_REFERENCE_RELEASE_RETAINED`: reference is definitely still held
+  and a later retry is safe; or
+- negative: effect unknown, so no blind retry is permitted.
 
-VitaSDK exposes `ksceGUIDReferObject`,
-`ksceGUIDReferObjectWithClass`, `ksceGUIDReleaseObject`, and
-`ksceKernelGetUIDProcessClass`. A future adapter could plausibly class-retain a
-process. For a thread, the available `ksceKernelGetThreadmgrUIDClass()` returns
-an enum rather than a documented thread `SceClass *`, leaving only a type check
-followed by generic GUID retain. The headers do not establish that this
-two-operation sequence is race-free across close/reuse, and release is by GUID
-rather than by object pointer. Therefore these declarations are sufficient for
-the host-side model, but not sufficient to enable a Vita backend.
+A retryable release keeps both admission and unload blocked until
+`vdThreadMutationProviderDrain()` succeeds. An ambiguous release is
+non-drainable. Reinitialization cannot erase an active lease or quarantine.
+
+`vdThreadMutationProviderPrepareUnload()` is terminal and must be called under
+the adapter's owner serialization. It blocks new transactions immediately. If
+a transaction is active, the adapter and watchdog must remain loaded while the
+existing exact-target cleanup runs. Pending retained cleanup or any ambiguous
+acquisition/release blocks unload; successful shutdown never re-enables a bank.
+
+## Lifecycle outcomes
+
+| Event | Required classification/action |
+| --- | --- |
+| thread/process exit proven on retained object | Retire obsolete restore without writing, then release thread before process |
+| close, integer UID reuse, or UID churn | Never redirect through the new UID mapping; use retained object only |
+| parent relation changes | Unknown, not destroyed; keep stopped and retry |
+| inventory or suspend-state query fails | Unknown; preserve restore obligation and disable admission |
+| disconnect/timeout | Watchdog performs exact-target cleanup; no resume before restore or proven destruction |
+| release definitely retained | Quarantine and bounded explicit retry |
+| release effect unknown | Permanent quarantine; no retry or unload |
+| plugin unload | Terminal admission stop; fail unload while lease/reference/quarantine remains |
+
+These rules are modeled with host fakes. They do not prove that Vita's public
+GUID APIs can implement the required atomic contract. In particular, release by
+numeric GUID remains the close/reuse blocker for a production adapter.
+
+## Non-mutating prerequisite gate
+
+The retired v1 resolver powered off during its all-at-once metadata/code
+collector. The replacement v2 title is new title `VDCP00009`, version `02.00`,
+with new journal paths. It durably checkpoints firmware metadata, module
+identity, and each of four fixed NID lookups separately.
+
+v2 never invokes or dereferences a resolved pointer and captures no code bytes.
+Its addresses are explicitly unauthenticated presence observations. A v2
+`PASS` therefore cannot populate `vd_thread_setter_binding`, cannot establish a
+fingerprint, and cannot enable a writable bank. See
+[`kernel/thread-setter-resolver-probe/README.md`](../kernel/thread-setter-resolver-probe/README.md)
+for its exact ABI and hardware runbook.
 
 ## Host validation
-
-Run the transaction and provider suites from the repository root:
 
 ```powershell
 C:\msys64\usr\bin\make.exe `
   host-test-kernel-thread-mutation `
   host-test-kernel-thread-mutation-provider `
+  host-test-thread-setter-resolver-record `
   HOST_CC=C:/msys64/mingw64/bin/gcc.exe
 ```
 
-The provider suite covers:
-
-- authenticated binding acceptance and malformed/unverified fail-closed cases;
-- exact retained process/thread references for core and D32 VFP operations;
-- preservation of the exact retained reference after the integer UID mapping
-  changes (with the concrete adapter still responsible for using it);
-- partial process/thread acquisition unwind;
-- provisional-write read-back failure and exact rollback;
-- transient binding and target-state uncertainty without unsafe cleanup;
-- independently proven thread exit and process exit;
-- thread-before-process release order; and
-- definitely-retained release quarantine plus explicit cleanup retry;
-- ambiguous fail-after-effect release quarantine without a blind retry; and
-- one-shot initialization that cannot erase active or pending cleanup state.
-
-These are fake-platform tests. They validate orchestration and invariants, not
-any undocumented Vita function or kernel object-lifetime contract.
+The suites cover snapshot/stage/read-back/exact rollback, core/VFP separation,
+partial retain unwind, retain-contract violations, UID mapping churn,
+process/thread exit, parent changes, forced inventory uncertainty, timeout and
+disconnect cleanup, binding uncertainty, ordered release, retryable and
+ambiguous release, watchdog retry/drain, terminal unload, and checkpoint record
+validation. They remain fake-platform tests.
 
 ## Remaining retail 3.65 promotion gate
 
-Before changing the zero-bank production backend:
+1. Run and preserve repeatable v2 presence samples after independent review.
+2. Through lawful static analysis, establish a real setter implementation,
+   exact prototype, structure size/alignment, writable fields, preconditions,
+   return semantics, and firmware/module/code fingerprints. Do not infer these
+   from a resolved address.
+3. Prove an atomic retained-object lifecycle on disposable hardware across
+   exit, close/reuse, UID reuse, parent changes, timeout, disconnect, release
+   uncertainty, watchdog retry, and plugin unload.
+4. Only after steps 2-3, create a separate default-off title that changes one
+   controlled callee-saved GPR (`r4` or `r5`) in a same-process,
+   debug-suspended disposable worker. Require read-back, exact restoration,
+   resume, detach/reconnect, timeout, exit, UID churn, forced inventory failure,
+   and watchdog recovery.
+5. Gate VFP/NEON independently. A core setter cannot be assumed to cover
+   D0-D31 or FPSCR; lazy VFP ownership keeps a cooperative in-thread trampoline
+   the safer lead.
 
-1. Replace the failed all-at-once resolver with separately reviewed, durable,
-   non-dereferencing rungs and obtain repeatable module/address fingerprints.
-2. Establish the exact setter prototype, structure size/alignment, writable
-   fields, preconditions, and return semantics through lawful static analysis.
-3. Prove the exact process/thread retain and release lifecycle in a disposable
-   read-only gate, including exit, close/reuse, parent relation, release order,
-   timeout, and plugin-unload behavior.
-4. First mutate one controlled callee-saved GPR in a disposable, same-process,
-   debug-suspended worker. Require read-back, exact restoration, resume,
-   detach, reconnect, timeout, thread exit, process exit, UID reuse, forced
-   inventory failure, and watchdog cleanup before advertising core writes.
-5. Gate VFP separately. Lazy VFP ownership makes a cooperative in-thread
-   trampoline the safer first experiment; a core setter must not be assumed to
-   cover D0-D31 or FPSCR.
-
-Any uncertainty keeps the target stopped and the writable capability bits
-clear. A resolved address alone is never a promotion result.
+Any uncertainty keeps the target stopped and all production writable
+capability bits clear.

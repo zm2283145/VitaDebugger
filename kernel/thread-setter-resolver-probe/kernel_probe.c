@@ -5,7 +5,6 @@
 #include <psp2kern/kernel/modulemgr.h>
 #include <taihen.h>
 
-#include "vd_module_info_lookup.h"
 #include "vd_thread_setter_resolver_record.h"
 
 /*
@@ -175,56 +174,37 @@ static void copy_module_name(char destination[28], const char source[27])
     destination[27] = '\0';
 }
 
-static void capture_segments(
-    struct vd_thread_setter_resolver_record* record,
-    const SceKernelModuleInfo* module)
+static void capture_firmware(
+    struct vd_thread_setter_resolver_record* record)
 {
-    uint32_t i;
-    record->segment_count = 0;
-    for(i = 0; i < VD_THREAD_SETTER_RESOLVER_SEGMENT_COUNT; ++i)
-    {
-        struct vd_thread_setter_resolver_segment* destination =
-            &record->segments[i];
-        const SceKernelSegmentInfo* source = &module->segments[i];
-        destination->base = (uint32_t)(uintptr_t)source->vaddr;
-        destination->memsz = (uint32_t)source->memsz;
-        destination->filesz = (uint32_t)source->filesz;
-        destination->permissions = (uint32_t)source->perms;
-        if(destination->base != 0 || destination->memsz != 0 ||
-           destination->filesz != 0 || destination->permissions != 0)
-            record->segment_count++;
-    }
+    SceKernelFwInfo firmware = {0};
+    firmware.size = sizeof(firmware);
+    record->firmware_result = ksceKernelGetSystemSwVersion(&firmware);
+    if(record->firmware_result >= 0)
+        record->firmware_version = firmware.version;
 }
 
-static int locate_code_segment(
-    const struct vd_thread_setter_resolver_record* record,
-    uint32_t code_address, uint32_t* segment_index,
-    uint32_t* segment_offset)
+static void capture_module(
+    struct vd_thread_setter_resolver_record* record)
 {
-    uint32_t i;
-    for(i = 0; i < VD_THREAD_SETTER_RESOLVER_SEGMENT_COUNT; ++i)
+    tai_module_info_t module = {0};
+    module.size = sizeof(module);
+    record->module_lookup_result = taiGetModuleInfoForKernel(
+        KERNEL_PID, VD_THREAD_SETTER_RESOLVER_MODULE, &module);
+    if(record->module_lookup_result >= 0)
     {
-        const struct vd_thread_setter_resolver_segment* segment =
-            &record->segments[i];
-        if(vd_thread_setter_resolver_range_within(
-               code_address, 1, segment->base, segment->memsz))
-        {
-            *segment_index = i;
-            *segment_offset = code_address - segment->base;
-            return 1;
-        }
+        record->module_id = (int32_t)module.modid;
+        record->module_nid = module.module_nid;
+        record->exports_start = (uint32_t)module.exports_start;
+        record->exports_end = (uint32_t)module.exports_end;
+        copy_module_name(record->module_name, module.name);
     }
-    return 0;
 }
 
 static void capture_target(
-    struct vd_thread_setter_resolver_record* record,
     struct vd_thread_setter_resolver_target* target)
 {
     uintptr_t address = 0;
-    uint32_t segment_index;
-    uint32_t segment_offset;
-    uint32_t i;
 
     target->lookup_result = module_get_export_func(
         KERNEL_PID, VD_THREAD_SETTER_RESOLVER_MODULE, TAI_ANY_LIBRARY,
@@ -242,110 +222,17 @@ static void capture_target(
     target->flags = VD_THREAD_SETTER_TARGET_FLAG_RESOLVED;
     if((target->raw_address & UINT32_C(1)) != 0)
         target->flags |= VD_THREAD_SETTER_TARGET_FLAG_THUMB;
-    if(!locate_code_segment(record, target->code_address, &segment_index,
-                            &segment_offset))
-        return;
-
-    target->segment_index = (int32_t)segment_index;
-    target->segment_offset = segment_offset;
-    target->flags |= VD_THREAD_SETTER_TARGET_FLAG_IN_SEGMENT;
-    const struct vd_thread_setter_resolver_segment* segment =
-        &record->segments[segment_index];
-    if((segment->permissions &
-        VD_THREAD_SETTER_RESOLVER_EXECUTE_PERMISSION) == 0)
-        return;
-    target->flags |= VD_THREAD_SETTER_TARGET_FLAG_EXECUTABLE;
-    if(!vd_thread_setter_resolver_range_within(
-           target->code_address, VD_THREAD_SETTER_RESOLVER_CODE_BYTES,
-           segment->base, segment->memsz))
-        return;
-    target->flags |= VD_THREAD_SETTER_TARGET_FLAG_WINDOW_BOUNDED;
-
-    /* The source was proven to be a fixed-size window in an executable module
-     * segment. A volatile byte loop prevents an implementation from widening
-     * the read beyond the recorded 64-byte disclosure boundary. */
-    const volatile uint8_t* source =
-        (const volatile uint8_t*)(uintptr_t)target->code_address;
-    for(i = 0; i < VD_THREAD_SETTER_RESOLVER_CODE_BYTES; ++i)
-        target->code[i] = source[i];
-    target->code_size = VD_THREAD_SETTER_RESOLVER_CODE_BYTES;
-    target->flags |= VD_THREAD_SETTER_TARGET_FLAG_CAPTURED;
 }
 
-static void collect_read_only_state(
+static void count_resolved_targets(
     struct vd_thread_setter_resolver_record* record)
 {
-    typedef int (*get_module_info_fn)(SceUID pid, SceUID modid,
-                                      SceKernelModuleInfo* info);
-    SceKernelFwInfo firmware = {0};
-    tai_module_info_t tai_module = {0};
-    SceKernelModuleInfo module = {0};
-    uintptr_t module_info_address = 0;
     uint32_t i;
-
-    firmware.size = sizeof(firmware);
-    record->firmware_result = ksceKernelGetSystemSwVersion(&firmware);
-    if(record->firmware_result >= 0)
-    {
-        record->firmware_version = firmware.version;
-        record->flags |=
-            VD_THREAD_SETTER_RESOLVER_FLAG_FIRMWARE_QUERY_OK;
-    }
-
-    tai_module.size = sizeof(tai_module);
-    record->module_lookup_result = taiGetModuleInfoForKernel(
-        KERNEL_PID, VD_THREAD_SETTER_RESOLVER_MODULE, &tai_module);
-    if(record->module_lookup_result >= 0)
-    {
-        record->flags |=
-            VD_THREAD_SETTER_RESOLVER_FLAG_MODULE_LOOKUP_OK;
-        record->module_id = (int32_t)tai_module.modid;
-        record->module_nid = tai_module.module_nid;
-        record->exports_start = (uint32_t)tai_module.exports_start;
-        record->exports_end = (uint32_t)tai_module.exports_end;
-        copy_module_name(record->module_name, tai_module.name);
-        if(vd_thread_setter_resolver_name_is_expected(record->module_name))
-            record->flags |=
-                VD_THREAD_SETTER_RESOLVER_FLAG_MODULE_NAME_OK;
-    }
-
-    if(record->module_lookup_result >= 0)
-    {
-        module.size = sizeof(module);
-        record->module_info_result = vd_resolve_kernel_module_info_export(
-            module_get_export_func, KERNEL_PID, &module_info_address);
-        if(record->module_info_result >= 0)
-        {
-            const get_module_info_fn get_module_info =
-                (get_module_info_fn)module_info_address;
-            record->module_info_result = get_module_info(
-                KERNEL_PID, tai_module.modid, &module);
-        }
-        if(record->module_info_result >= 0)
-        {
-            record->flags |=
-                VD_THREAD_SETTER_RESOLVER_FLAG_MODULE_INFO_OK;
-            capture_segments(record, &module);
-            if(vd_thread_setter_resolver_exports_bounded(record))
-                record->flags |=
-                    VD_THREAD_SETTER_RESOLVER_FLAG_EXPORTS_BOUNDED;
-        }
-    }
-
-    if((record->flags &
-        (VD_THREAD_SETTER_RESOLVER_FLAG_MODULE_LOOKUP_OK |
-         VD_THREAD_SETTER_RESOLVER_FLAG_MODULE_INFO_OK |
-         VD_THREAD_SETTER_RESOLVER_FLAG_MODULE_NAME_OK |
-         VD_THREAD_SETTER_RESOLVER_FLAG_EXPORTS_BOUNDED)) ==
-       (VD_THREAD_SETTER_RESOLVER_FLAG_MODULE_LOOKUP_OK |
-        VD_THREAD_SETTER_RESOLVER_FLAG_MODULE_INFO_OK |
-        VD_THREAD_SETTER_RESOLVER_FLAG_MODULE_NAME_OK |
-        VD_THREAD_SETTER_RESOLVER_FLAG_EXPORTS_BOUNDED))
-    {
-        for(i = 0; i < VD_THREAD_SETTER_RESOLVER_TARGET_COUNT; ++i)
-            capture_target(record, &record->targets[i]);
-    }
-    vd_thread_setter_resolver_finalize(record);
+    record->resolved_count = 0;
+    for(i = 0; i < record->completed_target_count; ++i)
+        if((record->targets[i].flags &
+            VD_THREAD_SETTER_TARGET_FLAG_RESOLVED) != 0)
+            record->resolved_count++;
 }
 
 int _start(SceSize args, void* argp)
@@ -361,7 +248,7 @@ int module_start(SceSize args, void* argp)
     if(read_latest(&record, &current_slot) < 0 ||
        record.state != VD_THREAD_SETTER_RESOLVER_STATE_ATTEMPTED ||
        !vd_thread_setter_resolver_attempt_payload_valid(&record) ||
-       record.sequence == 0 || record.revision > UINT32_MAX - 2u)
+       record.sequence == 0 || record.revision > UINT32_MAX - 8u)
         return SCE_KERNEL_START_NO_RESIDENT;
 
     record.revision++;
@@ -369,7 +256,30 @@ int module_start(SceSize args, void* argp)
     if(write_next(current_slot, &record, &current_slot) < 0)
         return SCE_KERNEL_START_NO_RESIDENT;
 
-    collect_read_only_state(&record);
+    capture_firmware(&record);
+    record.revision++;
+    record.state = VD_THREAD_SETTER_RESOLVER_STATE_FIRMWARE_RECORDED;
+    if(write_next(current_slot, &record, &current_slot) < 0)
+        return SCE_KERNEL_START_NO_RESIDENT;
+
+    capture_module(&record);
+    record.revision++;
+    record.state = VD_THREAD_SETTER_RESOLVER_STATE_MODULE_RECORDED;
+    if(write_next(current_slot, &record, &current_slot) < 0)
+        return SCE_KERNEL_START_NO_RESIDENT;
+
+    for(uint32_t i = 0; i < VD_THREAD_SETTER_RESOLVER_TARGET_COUNT; ++i)
+    {
+        capture_target(&record.targets[i]);
+        record.completed_target_count = i + 1u;
+        count_resolved_targets(&record);
+        record.revision++;
+        record.state = VD_THREAD_SETTER_RESOLVER_STATE_TARGET_RECORDED;
+        if(write_next(current_slot, &record, &current_slot) < 0)
+            return SCE_KERNEL_START_NO_RESIDENT;
+    }
+
+    vd_thread_setter_resolver_finalize(&record);
     record.revision++;
     (void)write_next(current_slot, &record, &current_slot);
     return SCE_KERNEL_START_NO_RESIDENT;

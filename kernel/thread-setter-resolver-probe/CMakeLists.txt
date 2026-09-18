@@ -72,18 +72,18 @@ add_dependencies(vd_ts_resolver_loader
   ${VD_THREAD_SETTER_RESOLVER_SKPRX_TARGET})
 vita_create_self(vd-thread-setter-resolver-eboot.bin
   vd_ts_resolver_loader CONFIG loader_exports.yml UNSAFE)
-vita_create_vpk(vitadebug-thread-setter-resolver-probe.vpk "VDCP00008"
+vita_create_vpk(vitadebug-thread-setter-prerequisite-probe.vpk "VDCP00009"
   vd-thread-setter-resolver-eboot.bin
-  VERSION "01.00"
-  NAME "VD ThreadMgr resolver"
+  VERSION "02.00"
+  NAME "VD ThreadMgr prereq"
   FILE
     ${CMAKE_CURRENT_BINARY_DIR}/vd-thread-setter-resolver.skprx
     module/vd-thread-setter-resolver.skprx
 )
-if(TARGET vitadebug-thread-setter-resolver-probe.vpk-vpk)
-  add_dependencies(vitadebug-thread-setter-resolver-probe.vpk-vpk
+if(TARGET vitadebug-thread-setter-prerequisite-probe.vpk-vpk)
+  add_dependencies(vitadebug-thread-setter-prerequisite-probe.vpk-vpk
     ${VD_THREAD_SETTER_RESOLVER_SKPRX_TARGET})
-elseif(TARGET vitadebug-thread-setter-resolver-probe.vpk)
-  add_dependencies(vitadebug-thread-setter-resolver-probe.vpk
+elseif(TARGET vitadebug-thread-setter-prerequisite-probe.vpk)
+  add_dependencies(vitadebug-thread-setter-prerequisite-probe.vpk
     ${VD_THREAD_SETTER_RESOLVER_SKPRX_TARGET})
 endif()

@@ -27,6 +27,12 @@ static const char* state_name(uint32_t state)
             return "loader armed";
         case VD_THREAD_SETTER_RESOLVER_STATE_KERNEL_ENTERED:
             return "kernel entered";
+        case VD_THREAD_SETTER_RESOLVER_STATE_FIRMWARE_RECORDED:
+            return "firmware recorded";
+        case VD_THREAD_SETTER_RESOLVER_STATE_MODULE_RECORDED:
+            return "module recorded";
+        case VD_THREAD_SETTER_RESOLVER_STATE_TARGET_RECORDED:
+            return "target recorded";
         case VD_THREAD_SETTER_RESOLVER_STATE_COMPLETE:
             return "complete";
         default:
@@ -42,20 +48,10 @@ static const char* result_name(int32_t result)
         case VD_THREAD_SETTER_RESOLVER_NOT_RUN: return "not run";
         case VD_THREAD_SETTER_RESOLVER_ERROR_MODULE_LOOKUP:
             return "module lookup failed";
-        case VD_THREAD_SETTER_RESOLVER_ERROR_MODULE_INFO:
-            return "module info failed";
         case VD_THREAD_SETTER_RESOLVER_ERROR_MODULE_NAME:
             return "module identity mismatch";
-        case VD_THREAD_SETTER_RESOLVER_ERROR_EXPORT_RANGE:
-            return "export table is unbounded";
         case VD_THREAD_SETTER_RESOLVER_ERROR_EXPORT_MISSING:
             return "one or more exports missing";
-        case VD_THREAD_SETTER_RESOLVER_ERROR_ADDRESS_RANGE:
-            return "export outside module";
-        case VD_THREAD_SETTER_RESOLVER_ERROR_NOT_EXECUTABLE:
-            return "export not executable";
-        case VD_THREAD_SETTER_RESOLVER_ERROR_CODE_WINDOW:
-            return "code window unavailable";
         default: return "unknown";
     }
 }
@@ -217,13 +213,11 @@ static void print_record(
     psvDebugScreenPrintf("module=%s id=%08X nid=%08X\n",
                          record->module_name[0] ? record->module_name : "-",
                          (uint32_t)record->module_id, record->module_nid);
-    psvDebugScreenPrintf("lookup/info=%08X/%08X exports=%08X-%08X\n",
+    psvDebugScreenPrintf("lookup=%08X exports=%08X-%08X\n",
                          (uint32_t)record->module_lookup_result,
-                         (uint32_t)record->module_info_result,
                          record->exports_start, record->exports_end);
-    psvDebugScreenPrintf("resolved/exec/captured=%u/%u/%u of %u\n",
-                         record->resolved_count, record->executable_count,
-                         record->captured_count,
+    psvDebugScreenPrintf("resolved=%u of %u (presence only)\n",
+                         record->resolved_count,
                          VD_THREAD_SETTER_RESOLVER_TARGET_COUNT);
     for(i = 0; i < VD_THREAD_SETTER_RESOLVER_TARGET_COUNT; ++i)
     {
@@ -241,7 +235,7 @@ static int expected_completion(
     const struct vd_thread_setter_resolver_record* record,
     const struct vd_thread_setter_resolver_record* attempt)
 {
-    return record->revision == attempt->revision + 2u &&
+    return record->revision == attempt->revision + 8u &&
            record->sequence == attempt->sequence &&
            record->state == VD_THREAD_SETTER_RESOLVER_STATE_COMPLETE &&
            vd_thread_setter_resolver_record_valid(record);
@@ -263,7 +257,7 @@ static int run_probe(struct vd_thread_setter_resolver_record* latest,
     attempt.sequence = 1;
     if(have_latest)
     {
-        if(latest->revision > UINT32_MAX - 3u ||
+        if(latest->revision > UINT32_MAX - 9u ||
            latest->sequence == UINT32_MAX)
             return -10;
         attempt.revision = latest->revision + 1u;
@@ -358,9 +352,9 @@ int main(void)
         (!have_latest ||
          latest.state == VD_THREAD_SETTER_RESOLVER_STATE_COMPLETE);
 
-    psvDebugScreenPrintf("VitaDebugger ThreadMgr resolver probe\n\n");
-    psvDebugScreenPrintf("READ ONLY: 4 fixed NID lookups and code windows.\n");
-    psvDebugScreenPrintf("No setter/getter call, hook, patch, or residency.\n\n");
+    psvDebugScreenPrintf("VitaDebugger ThreadMgr prerequisite probe\n\n");
+    psvDebugScreenPrintf("READ ONLY: checkpointed fixed NID presence.\n");
+    psvDebugScreenPrintf("No dynamic call, dereference, code read, or write.\n\n");
     if(have_latest)
     {
         psvDebugScreenPrintf("Newest durable record:\n");
@@ -395,11 +389,11 @@ int main(void)
             else
             {
                 ran = 1;
-                psvDebugScreenPrintf("\nResolving fixed exports...\n");
+                psvDebugScreenPrintf("\nCheckpointing fixed lookups...\n");
                 if(run_probe(&latest, &latest_slot, have_latest) >= 0)
                 {
                     if(latest.result == VD_THREAD_SETTER_RESOLVER_OK)
-                        psvDebugScreenPrintf("Resolver gate passed.\n");
+                        psvDebugScreenPrintf("Presence gate passed.\n");
                     else
                         psvDebugScreenPrintf("Discovery complete; gate blocked.\n");
                     psvDebugScreenPrintf("Pull both records before analysis.\n");

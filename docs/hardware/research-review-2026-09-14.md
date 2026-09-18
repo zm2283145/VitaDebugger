@@ -14,6 +14,15 @@ not authorize a kernel or CP14 hardware experiment.
 > read-only kernel PMU inventory subsequently passed with six Cortex-A9 event
 > counters and unchanged control state. See
 > [the hardware record](profiler-pmu-retail-3.65.md).
+>
+> **Later foreign-mutation result:** the first ThreadMgr resolver title was
+> retired after a retail 3.65 power-off inside its all-at-once metadata/code
+> collector. It reached only the durable `kernel entered` checkpoint and
+> invoked no getter or setter. The replacement v2 prerequisite title is
+> compile-tested but unrun; it checkpoints fixed export lookups separately,
+> never invokes or dereferences resolved pointers, and captures no code bytes.
+> See
+> [`kernel/thread-setter-resolver-probe/README.md`](../../kernel/thread-setter-resolver-probe/README.md).
 
 ## Findings retained
 

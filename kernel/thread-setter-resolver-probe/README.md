@@ -1,217 +1,149 @@
-# ThreadMgr setter resolver probe
+# ThreadMgr setter prerequisite probe
 
-Status: **paused after a failed retail 3.65 hardware safety gate; do not rerun
-the current probe.** The first attempt failed safely before `module_start()`
-with `SCE_KERNEL_ERROR_MODULEMGR_NO_LIB`; replacing that unavailable static
-import with VitaShell's runtime ModuleMgr lookup allowed the kernel module to
-enter. The second attempt durably wrote revision 2 (`kernel entered`) and then
-the Vita powered off before revision 3, somewhere inside the all-at-once
-metadata collector. Both raw journals were preserved. Source inspection shows
-that no resolved ThreadMgr getter or setter is invoked, so this run did not
-attempt a register mutation, but it does prove that the collector must be
-split into separately durable, non-dereferencing rungs before any further
-hardware use.
+Status: **v2 is compile-tested but has not been run on Vita hardware. It is
+read-only, non-dereferencing, and does not enable register writes.**
 
-A future `PASS` would establish only that four fixed NIDs resolve into
-executable `SceKernelThreadMgr` segments and that their first 64 bytes were
-captured. It would not establish a setter prototype, prove that a setter is
-safe to call, or enable any writable VitaDebugger capability.
+The earlier v1 resolver (`VDCP00008`) is retired. Its first retail 3.65 attempt
+failed before `module_start()` with `SCE_KERNEL_ERROR_MODULEMGR_NO_LIB`. After
+the unavailable static import was replaced, its second attempt durably reached
+only `kernel entered`; the Vita powered off inside the all-at-once metadata/code
+collector. No getter or setter candidate was called, but v1 must not be rerun.
 
-This is a disposable, opt-in discovery title for the next foreign-thread
-register-mutation research rung. It is deliberately separate from the installed
-VitaDebugger kernel companion and from its production mutation ABI.
+This v2 title (`VDCP00009`) is the bounded fallback gate. It performs one fixed
+operation between durable checkpoints:
 
-## Fixed discovery set
+1. enter the kernel module;
+2. query spoofable firmware metadata;
+3. query `SceKernelThreadMgr` identity through
+   `taiGetModuleInfoForKernel()`;
+4. resolve each of four fixed NIDs separately with
+   `module_get_export_func()`; and
+5. finalize a presence-only record.
 
-The title accepts no address, NID, module, library, or byte-count input. Its
-one-shot kernel module asks taiHEN's kernel module utility to resolve exactly:
+The probe never invokes or dereferences a dynamically resolved pointer. It does
+not read code bytes, inspect a target thread, retain an object, suspend/resume a
+thread, or write any register or kernel memory. A power loss therefore leaves a
+validated journal identifying the last completed operation rather than an
+ambiguous all-at-once collector.
 
-| Record label | NID | Current evidence |
+## Fixed lookup set
+
+| Label | NID | Evidence boundary |
 | --- | ---: | --- |
-| core get | `0x5022689D` | VitaSDK names and declares `ksceKernelGetThreadCpuRegisters(SceUID, SceThreadCpuRegisters *)`; the output is 0x90 bytes and the documented precondition is a suspended thread |
-| core set candidate | `0x64E89DE9` | provisional reverse-engineering candidate; absent from the installed VitaSDK NID database and no 3.65 prototype is known |
-| VFP get | `0x5CDE387A` | VitaSDK names `ksceKernelGetVfpRegisterForDebugger(SceUID, void *)`; the project's separate hardware gate established the 256-byte D0-D31 layout, not a write contract |
-| VFP set candidate | `0x49A0B679` | provisional reverse-engineering candidate; absent from the installed VitaSDK NID database and no 3.65 prototype is known |
+| core get | `0x5022689D` | Current VitaSDK declares `int ksceKernelGetThreadCpuRegisters(SceUID, SceThreadCpuRegisters *)`; `SceThreadCpuRegisters` is 0x90 bytes and contains only 32-bit fields; the header requires a suspended thread |
+| core set candidate | `0x64E89DE9` | Provisional historical lead only; absent from the installed VitaSDK headers and NID database |
+| VFP get | `0x5CDE387A` | Current VitaSDK declares `int ksceKernelGetVfpRegisterForDebugger(SceUID, void *)`; the pointer type does not establish a setter layout |
+| VFP set candidate | `0x49A0B679` | Provisional historical lead only; absent from the installed VitaSDK headers and NID database |
 
-All four lookups are fixed to module `SceKernelThreadMgr` and use
-`TAI_ANY_LIBRARY` (`0xFFFFFFFF`). The two setter labels are hypotheses under
-test, not supported names or callable APIs. A missing candidate is a valid and
-important result.
+All lookups use module `SceKernelThreadMgr`, `KERNEL_PID`, and
+`TAI_ANY_LIBRARY`. Returned addresses are recorded only as untrusted presence
+observations. v2 does not prove that an address belongs to the module, is
+executable, has stable bytes, has any proposed signature, or is callable.
 
-The installed VitaSDK database independently exposes the public VM-context lead
-`sceKernelSetThreadContextForVM` (`0x27E6DEDE`) and its internal lead
-`_sceKernelSetThreadContextForVM` (`0xD4785C41`). Neither is called or resolved by
-this title: its prototype, buffer sizes, VM-thread attribute requirements,
-process boundary, suspension rule, and VFP coverage remain unverified on retail
-3.65. See [`docs/hardware/research-review-2026-09-14.md`](../../docs/hardware/research-review-2026-09-14.md)
-for the project-wide evidence boundary.
+The installed VitaSDK 3.60 NID catalog also lists the specialized user export
+`sceKernelSetThreadContextForVM` (`0x27E6DEDE`) and internal export
+`_sceKernelSetThreadContextForVM` (`0xD4785C41`). No installed header declares
+either prototype or a context structure. Their size, alignment, writable
+fields, VM-thread attributes, process boundary, suspension preconditions,
+return semantics, and VFP coverage are unresolved. A database name/NID is not a
+generic kernel setter contract and is not included in this hardware probe.
 
-## Resolver and address proof
+## Journal ABI
 
-The SKPRX uses `module_get_export_func(SceUID pid, const char *module,
-uint32_t library_nid, uint32_t function_nid, uintptr_t *address)` from
-`libtaihenModuleUtils_stub.a` with `KERNEL_PID` and `TAI_ANY_LIBRARY`. This is the
-kernel-side utility used by projects such as VitaShell. The public
-`taiGetModuleExportFunc()` wrapper is not used because it is a user API whose
-kernel syscall searches the calling process rather than accepting an explicit
-kernel PID.
+v2 preserves the 640-byte bounded record size but uses a new magic/version and
+new paths:
 
-`SceModulemgrForKernel` is not linked as a static import. On retail firmware it
-can make the SKPRX loader fail with `SCE_KERNEL_ERROR_MODULEMGR_NO_LIB` before
-`module_start()` runs. Instead, the probe follows VitaShell's proven pattern:
-it resolves the known read-only module-info function from `SceKernelModulemgr`
-at runtime, trying current library/function NIDs `0xC445FA63`/`0xD269F915`
-before legacy NIDs `0x92C9FFC2`/`0xDAA90093`. It invokes that fixed metadata
-API only after a successful, non-null resolution.
+- `ux0:data/VitaDebugger/thread-setter-prerequisite-v2-a.bin`
+- `ux0:data/VitaDebugger/thread-setter-prerequisite-v2-b.bin`
 
-The four ThreadMgr addresses are never trusted on their own. The probe
-separately:
+The alternating records include sequence/revision, checkpoint state, reported
+firmware metadata, module identity/export-table metadata, each fixed lookup
+result, raw address, normalized ARM/Thumb address, and the number of completed
+target lookups. Code, segment, executable, and fingerprint fields must remain
+zero. FNV-1a checksums and strict semantic validation reject torn records,
+changed NIDs, skipped checkpoints, partial address payloads, code bytes, or any
+claim that an address was authenticated.
 
-1. locates `SceKernelThreadMgr` with `taiGetModuleInfoForKernel()`;
-2. obtains its four segment records with the dynamically resolved, fixed
-   `ksceKernelGetModuleInfo()` metadata API;
-3. verifies the taiHEN export-table range is wholly inside one module segment
-   and no larger than 64 KiB;
-4. removes only the ARM Thumb-state bit from each returned function pointer;
-5. proves the normalized address belongs to a module segment marked executable;
-6. proves the entire fixed 64-byte window remains inside that segment; and
-7. copies exactly 64 bytes with a volatile byte loop for offline analysis.
-
-The alternating 640-byte records include the module NID, module ID, export-table
-range, segment bases/sizes/permissions, each fixed NID, lookup result, raw and
-normalized addresses, ARM/Thumb state, segment index/offset, and fixed code
-window. FNV-1a checksums and strict semantic validation protect the lifecycle
-journal from partial writes and internally inconsistent records.
-
-## Safety boundary
-
-- None of the four resolved `SceKernelThreadMgr` function pointers is invoked.
-- The only dynamically resolved pointer that is invoked is the fixed,
-  read-only module-info metadata API described above.
-- No target thread is enumerated, retained, suspended, resumed, or modified.
-- No register context is supplied and no setter-like import exists.
-- No hook, injection, memory poke, coprocessor instruction, callback, worker
-  thread, public kernel export, or boot configuration change exists.
-- The kernel module always returns `SCE_KERNEL_START_NO_RESIDENT`.
-- Disclosure is fixed at four compile-time NIDs and at most 4 × 64 code bytes.
-- Installing the VPK does not execute the kernel module. One X-button edge in
-  title `VDCP00008` durably arms and runs a single sample. Circle exits.
-- An incomplete or corrupt newest journal locks the loader so evidence is not
-  overwritten before it can be pulled.
-
-The title records `ksceKernelGetSystemSwVersion()` only as spoofable metadata.
-Enso_ex can make an actual retail 3.65 installation report 3.74, so no reported
-version is a pass/fail condition. Hardware conclusions must instead be bound to
-the independently documented actual baseline, the captured
-`SceKernelThreadMgr` module NID/segments, and the generated fixed-code
-fingerprint.
+A complete `PASS` means only that all four fixed lookups returned nonzero
+addresses during that one sample. It does **not** verify a setter, ABI,
+fingerprint, lifetime contract, or writable capability.
 
 ## Host tests
 
-From the repository root with the validated Windows tool wrapper:
-
 ```powershell
-powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass `
-  -File tools/invoke-vita-env.ps1 cc -std=c11 -O2 -Wall -Wextra -Werror `
-  kernel/thread-setter-resolver-probe/test_record.c `
-  -o kernel/thread-setter-resolver-probe/test-record.exe
-kernel/thread-setter-resolver-probe/test-record.exe
-py -3 -m unittest discover `
-  -s kernel/thread-setter-resolver-probe -p test_decode_record.py -v
+C:\msys64\usr\bin\make.exe host-test-thread-setter-resolver-record `
+  HOST_CC=C:/msys64/mingw64/bin/gcc.exe
 ```
 
-The tests cover the exact 640-byte ABI, checksum and wrap-safe journal ordering,
-fixed target identity, successful 3.65 and spoofed 3.74 reports, unavailable
-firmware metadata, missing exports, out-of-module addresses, non-executable
-segments, truncated code windows, and bounded extraction.
+The C and Python tests cover the exact 640-byte ABI, every durable checkpoint,
+fixed target identities, firmware spoof/failure handling, missing exports,
+forbidden code/trust metadata, checksum rejection, wrap-safe journal selection,
+and metadata output with no extracted binaries.
 
 ## Build
 
-From a VitaSDK environment:
-
 ```powershell
-powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass `
-  -File tools/invoke-vita-env.ps1 cmake `
+$env:VITASDK = "/c/vitasdk"
+$env:PATH = "C:\msys64\mingw64\bin;C:\msys64\usr\bin;C:\vitasdk\bin;$env:PATH"
+& C:\msys64\usr\bin\cmake.exe `
   -S kernel/thread-setter-resolver-probe `
   -B kernel/thread-setter-resolver-probe/build-audit `
   -G "Unix Makefiles" `
-  -DCMAKE_MAKE_PROGRAM=C:/msys64/usr/bin/make.exe
-powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass `
-  -File tools/invoke-vita-env.ps1 cmake --build `
+  '-DCMAKE_MAKE_PROGRAM=/usr/bin/make'
+& C:\msys64\usr\bin\cmake.exe --build `
   kernel/thread-setter-resolver-probe/build-audit --clean-first
 ```
 
-The output VPK is
-`kernel/thread-setter-resolver-probe/build-audit/vitadebug-thread-setter-resolver-probe.vpk`.
-Every rebuild requires a fresh import, NID, source, and machine-code audit before
-hardware use.
+The output is
+`kernel/thread-setter-resolver-probe/build-audit/vitadebug-thread-setter-prerequisite-probe.vpk`.
+Build success is compile evidence only.
 
 ## Hardware runbook
 
-**Paused:** the following is the intended lifecycle, not authorization to run
-the current binary. First replace the collector with reviewed one-operation
-checkpoints that initially resolve but do not invoke or dereference dynamic
-pointers, then issue a new version/title/path so the failed evidence cannot be
-mistaken for a later gate.
+The following steps are required for a future reviewed v2 run. They have not
+been performed by this change.
 
-Do not place the SKPRX in `ur0:tai/config.txt`; it is packaged privately inside
-the disposable VPK.
-
-1. Record the actual device/firmware baseline independently of the spoofable
-   system-version API, plus Enso_ex/version-spoof state.
-2. Install and open title `VDCP00008`.
-3. Confirm the screen says `READ ONLY` and `No setter/getter call`.
-4. Press X once. Do not press it repeatedly and do not relaunch until both
-   journal slots have been collected.
-5. A normal lifecycle ends in either `Resolver gate passed` or `Discovery
-   complete; gate blocked`. Both are useful. A kernel-entered but incomplete
-   record is a failure that must be preserved for review.
-6. Pull both files, if present:
-   - `ux0:data/VitaDebugger/thread-setter-resolver-v1-a.bin`
-   - `ux0:data/VitaDebugger/thread-setter-resolver-v1-b.bin`
-7. Decode and extract only the validated fixed windows:
+1. Confirm the package is title `VDCP00009`, version `02.00`, and not retired
+   v1 title `VDCP00008`.
+2. Record the actual device/firmware baseline independently of
+   `ksceKernelGetSystemSwVersion()`, including Enso_ex and version-spoof state.
+3. Preserve and remove any prior v2 journal only after confirming both slots
+   were copied; never mix v1 and v2 files.
+4. Install/open the disposable VPK. Confirm the screen says
+   `No dynamic call, dereference, code read, or write`.
+5. Press X once. Do not repeat or relaunch until both journal slots are pulled.
+   Circle exits without running.
+6. Pull both v2 files listed above. An incomplete newest checkpoint is evidence
+   of the failing operation and must be preserved, not overwritten.
+7. Validate and emit metadata:
 
 ```powershell
 py -3 kernel/thread-setter-resolver-probe/decode_record.py `
-  thread-setter-resolver-v1-a.bin thread-setter-resolver-v1-b.bin `
-  --extract-dir thread-setter-resolver-analysis `
-  --actual-baseline "retail 3.65; Enso_ex version spoof state documented"
+  thread-setter-prerequisite-v2-a.bin `
+  thread-setter-prerequisite-v2-b.bin `
+  --extract-dir thread-setter-prerequisite-v2-analysis `
+  --actual-baseline "retail 3.65; Enso_ex/version spoof state documented"
 ```
 
-The decoder selects the newest valid journal revision, rejects equal-revision
-conflicts, writes at most four 64-byte `.bin` files, and creates
-`metadata.json` with per-window SHA-256 values and a combined fixed-code
-fingerprint. It prints an `arm-vita-eabi-objdump` command for each ARM or Thumb
-window.
+8. Repeat only after review, once after a clean application relaunch and once
+   after reboot. Compare module NID, export-table metadata, lookup results, and
+   normalized addresses. Address stability is still not code authentication.
 
-## Promotion gate after a hardware sample
+## Remaining promotion gates
 
-Even a resolver `PASS` is **not** permission to wire a setter into the
-production backend. The following remain mandatory:
+1. Obtain lawful static evidence for an actual setter implementation and its
+   exact prototype, context size/alignment, writable fields, thread attributes,
+   process boundary, suspension rules, return semantics, and firmware/module
+   fingerprints. v2 intentionally collects none of this code evidence.
+2. Establish an atomic process/thread retain contract that survives close,
+   exit, UID reuse, parent changes, timeout, disconnect, cleanup retry, and
+   plugin unload. Current GUID release is by numeric UID, and no public
+   generation/non-reuse guarantee is documented.
+3. Only then design a separately reviewed, default-off mutation title for one
+   callee-saved GPR in a same-process disposable worker, with read-back, exact
+   restore, resume, detach/reconnect, and watchdog recovery.
+4. Keep VFP/NEON separate. A core setter must not be assumed to update D0-D31
+   or FPSCR, especially with lazy VFP ownership.
 
-1. preserve the two raw journals and decoded metadata alongside the independently
-   documented actual firmware baseline;
-2. confirm module NID, segment layout, normalized addresses, and code hashes are
-   repeatable across a clean app relaunch and reboot;
-3. disassemble every captured window and determine whether it is an
-   implementation, veneer, or error stub; obtain more static evidence through a
-   separately reviewed bounded step if 64 bytes cannot establish the contract;
-4. establish the exact 3.65 setter prototype, structure size/alignment, writable
-   fields, return values, thread attributes, process boundary, and suspension
-   preconditions from lawful static analysis;
-5. validate a read-only object-lifetime lease before any write. The current
-   candidates are `ksceGUIDReferObject`/`ksceGUIDReleaseObject`, but their exact
-   thread-object/class use is not yet a proven contract for this backend;
-6. keep the exact retained thread and process objects alive across suspend,
-   snapshot, stage, read-back, rollback, and cleanup; reject UID churn/reuse and
-   leave an uncertain target stopped;
-7. perform the first mutation only in a disposable same-process worker, with a
-   supported debug-suspend state and one controlled callee-saved GPR, followed
-   by read-back, exact restore, resume, detach, reconnect, exit, timeout, and
-   unload gates; and
-8. treat core and VFP as separate transactions because their snapshots overlap
-   FPSCR state. A VFP write also has to account for lazy VFP ownership. The safer
-   cooperative in-thread VFP trampoline remains a separate design lead.
-
-Until all applicable gates pass, the production kernel backend must continue to
-advertise zero writable foreign register banks and GDB must reject those writes.
+Production VitaDebugger continues to advertise zero writable foreign core and
+VFP banks.

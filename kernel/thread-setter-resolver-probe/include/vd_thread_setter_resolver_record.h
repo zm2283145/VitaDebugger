@@ -4,8 +4,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define VD_THREAD_SETTER_RESOLVER_MAGIC UINT32_C(0x56545352)
-#define VD_THREAD_SETTER_RESOLVER_VERSION UINT32_C(1)
+#define VD_THREAD_SETTER_RESOLVER_MAGIC UINT32_C(0x56545052)
+#define VD_THREAD_SETTER_RESOLVER_VERSION UINT32_C(2)
 #define VD_THREAD_SETTER_RESOLVER_RECORD_SIZE UINT32_C(640)
 #define VD_THREAD_SETTER_RESOLVER_SEGMENT_COUNT UINT32_C(4)
 #define VD_THREAD_SETTER_RESOLVER_TARGET_COUNT UINT32_C(4)
@@ -15,11 +15,11 @@
 
 #define VD_THREAD_SETTER_RESOLVER_MODULE "SceKernelThreadMgr"
 #define VD_THREAD_SETTER_RESOLVER_SKPRX_PATH \
-    "ux0:app/VDCP00008/module/vd-thread-setter-resolver.skprx"
+    "ux0:app/VDCP00009/module/vd-thread-setter-resolver.skprx"
 #define VD_THREAD_SETTER_RESOLVER_RECORD_A_PATH \
-    "ux0:data/VitaDebugger/thread-setter-resolver-v1-a.bin"
+    "ux0:data/VitaDebugger/thread-setter-prerequisite-v2-a.bin"
 #define VD_THREAD_SETTER_RESOLVER_RECORD_B_PATH \
-    "ux0:data/VitaDebugger/thread-setter-resolver-v1-b.bin"
+    "ux0:data/VitaDebugger/thread-setter-prerequisite-v2-b.bin"
 
 #define VD_THREAD_SETTER_NID_CORE_GET UINT32_C(0x5022689D)
 #define VD_THREAD_SETTER_NID_CORE_SET UINT32_C(0x64E89DE9)
@@ -38,7 +38,10 @@
 enum vd_thread_setter_resolver_state {
     VD_THREAD_SETTER_RESOLVER_STATE_ATTEMPTED = 1,
     VD_THREAD_SETTER_RESOLVER_STATE_KERNEL_ENTERED = 2,
-    VD_THREAD_SETTER_RESOLVER_STATE_COMPLETE = 3,
+    VD_THREAD_SETTER_RESOLVER_STATE_FIRMWARE_RECORDED = 3,
+    VD_THREAD_SETTER_RESOLVER_STATE_MODULE_RECORDED = 4,
+    VD_THREAD_SETTER_RESOLVER_STATE_TARGET_RECORDED = 5,
+    VD_THREAD_SETTER_RESOLVER_STATE_COMPLETE = 6,
 };
 
 enum vd_thread_setter_resolver_result {
@@ -76,12 +79,8 @@ enum vd_thread_setter_resolver_record_flag {
 #define VD_THREAD_SETTER_RESOLVER_RECORD_FLAGS_ALLOWED \
     (VD_THREAD_SETTER_RESOLVER_FLAG_FIRMWARE_QUERY_OK | \
      VD_THREAD_SETTER_RESOLVER_FLAG_MODULE_LOOKUP_OK | \
-     VD_THREAD_SETTER_RESOLVER_FLAG_MODULE_INFO_OK | \
      VD_THREAD_SETTER_RESOLVER_FLAG_MODULE_NAME_OK | \
-     VD_THREAD_SETTER_RESOLVER_FLAG_EXPORTS_BOUNDED | \
      VD_THREAD_SETTER_RESOLVER_FLAG_ALL_RESOLVED | \
-     VD_THREAD_SETTER_RESOLVER_FLAG_ALL_EXECUTABLE | \
-     VD_THREAD_SETTER_RESOLVER_FLAG_ALL_CAPTURED | \
      VD_THREAD_SETTER_RESOLVER_FLAG_COMPLETE)
 
 enum vd_thread_setter_resolver_target_flag {
@@ -95,11 +94,7 @@ enum vd_thread_setter_resolver_target_flag {
 
 #define VD_THREAD_SETTER_TARGET_FLAGS_ALLOWED \
     (VD_THREAD_SETTER_TARGET_FLAG_RESOLVED | \
-     VD_THREAD_SETTER_TARGET_FLAG_THUMB | \
-     VD_THREAD_SETTER_TARGET_FLAG_IN_SEGMENT | \
-     VD_THREAD_SETTER_TARGET_FLAG_EXECUTABLE | \
-     VD_THREAD_SETTER_TARGET_FLAG_WINDOW_BOUNDED | \
-     VD_THREAD_SETTER_TARGET_FLAG_CAPTURED)
+     VD_THREAD_SETTER_TARGET_FLAG_THUMB)
 
 struct vd_thread_setter_resolver_segment {
     uint32_t base;
@@ -123,10 +118,10 @@ struct vd_thread_setter_resolver_target {
 
 /*
  * This fixed record is deliberately the probe's entire disclosure surface:
- * four fixed NIDs, four module segment descriptors, and at most 64 bytes from
- * each resolved function after its address has been proven to lie wholly in an
- * executable SceKernelThreadMgr segment. No address or NID comes from user
- * input. Two alternating copies form a small lifecycle journal.
+ * four fixed NIDs and their presence-only lookup results. Segment and code
+ * fields remain in the fixed 640-byte ABI but v2 requires them to be zero.
+ * No address or NID comes from user input. Two alternating copies form a
+ * checkpoint journal.
  */
 struct vd_thread_setter_resolver_record {
     uint32_t magic;
@@ -152,7 +147,8 @@ struct vd_thread_setter_resolver_record {
     uint32_t executable_count;
     uint32_t captured_count;
     uint32_t lookup_library_nid;
-    uint32_t reserved_header[3];
+    uint32_t completed_target_count;
+    uint32_t reserved_header[2];
     struct vd_thread_setter_resolver_segment
         segments[VD_THREAD_SETTER_RESOLVER_SEGMENT_COUNT];
     struct vd_thread_setter_resolver_target
@@ -325,10 +321,11 @@ static inline int vd_thread_setter_resolver_attempt_payload_valid(
     const struct vd_thread_setter_resolver_record* record)
 {
     uint32_t i;
-    if((record->state != VD_THREAD_SETTER_RESOLVER_STATE_ATTEMPTED &&
+    if(!record ||
+       (record->state != VD_THREAD_SETTER_RESOLVER_STATE_ATTEMPTED &&
         record->state != VD_THREAD_SETTER_RESOLVER_STATE_KERNEL_ENTERED) ||
        record->result != VD_THREAD_SETTER_RESOLVER_NOT_RUN ||
-       record->flags != 0 ||
+       record->flags != 0 || record->completed_target_count != 0 ||
        record->firmware_result != VD_THREAD_SETTER_RESOLVER_NOT_ATTEMPTED ||
        record->firmware_version != 0 ||
        record->module_lookup_result !=
@@ -337,18 +334,18 @@ static inline int vd_thread_setter_resolver_attempt_payload_valid(
            VD_THREAD_SETTER_RESOLVER_NOT_ATTEMPTED ||
        record->module_id != 0 || record->module_nid != 0 ||
        record->exports_start != 0 || record->exports_end != 0 ||
-       !vd_thread_setter_resolver_bytes_zero(record->module_name,
-                                              sizeof(record->module_name)) ||
+       !vd_thread_setter_resolver_bytes_zero(
+           record->module_name, sizeof(record->module_name)) ||
        record->segment_count != 0 || record->resolved_count != 0 ||
        record->executable_count != 0 || record->captured_count != 0 ||
        record->lookup_library_nid !=
            VD_THREAD_SETTER_RESOLVER_ANY_LIBRARY ||
-       !vd_thread_setter_resolver_bytes_zero(record->reserved_header,
-                                              sizeof(record->reserved_header)) ||
-       !vd_thread_setter_resolver_bytes_zero(record->segments,
-                                              sizeof(record->segments)) ||
-       !vd_thread_setter_resolver_bytes_zero(record->reserved,
-                                              sizeof(record->reserved)) ||
+       !vd_thread_setter_resolver_bytes_zero(
+           record->reserved_header, sizeof(record->reserved_header)) ||
+       !vd_thread_setter_resolver_bytes_zero(
+           record->segments, sizeof(record->segments)) ||
+       !vd_thread_setter_resolver_bytes_zero(
+           record->reserved, sizeof(record->reserved)) ||
        !vd_thread_setter_resolver_targets_fixed(record))
         return 0;
 
@@ -409,27 +406,15 @@ static inline int vd_thread_setter_resolver_exports_bounded(
 static inline int vd_thread_setter_resolver_expected_result(
     const struct vd_thread_setter_resolver_record* record)
 {
-    uint32_t i;
     if(record->module_lookup_result < 0)
         return VD_THREAD_SETTER_RESOLVER_ERROR_MODULE_LOOKUP;
-    if(record->module_info_result < 0)
-        return VD_THREAD_SETTER_RESOLVER_ERROR_MODULE_INFO;
     if(!vd_thread_setter_resolver_name_is_expected(record->module_name))
         return VD_THREAD_SETTER_RESOLVER_ERROR_MODULE_NAME;
-    if(!vd_thread_setter_resolver_exports_bounded(record))
-        return VD_THREAD_SETTER_RESOLVER_ERROR_EXPORT_RANGE;
+    if(record->completed_target_count !=
+       VD_THREAD_SETTER_RESOLVER_TARGET_COUNT)
+        return VD_THREAD_SETTER_RESOLVER_NOT_RUN;
     if(record->resolved_count != VD_THREAD_SETTER_RESOLVER_TARGET_COUNT)
         return VD_THREAD_SETTER_RESOLVER_ERROR_EXPORT_MISSING;
-    for(i = 0; i < VD_THREAD_SETTER_RESOLVER_TARGET_COUNT; ++i)
-    {
-        if((record->targets[i].flags &
-            VD_THREAD_SETTER_TARGET_FLAG_IN_SEGMENT) == 0)
-            return VD_THREAD_SETTER_RESOLVER_ERROR_ADDRESS_RANGE;
-    }
-    if(record->executable_count != VD_THREAD_SETTER_RESOLVER_TARGET_COUNT)
-        return VD_THREAD_SETTER_RESOLVER_ERROR_NOT_EXECUTABLE;
-    if(record->captured_count != VD_THREAD_SETTER_RESOLVER_TARGET_COUNT)
-        return VD_THREAD_SETTER_RESOLVER_ERROR_CODE_WINDOW;
     return VD_THREAD_SETTER_RESOLVER_OK;
 }
 
@@ -440,32 +425,24 @@ static inline void vd_thread_setter_resolver_finalize(
     record->resolved_count = 0;
     record->executable_count = 0;
     record->captured_count = 0;
-    record->flags &= VD_THREAD_SETTER_RESOLVER_FLAG_FIRMWARE_QUERY_OK |
-                     VD_THREAD_SETTER_RESOLVER_FLAG_MODULE_LOOKUP_OK |
-                     VD_THREAD_SETTER_RESOLVER_FLAG_MODULE_INFO_OK |
-                     VD_THREAD_SETTER_RESOLVER_FLAG_MODULE_NAME_OK |
-                     VD_THREAD_SETTER_RESOLVER_FLAG_EXPORTS_BOUNDED;
+    record->flags = 0;
+    if(record->firmware_result >= 0)
+        record->flags |=
+            VD_THREAD_SETTER_RESOLVER_FLAG_FIRMWARE_QUERY_OK;
+    if(record->module_lookup_result >= 0)
+        record->flags |=
+            VD_THREAD_SETTER_RESOLVER_FLAG_MODULE_LOOKUP_OK;
+    if(vd_thread_setter_resolver_name_is_expected(record->module_name))
+        record->flags |=
+            VD_THREAD_SETTER_RESOLVER_FLAG_MODULE_NAME_OK;
     for(i = 0; i < VD_THREAD_SETTER_RESOLVER_TARGET_COUNT; ++i)
     {
         const uint32_t flags = record->targets[i].flags;
         if((flags & VD_THREAD_SETTER_TARGET_FLAG_RESOLVED) != 0)
             record->resolved_count++;
-        if((flags & (VD_THREAD_SETTER_TARGET_FLAG_RESOLVED |
-                     VD_THREAD_SETTER_TARGET_FLAG_IN_SEGMENT |
-                     VD_THREAD_SETTER_TARGET_FLAG_EXECUTABLE)) ==
-            (VD_THREAD_SETTER_TARGET_FLAG_RESOLVED |
-             VD_THREAD_SETTER_TARGET_FLAG_IN_SEGMENT |
-             VD_THREAD_SETTER_TARGET_FLAG_EXECUTABLE))
-            record->executable_count++;
-        if((flags & VD_THREAD_SETTER_TARGET_FLAG_CAPTURED) != 0)
-            record->captured_count++;
     }
     if(record->resolved_count == VD_THREAD_SETTER_RESOLVER_TARGET_COUNT)
         record->flags |= VD_THREAD_SETTER_RESOLVER_FLAG_ALL_RESOLVED;
-    if(record->executable_count == VD_THREAD_SETTER_RESOLVER_TARGET_COUNT)
-        record->flags |= VD_THREAD_SETTER_RESOLVER_FLAG_ALL_EXECUTABLE;
-    if(record->captured_count == VD_THREAD_SETTER_RESOLVER_TARGET_COUNT)
-        record->flags |= VD_THREAD_SETTER_RESOLVER_FLAG_ALL_CAPTURED;
     record->flags |= VD_THREAD_SETTER_RESOLVER_FLAG_COMPLETE;
     record->result = vd_thread_setter_resolver_expected_result(record);
     record->state = VD_THREAD_SETTER_RESOLVER_STATE_COMPLETE;
@@ -475,25 +452,32 @@ static inline int vd_thread_setter_resolver_complete_payload_valid(
     const struct vd_thread_setter_resolver_record* record)
 {
     uint32_t i;
-    uint32_t active_segments = 0;
     uint32_t resolved = 0;
-    uint32_t executable = 0;
-    uint32_t captured = 0;
     if(record->state != VD_THREAD_SETTER_RESOLVER_STATE_COMPLETE ||
        (record->flags & ~VD_THREAD_SETTER_RESOLVER_RECORD_FLAGS_ALLOWED) != 0 ||
        (record->flags & VD_THREAD_SETTER_RESOLVER_FLAG_COMPLETE) == 0 ||
+       (record->flags &
+        (VD_THREAD_SETTER_RESOLVER_FLAG_MODULE_INFO_OK |
+         VD_THREAD_SETTER_RESOLVER_FLAG_EXPORTS_BOUNDED |
+         VD_THREAD_SETTER_RESOLVER_FLAG_ALL_EXECUTABLE |
+         VD_THREAD_SETTER_RESOLVER_FLAG_ALL_CAPTURED)) != 0 ||
        record->lookup_library_nid !=
            VD_THREAD_SETTER_RESOLVER_ANY_LIBRARY ||
+       record->completed_target_count !=
+           VD_THREAD_SETTER_RESOLVER_TARGET_COUNT ||
        !vd_thread_setter_resolver_bytes_zero(record->reserved_header,
                                               sizeof(record->reserved_header)) ||
+       !vd_thread_setter_resolver_bytes_zero(record->segments,
+                                              sizeof(record->segments)) ||
        !vd_thread_setter_resolver_bytes_zero(record->reserved,
                                               sizeof(record->reserved)) ||
-       !vd_thread_setter_resolver_targets_fixed(record))
+       !vd_thread_setter_resolver_targets_fixed(record) ||
+       record->module_info_result !=
+           VD_THREAD_SETTER_RESOLVER_NOT_ATTEMPTED ||
+       record->segment_count != 0 || record->executable_count != 0 ||
+       record->captured_count != 0)
         return 0;
 
-    /* The reported version is useful evidence, but is not a firmware gate:
-     * Enso_ex can deliberately spoof this field. It must only agree with the
-     * success/failure state of the read-only metadata query. */
     if(record->firmware_result == VD_THREAD_SETTER_RESOLVER_NOT_ATTEMPTED ||
        record->module_lookup_result ==
            VD_THREAD_SETTER_RESOLVER_NOT_ATTEMPTED ||
@@ -503,43 +487,14 @@ static inline int vd_thread_setter_resolver_complete_payload_valid(
 
     if(record->module_lookup_result < 0)
     {
-        if(record->module_info_result !=
-               VD_THREAD_SETTER_RESOLVER_NOT_ATTEMPTED ||
-           record->module_id != 0 || record->module_nid != 0 ||
+        if(record->module_id != 0 || record->module_nid != 0 ||
            record->exports_start != 0 || record->exports_end != 0 ||
            !vd_thread_setter_resolver_bytes_zero(record->module_name,
                                                   sizeof(record->module_name)))
             return 0;
     }
-    else if(record->module_info_result ==
-                VD_THREAD_SETTER_RESOLVER_NOT_ATTEMPTED ||
-            record->module_id == 0 || record->module_nid == 0 ||
-            record->exports_start == 0 || record->exports_end == 0)
-    {
-        return 0;
-    }
-
-    for(i = 0; i < VD_THREAD_SETTER_RESOLVER_SEGMENT_COUNT; ++i)
-    {
-        const struct vd_thread_setter_resolver_segment* segment =
-            &record->segments[i];
-        if(segment->base == 0 && segment->memsz == 0 &&
-           segment->filesz == 0 && segment->permissions == 0)
-            continue;
-        if(segment->base == 0 || segment->memsz == 0 ||
-           segment->filesz > segment->memsz ||
-           segment->memsz > UINT32_MAX - segment->base)
-            return 0;
-        active_segments++;
-    }
-    if(active_segments != record->segment_count)
-        return 0;
-    if(record->module_info_result < 0)
-    {
-        if(active_segments != 0)
-            return 0;
-    }
-    else if(record->module_lookup_result < 0 || active_segments == 0)
+    else if(record->module_id <= 0 || record->module_nid == 0 ||
+            record->module_name[0] == '\0')
     {
         return 0;
     }
@@ -549,26 +504,19 @@ static inline int vd_thread_setter_resolver_complete_payload_valid(
         const struct vd_thread_setter_resolver_target* target =
             &record->targets[i];
         const uint32_t flags = target->flags;
-        const uint32_t discovery_flags =
-            VD_THREAD_SETTER_RESOLVER_FLAG_MODULE_LOOKUP_OK |
-            VD_THREAD_SETTER_RESOLVER_FLAG_MODULE_INFO_OK |
-            VD_THREAD_SETTER_RESOLVER_FLAG_MODULE_NAME_OK |
-            VD_THREAD_SETTER_RESOLVER_FLAG_EXPORTS_BOUNDED;
-        const int lookup_was_expected =
-            (record->flags & discovery_flags) == discovery_flags;
-        if((flags & ~VD_THREAD_SETTER_TARGET_FLAGS_ALLOWED) != 0)
-            return 0;
-        if((target->lookup_result !=
-                VD_THREAD_SETTER_RESOLVER_NOT_ATTEMPTED) !=
-           lookup_was_expected)
+        if((flags & ~(VD_THREAD_SETTER_TARGET_FLAG_RESOLVED |
+                      VD_THREAD_SETTER_TARGET_FLAG_THUMB)) != 0 ||
+           target->lookup_result ==
+               VD_THREAD_SETTER_RESOLVER_NOT_ATTEMPTED ||
+           target->segment_index != -1 || target->segment_offset != 0 ||
+           target->code_size != 0 ||
+           !vd_thread_setter_resolver_bytes_zero(target->code,
+                                                  sizeof(target->code)))
             return 0;
         if(target->lookup_result < 0)
         {
             if(flags != 0 || target->raw_address != 0 ||
-               target->code_address != 0 || target->segment_index != -1 ||
-               target->segment_offset != 0 || target->code_size != 0 ||
-               !vd_thread_setter_resolver_bytes_zero(target->code,
-                                                      sizeof(target->code)))
+               target->code_address != 0)
                 return 0;
             continue;
         }
@@ -579,83 +527,129 @@ static inline int vd_thread_setter_resolver_complete_payload_valid(
             ((flags & VD_THREAD_SETTER_TARGET_FLAG_THUMB) != 0)))
             return 0;
         resolved++;
+    }
 
-        if((flags & VD_THREAD_SETTER_TARGET_FLAG_IN_SEGMENT) == 0)
+    if(record->resolved_count != resolved ||
+       (((record->flags & VD_THREAD_SETTER_RESOLVER_FLAG_ALL_RESOLVED) != 0) !=
+        (resolved == VD_THREAD_SETTER_RESOLVER_TARGET_COUNT)) ||
+       (((record->flags & VD_THREAD_SETTER_RESOLVER_FLAG_FIRMWARE_QUERY_OK) != 0) !=
+        (record->firmware_result >= 0)) ||
+       (((record->flags & VD_THREAD_SETTER_RESOLVER_FLAG_MODULE_LOOKUP_OK) != 0) !=
+        (record->module_lookup_result >= 0)) ||
+       (((record->flags & VD_THREAD_SETTER_RESOLVER_FLAG_MODULE_NAME_OK) != 0) !=
+        vd_thread_setter_resolver_name_is_expected(record->module_name)) ||
+       record->result != vd_thread_setter_resolver_expected_result(record))
+        return 0;
+    return 1;
+}
+
+static inline int vd_thread_setter_resolver_progress_payload_valid(
+    const struct vd_thread_setter_resolver_record* record)
+{
+    uint32_t i;
+    uint32_t resolved = 0;
+    if(!record ||
+       (record->state !=
+            VD_THREAD_SETTER_RESOLVER_STATE_FIRMWARE_RECORDED &&
+        record->state !=
+            VD_THREAD_SETTER_RESOLVER_STATE_MODULE_RECORDED &&
+        record->state !=
+            VD_THREAD_SETTER_RESOLVER_STATE_TARGET_RECORDED) ||
+       record->result != VD_THREAD_SETTER_RESOLVER_NOT_RUN ||
+       record->flags != 0 ||
+       record->firmware_result == VD_THREAD_SETTER_RESOLVER_NOT_ATTEMPTED ||
+       (record->firmware_result >= 0 && record->firmware_version == 0) ||
+       (record->firmware_result < 0 && record->firmware_version != 0) ||
+       record->module_info_result !=
+           VD_THREAD_SETTER_RESOLVER_NOT_ATTEMPTED ||
+       record->segment_count != 0 || record->executable_count != 0 ||
+       record->captured_count != 0 ||
+       record->lookup_library_nid !=
+           VD_THREAD_SETTER_RESOLVER_ANY_LIBRARY ||
+       !vd_thread_setter_resolver_bytes_zero(
+           record->reserved_header, sizeof(record->reserved_header)) ||
+       !vd_thread_setter_resolver_bytes_zero(
+           record->segments, sizeof(record->segments)) ||
+       !vd_thread_setter_resolver_bytes_zero(
+           record->reserved, sizeof(record->reserved)) ||
+       !vd_thread_setter_resolver_targets_fixed(record))
+        return 0;
+
+    if(record->state == VD_THREAD_SETTER_RESOLVER_STATE_FIRMWARE_RECORDED)
+    {
+        if(record->completed_target_count != 0 ||
+           record->module_lookup_result !=
+               VD_THREAD_SETTER_RESOLVER_NOT_ATTEMPTED ||
+           record->module_id != 0 || record->module_nid != 0 ||
+           record->exports_start != 0 || record->exports_end != 0 ||
+           !vd_thread_setter_resolver_bytes_zero(
+               record->module_name, sizeof(record->module_name)))
+            return 0;
+    }
+    else
+    {
+        if(record->module_lookup_result ==
+           VD_THREAD_SETTER_RESOLVER_NOT_ATTEMPTED)
+            return 0;
+        if(record->module_lookup_result < 0)
         {
-            if(target->segment_index != -1 || target->segment_offset != 0 ||
-               (flags & (VD_THREAD_SETTER_TARGET_FLAG_EXECUTABLE |
-                         VD_THREAD_SETTER_TARGET_FLAG_WINDOW_BOUNDED |
-                         VD_THREAD_SETTER_TARGET_FLAG_CAPTURED)) != 0 ||
-               target->code_size != 0 ||
-               !vd_thread_setter_resolver_bytes_zero(target->code,
-                                                      sizeof(target->code)))
+            if(record->module_id != 0 || record->module_nid != 0 ||
+               record->exports_start != 0 || record->exports_end != 0 ||
+               !vd_thread_setter_resolver_bytes_zero(
+                   record->module_name, sizeof(record->module_name)))
                 return 0;
-            continue;
         }
-        if(target->segment_index < 0 ||
-           target->segment_index >=
-               (int32_t)VD_THREAD_SETTER_RESOLVER_SEGMENT_COUNT)
-            return 0;
-        const struct vd_thread_setter_resolver_segment* segment =
-            &record->segments[target->segment_index];
-        if(target->segment_offset >= segment->memsz ||
-           target->code_address != segment->base + target->segment_offset)
-            return 0;
-        if(((segment->permissions &
-             VD_THREAD_SETTER_RESOLVER_EXECUTE_PERMISSION) != 0) !=
-           ((flags & VD_THREAD_SETTER_TARGET_FLAG_EXECUTABLE) != 0))
-            return 0;
-        if((flags & VD_THREAD_SETTER_TARGET_FLAG_EXECUTABLE) != 0)
-            executable++;
-        const int expected_window =
-            (flags & VD_THREAD_SETTER_TARGET_FLAG_EXECUTABLE) != 0 &&
-            vd_thread_setter_resolver_range_within(
-                target->code_address,
-                VD_THREAD_SETTER_RESOLVER_CODE_BYTES,
-                segment->base, segment->memsz);
-        if(((flags & VD_THREAD_SETTER_TARGET_FLAG_WINDOW_BOUNDED) != 0) !=
-           expected_window)
-            return 0;
-        if((flags & VD_THREAD_SETTER_TARGET_FLAG_CAPTURED) != 0)
-        {
-            if((flags & (VD_THREAD_SETTER_TARGET_FLAG_EXECUTABLE |
-                         VD_THREAD_SETTER_TARGET_FLAG_WINDOW_BOUNDED)) !=
-               (VD_THREAD_SETTER_TARGET_FLAG_EXECUTABLE |
-                VD_THREAD_SETTER_TARGET_FLAG_WINDOW_BOUNDED) ||
-               target->code_size != VD_THREAD_SETTER_RESOLVER_CODE_BYTES)
-                return 0;
-            captured++;
-        }
-        else if(target->code_size != 0 ||
-                !vd_thread_setter_resolver_bytes_zero(target->code,
-                                                       sizeof(target->code)))
+        else if(record->module_id <= 0 || record->module_nid == 0 ||
+                record->module_name[0] == '\0')
         {
             return 0;
         }
     }
 
-    if(record->resolved_count != resolved ||
-       record->executable_count != executable ||
-       record->captured_count != captured ||
-       (((record->flags & VD_THREAD_SETTER_RESOLVER_FLAG_ALL_RESOLVED) != 0) !=
-        (resolved == VD_THREAD_SETTER_RESOLVER_TARGET_COUNT)) ||
-       (((record->flags & VD_THREAD_SETTER_RESOLVER_FLAG_ALL_EXECUTABLE) != 0) !=
-        (executable == VD_THREAD_SETTER_RESOLVER_TARGET_COUNT)) ||
-       (((record->flags & VD_THREAD_SETTER_RESOLVER_FLAG_ALL_CAPTURED) != 0) !=
-        (captured == VD_THREAD_SETTER_RESOLVER_TARGET_COUNT)) ||
-       (((record->flags & VD_THREAD_SETTER_RESOLVER_FLAG_FIRMWARE_QUERY_OK) != 0) !=
-        (record->firmware_result >= 0)) ||
-       (((record->flags & VD_THREAD_SETTER_RESOLVER_FLAG_MODULE_LOOKUP_OK) != 0) !=
-        (record->module_lookup_result >= 0)) ||
-       (((record->flags & VD_THREAD_SETTER_RESOLVER_FLAG_MODULE_INFO_OK) != 0) !=
-        (record->module_info_result >= 0)) ||
-       (((record->flags & VD_THREAD_SETTER_RESOLVER_FLAG_MODULE_NAME_OK) != 0) !=
-        vd_thread_setter_resolver_name_is_expected(record->module_name)) ||
-       (((record->flags & VD_THREAD_SETTER_RESOLVER_FLAG_EXPORTS_BOUNDED) != 0) !=
-        vd_thread_setter_resolver_exports_bounded(record)) ||
-       record->result != vd_thread_setter_resolver_expected_result(record))
+    if(record->state == VD_THREAD_SETTER_RESOLVER_STATE_TARGET_RECORDED)
+    {
+        if(record->completed_target_count == 0 ||
+           record->completed_target_count >
+               VD_THREAD_SETTER_RESOLVER_TARGET_COUNT)
+            return 0;
+    }
+    else if(record->completed_target_count != 0)
+    {
         return 0;
-    return 1;
+    }
+
+    for(i = 0; i < VD_THREAD_SETTER_RESOLVER_TARGET_COUNT; ++i)
+    {
+        const struct vd_thread_setter_resolver_target* target =
+            &record->targets[i];
+        const int attempted = i < record->completed_target_count;
+        if((target->lookup_result !=
+                VD_THREAD_SETTER_RESOLVER_NOT_ATTEMPTED) != attempted ||
+           (target->flags &
+            ~(VD_THREAD_SETTER_TARGET_FLAG_RESOLVED |
+              VD_THREAD_SETTER_TARGET_FLAG_THUMB)) != 0 ||
+           target->segment_index != -1 || target->segment_offset != 0 ||
+           target->code_size != 0 ||
+           !vd_thread_setter_resolver_bytes_zero(
+               target->code, sizeof(target->code)))
+            return 0;
+        if(!attempted || target->lookup_result < 0)
+        {
+            if(target->flags != 0 || target->raw_address != 0 ||
+               target->code_address != 0)
+                return 0;
+            continue;
+        }
+        if((target->flags & VD_THREAD_SETTER_TARGET_FLAG_RESOLVED) == 0 ||
+           target->raw_address == 0 || target->code_address == 0 ||
+           target->code_address !=
+               (target->raw_address & ~UINT32_C(1)) ||
+           (((target->raw_address & UINT32_C(1)) != 0) !=
+            ((target->flags & VD_THREAD_SETTER_TARGET_FLAG_THUMB) != 0)))
+            return 0;
+        resolved++;
+    }
+    return record->resolved_count == resolved;
 }
 
 static inline int vd_thread_setter_resolver_record_valid(
@@ -666,6 +660,13 @@ static inline int vd_thread_setter_resolver_record_valid(
     if(record->state == VD_THREAD_SETTER_RESOLVER_STATE_ATTEMPTED ||
        record->state == VD_THREAD_SETTER_RESOLVER_STATE_KERNEL_ENTERED)
         return vd_thread_setter_resolver_attempt_payload_valid(record);
+    if(record->state ==
+           VD_THREAD_SETTER_RESOLVER_STATE_FIRMWARE_RECORDED ||
+       record->state ==
+           VD_THREAD_SETTER_RESOLVER_STATE_MODULE_RECORDED ||
+       record->state ==
+           VD_THREAD_SETTER_RESOLVER_STATE_TARGET_RECORDED)
+        return vd_thread_setter_resolver_progress_payload_valid(record);
     return vd_thread_setter_resolver_complete_payload_valid(record);
 }
 

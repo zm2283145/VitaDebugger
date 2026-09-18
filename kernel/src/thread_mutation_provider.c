@@ -89,12 +89,21 @@ static int binding_is_live(
 {
     if(!provider || !provider->binding_ready ||
        !provider->ops.binding_status)
+    {
+        disable_provider(provider);
         return 0;
+    }
+    if(provider->shutdown_requested && !provider->lease_active)
+    {
+        disable_provider(provider);
+        return 0;
+    }
     int result = provider->ops.binding_status(
         provider->ops.context, &provider->binding);
     if(result == 1)
     {
-        if(!provider->release_pending)
+        if(!provider->release_pending &&
+           (!provider->shutdown_requested || provider->lease_active))
             provider->backend.supported_banks =
                 provider->configured_banks;
         return 1;
@@ -111,6 +120,17 @@ static int release_retained_references(
 {
     if(!provider || !provider->ops.release_reference)
         return VD_KERNEL_ERROR_MUTATION_RESTORE;
+    if(provider->acquisition_uncertain)
+    {
+        provider->release_pending = 1;
+        provider->release_uncertain = 1;
+        provider->release_retryable = 0;
+        if(provider->last_release_error == 0)
+            provider->last_release_error =
+                VD_KERNEL_ERROR_MUTATION_RESTORE;
+        disable_provider(provider);
+        return provider->last_release_error;
+    }
 
     int result;
     if(provider->thread_retained)
@@ -153,10 +173,24 @@ static int release_retained_references(
     provider->release_pending = 0;
     provider->release_retryable = 0;
     provider->release_uncertain = 0;
+    provider->acquisition_uncertain = 0;
     provider->last_release_error = 0;
-    if(provider->binding_ready && binding_is_live(provider))
+    if(!provider->shutdown_requested && provider->binding_ready &&
+       binding_is_live(provider))
         provider->backend.supported_banks = provider->configured_banks;
     return 0;
+}
+
+static void quarantine_failed_acquisition(
+    struct vd_thread_mutation_provider* provider, int error)
+{
+    provider->acquisition_uncertain = 1;
+    provider->release_pending = 1;
+    provider->release_retryable = 0;
+    provider->release_uncertain = 1;
+    provider->last_release_error =
+        error < 0 ? error : VD_KERNEL_ERROR_MUTATION_RESTORE;
+    disable_provider(provider);
 }
 
 static int provider_retain_target(
@@ -166,6 +200,7 @@ static int provider_retain_target(
     struct vd_thread_mutation_provider* provider =
         (struct vd_thread_mutation_provider*)context;
     if(!provider || !identity || provider->lease_active ||
+       provider->shutdown_requested ||
        provider->release_pending || provider->process_retained ||
        provider->thread_retained || !binding_is_live(provider) ||
        !provider->ops.retain_process || !provider->ops.retain_thread ||
@@ -179,19 +214,42 @@ static int provider_retain_target(
     int result = provider->ops.retain_process(
         provider->ops.context, identity->owner_pid, &provider->process);
     if(result < 0)
+    {
+        if(!bytes_are_zero(&provider->process,
+                           sizeof(provider->process)))
+        {
+            provider->process_retained = 1;
+            quarantine_failed_acquisition(provider, result);
+        }
         return result;
+    }
     provider->process_retained = 1;
     if(!reference_valid(&provider->process, identity->owner_pid))
+    {
+        quarantine_failed_acquisition(
+            provider, VD_KERNEL_ERROR_MUTATION_TARGET);
         return VD_KERNEL_ERROR_MUTATION_TARGET;
+    }
 
     result = provider->ops.retain_thread(
         provider->ops.context, identity->target_guid, &provider->thread);
     if(result < 0)
+    {
+        if(!bytes_are_zero(&provider->thread, sizeof(provider->thread)))
+        {
+            provider->thread_retained = 1;
+            quarantine_failed_acquisition(provider, result);
+        }
         return result;
+    }
     provider->thread_retained = 1;
     if(!reference_valid(&provider->thread, identity->target_guid) ||
        provider->thread.object == provider->process.object)
+    {
+        quarantine_failed_acquisition(
+            provider, VD_KERNEL_ERROR_MUTATION_TARGET);
         return VD_KERNEL_ERROR_MUTATION_TARGET;
+    }
 
     provider->lease_active = 1;
     result = provider->ops.retained_target_status(
@@ -210,6 +268,13 @@ static void provider_release_target(
         (struct vd_thread_mutation_provider*)context;
     if(!provider)
         return;
+    if(provider->acquisition_uncertain)
+    {
+        provider->lease_active = 0;
+        quarantine_failed_acquisition(
+            provider, provider->last_release_error);
+        return;
+    }
     if(provider->lease_active &&
        !identity_equal(&provider->identity, identity))
     {
@@ -398,10 +463,30 @@ int vdThreadMutationProviderDrain(
     return release_retained_references(provider);
 }
 
+int vdThreadMutationProviderPrepareUnload(
+    struct vd_thread_mutation_provider* provider)
+{
+    if(!provider)
+        return VD_KERNEL_ERROR_MUTATION_INVALID;
+    provider->shutdown_requested = 1;
+    if(provider->lease_active)
+        return VD_KERNEL_ERROR_MUTATION_BUSY;
+    disable_provider(provider);
+    if(provider->acquisition_uncertain || provider->release_uncertain)
+        return provider->last_release_error ?
+            provider->last_release_error :
+            VD_KERNEL_ERROR_MUTATION_RESTORE;
+    if(provider->release_pending || provider->process_retained ||
+       provider->thread_retained)
+        return VD_KERNEL_ERROR_MUTATION_RESTORE;
+    return 0;
+}
+
 int vdThreadMutationProviderReady(
     struct vd_thread_mutation_provider* provider)
 {
     return provider && provider->binding_ready &&
+           !provider->shutdown_requested &&
            !provider->lease_active && !provider->release_pending &&
            !provider->process_retained && !provider->thread_retained &&
            binding_is_live(provider) &&
