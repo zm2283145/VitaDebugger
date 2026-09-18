@@ -19,15 +19,26 @@ cannot establish a delta, counter width, reset rule, frequency, time unit, or
 CPU-utilization relationship. The lower value in the later launch is consistent
 with at least a per-thread or per-launch reset, but does not prove either.
 
-The source adapter copies the field returned by
-`sceKernelGetThreadInfo(target, &info)` without conversion. Repository hardware
-records contain no controlled reference workload that establishes what one raw
-increment represents.
+The VitaSDK header declares `runClocks` as `SceKernelSysClock`, and
+`SceKernelSysClock` as `SceUInt64`/`uint64_t`; the field's entire descriptive
+comment is "Number of clock cycles run." Thus the storage width is known to be
+64 bits while the effective counter width and increment unit are not. See the
+pinned [type definition](https://github.com/vitasdk/vita-headers/blob/a4e9692fb7b4de1e8d0bb5609af63c01be0b7396/include/psp2common/types.h#L96-L97)
+and [field declaration](https://github.com/vitasdk/vita-headers/blob/38938d4018da820ba3e7207383bf7027ec547b0a/include/psp2common/kernel/threadmgr.h#L123-L124).
+
+Vita newlib has an incomplete
+[`getrusage()` implementation](https://github.com/vitasdk/newlib/blob/6ddc88b2ca316e43830fe59ea5efdceea39f8f47/newlib/libc/sys/vita/resource.c#L105-L125)
+that divides the value by 1,000,000 while populating `timeval`. It is not
+specification evidence: the same function has an assignment in its `who`
+condition, an incorrect microsecond remainder expression, and an unconditional
+`EINVAL`/`-1` return. Repository hardware records contain no controlled
+reference workload that establishes what one raw increment represents.
 
 ## Safe conclusion
 
-`SceKernelThreadInfo.runClocks` remains a cumulative raw counter with
-`unit = "unknown"`. No CPU percentage, elapsed-time conversion, cycle count, or
+`SceKernelThreadInfo.runClocks` remains a cumulative raw value in known 64-bit
+unsigned storage with `unit = "unknown"` and unknown effective wrap width. No
+CPU percentage, elapsed-time conversion, fixed-frequency cycle conversion, or
 cross-launch delta is supported by current evidence.
 
 The host analyzer now preserves the unsigned 64-bit pattern, derives raw deltas
@@ -44,11 +55,13 @@ on Vita. The minimum useful dataset is:
 
 1. repeated idle, busy-loop, sleeping, blocked, and suspended trials;
 2. each supported application clock profile and controlled core affinity;
-3. explicit thread creation generations, exit/recreate, suspend/resume,
-   process relaunch, and reboot boundaries;
+3. explicit thread creation generations, dormant restart, exit/recreate,
+   suspend/resume, process relaunch, and reboot boundaries;
 4. a long/high-rate trial capable of observing a decrease near a candidate
    modulus; and
-5. no-sampling versus several fixed-interval trials to quantify probe
+5. values correlated at the same monotonic boundaries with
+   `sceKernelGetProcessTimeWide()`; and
+6. no-sampling versus several fixed-interval trials to quantify probe
    overhead.
 
 Retain the VPK/ELF hashes, `.vptrace`, experiment JSON, characterization JSON,

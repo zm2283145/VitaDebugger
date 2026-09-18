@@ -251,8 +251,10 @@ the viewer assigns a stronger unit or CPU-utilization meaning. The viewer
 reconstructs all 64 raw bits, labels the unit `unknown`, and emits raw deltas
 only within one declared or conservatively inferred thread generation.
 Decreases are discontinuities unless an explicit, experimentally justified
-counter width and maximum one-interval wrap delta classify them as wraps. This
-library does not enumerate arbitrary threads or sample their program counters.
+effective wrap width and maximum one-interval wrap delta classify them as
+wraps. The VitaSDK storage type is known to be unsigned 64-bit; that does not
+prove a 64-bit effective counter or its unit. This library does not enumerate
+arbitrary threads or sample their program counters.
 
 There is no generic user-mode call that reveals every GPU command's execution
 time. Useful GPU profiling will require narrow hooks around VitaGL/SceGxm

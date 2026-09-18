@@ -550,9 +550,12 @@ def analyze_run_clocks(
     return {
         "semantics": {
             "source": RUN_CLOCKS_SOURCE,
+            "source_storage_type": "SceKernelSysClock (uint64_t)",
+            "source_storage_bits": 64,
             "capture_metric": BUILTIN_NAMES[RUN_CLOCKS_METRIC_ID],
             "kind": "cumulative_raw_counter",
             "unit": RUN_CLOCKS_UNIT,
+            "effective_counter_bits": counter_bits,
             "cpu_utilization": False,
             "conversion_applied": False,
         },
@@ -1302,6 +1305,7 @@ def run_clocks_characterization_report(
             "wire_version": capture.header.version,
             "source_api": "sceKernelGetThreadInfo",
             "source_field": RUN_CLOCKS_SOURCE,
+            "source_storage_type": "SceKernelSysClock (uint64_t)",
             "capture_metric": BUILTIN_NAMES[RUN_CLOCKS_METRIC_ID],
         },
         "experiment": experiment.metadata,

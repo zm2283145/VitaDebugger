@@ -6,6 +6,9 @@
 
 #include <string.h>
 
+_Static_assert(sizeof(SceKernelSysClock) == sizeof(uint64_t),
+               "runClocks source storage must remain 64-bit");
+
 static uint64_t vp_vita_clock(void* user)
 {
     SceInt64 now;

@@ -288,6 +288,9 @@ class DecodeTests(unittest.TestCase):
         self.assertEqual(samples[2]["raw_value_u64_decimal"],
                          str((1 << 64) - 2))
         self.assertEqual(analysis["semantics"]["unit"], "unknown")
+        self.assertEqual(analysis["semantics"]["source_storage_bits"], 64)
+        self.assertIsNone(
+            analysis["semantics"]["effective_counter_bits"])
         self.assertFalse(analysis["semantics"]["cpu_utilization"])
         self.assertFalse(analysis["semantics"]["conversion_applied"])
 
@@ -319,6 +322,9 @@ class DecodeTests(unittest.TestCase):
         self.assertEqual(samples[1]["delta_status"], "wrap")
         self.assertEqual(samples[1]["delta_raw"], 13)
         self.assertEqual(samples[1]["thread_generation"], 0)
+        self.assertEqual(
+            trace.analyze_run_clocks(capture, experiment)["semantics"]
+            ["effective_counter_bits"], 32)
 
     def test_run_clocks_explicit_thread_generation_breaks_tid_reuse(self):
         capture = trace.decode_capture(make_run_clocks_capture([
@@ -359,6 +365,9 @@ class DecodeTests(unittest.TestCase):
         decoded = trace.capture_to_json(capture)
         semantics = decoded["run_clocks_analysis"]["semantics"]
         self.assertEqual(semantics["source"], "SceKernelThreadInfo.runClocks")
+        self.assertEqual(semantics["source_storage_type"],
+                         "SceKernelSysClock (uint64_t)")
+        self.assertEqual(semantics["source_storage_bits"], 64)
         self.assertEqual(semantics["unit"], "unknown")
         self.assertEqual(decoded["events"][0]["raw_value_u64"], 100)
         self.assertEqual(decoded["events"][0]["value_unit"], "unknown")
@@ -517,6 +526,9 @@ class CommandLineTests(unittest.TestCase):
             self.assertEqual(
                 report["provenance"]["capture_sha256"],
                 __import__("hashlib").sha256(raw).hexdigest())
+            self.assertEqual(
+                report["provenance"]["source_storage_type"],
+                "SceKernelSysClock (uint64_t)")
             self.assertEqual(
                 report["run_clocks_analysis"]["summary"]["derived_deltas"], 2)
             self.assertEqual(

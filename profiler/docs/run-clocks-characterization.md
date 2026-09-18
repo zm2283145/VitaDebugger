@@ -2,14 +2,27 @@
 
 ## Current conclusion
 
-Repository evidence establishes only that `sceKernelGetThreadInfo()` exposes a
-field named `SceKernelThreadInfo.runClocks` and that the value can be sampled
-from an application-owned thread. It does not establish the counter's unit,
-effective width, update rules, core affinity behavior, suspend behavior, or a
+The VitaSDK headers establish that `SceKernelThreadInfo.runClocks` uses
+`SceKernelSysClock`, whose storage type is `SceUInt64` and therefore
+`uint64_t`. The field comment says only "Number of clock cycles run." Those
+headers do not establish the increment unit, effective counter/wrap width,
+update rules, core affinity behavior, suspend behavior, reset behavior, or a
 conversion to CPU utilization.
 
 The exact retained samples and the limits of what they prove are recorded in
 the [hardware evidence baseline](../../docs/hardware/profiler-runclocks-baseline-2026-09-18.md).
+
+Pinned public sources:
+
+- [VitaSDK `SceKernelSysClock` definition (`SceUInt64`)](https://github.com/vitasdk/vita-headers/blob/a4e9692fb7b4de1e8d0bb5609af63c01be0b7396/include/psp2common/types.h#L96-L97)
+- [VitaSDK `runClocks` field and its complete comment](https://github.com/vitasdk/vita-headers/blob/38938d4018da820ba3e7207383bf7027ec547b0a/include/psp2common/kernel/threadmgr.h#L123-L124)
+- [Vita newlib's incomplete `getrusage()` implementation](https://github.com/vitasdk/newlib/blob/6ddc88b2ca316e43830fe59ea5efdceea39f8f47/newlib/libc/sys/vita/resource.c#L105-L125)
+
+The newlib code divides `runClocks` by 1,000,000 while filling a `timeval`, but
+it is implementation evidence, not a platform contract: it uses assignment in
+the `who` condition, computes `tv_usec` without a modulo, then unconditionally
+sets `EINVAL` and returns `-1`. VitaProfiler therefore does not adopt that
+conversion.
 
 VitaProfiler therefore preserves the field as a cumulative raw unsigned value.
 The binary record carries the original 64 bits in the signed wire `value`
@@ -98,8 +111,10 @@ condition that was not measured.
 }
 ```
 
-`counter_bits` must remain `null` until hardware evidence establishes an
-effective width. With unknown width, every decrease is
+The 64-bit source storage does not prove that all 64 bits participate in the
+hardware/software counter. `counter_bits` describes the experimentally
+established effective wrap width and must remain `null` until hardware evidence
+establishes it. With unknown effective width, every decrease is
 `reset_or_reuse`, produces no delta, starts a new inferred generation when no
 explicit generation covers it, and increments the counter epoch. This prevents
 a reset or reused thread ID from becoming a huge synthetic delta.
@@ -127,9 +142,10 @@ counts.
 | Is the scale stable? | Fixed-duration busy loops at each supported application clock profile and on each available core affinity |
 | Is it per-thread and migration-safe? | Two independent workers, then one worker allowed to migrate versus pinned affinity |
 | What is the effective width? | Long-running/high-rate accumulation plus values captured immediately before and after an observed decrease |
-| What resets it? | Thread exit/recreate, title suspend/resume, process relaunch, and device reboot, each in a separate capture |
+| What resets it? | Dormant-thread restart, thread exit/recreate, title suspend/resume, process relaunch, and device reboot, each in a separate capture |
 | Can a numeric thread ID be reused? | Repeated bounded create/join cycles with application-recorded generation labels |
 | What is sampling overhead? | Identical workload with no sampling and with several fixed sampling intervals |
+| Does it correlate with process time? | Sample `sceKernelGetProcessTimeWide()` at the same monotonic boundaries and compare trial-to-trial deltas without assuming equal units |
 
 A candidate unit requires repeatable ratios across idle/busy state, clock
 profiles, affinities, and devices, plus an independently measured reference
