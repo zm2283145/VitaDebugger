@@ -26,6 +26,26 @@ Vita-cross-built broker state machine, but no resident Vita listener and no
 trusted foreign-target identity adapter. The shipped adapter fails closed and
 cannot issue a ticket.
 
+## Authentication-only version 2
+
+Protocol version 2 has fixed, bounded `HELLO`, `CHALLENGE`, `PROOF`, and
+`RESULT` records only. It performs replay-resistant mutual Ed25519
+authentication against explicit key-ID/generation allowlists and establishes
+an expiring session nonce. It does not define target discovery or any mutation
+command. Version 1 records cannot be promoted into version 2.
+
+The signed transcripts bind host and server key generations, service
+generation, session ID, opaque transport binding, request/client/server
+nonces, monotonic expiry, final status, and session nonce. Failed attempts use
+bounded exponential backoff. Replay storage is bounded and fails closed at
+capacity. Host storage supports explicit provisioning, rotation, and
+revocation. Vita storage is an injected mandatory boundary whose current
+implementation is unavailable, so no device can authenticate yet.
+
+Version 2 provides authentication and integrity, not transport encryption.
+Network metadata and payload contents are visible. No documentation or UI may
+describe it as encrypted.
+
 ## Host-tested control-plane boundary
 
 `broker/src/vitadebug_attach_control.c` now models the authenticated and leased

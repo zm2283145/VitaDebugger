@@ -72,11 +72,14 @@ cover wrong-peer/session requests, expiration, replay, partial I/O, oversized
 frames, identity changes, and shutdown.
 
 The broker directory also contains a separate authenticated control-plane
-model for the next protocol version. It owns challenge/authentication state,
+model plus an authentication-only protocol version 2 foundation. It owns challenge/authentication state,
 operation replay protection, exact target-generation binding, one fixed
 debugger-module slot, privileged-allocated lease grants, independently
 authorized cleanup capabilities, and reverse-order leased rollback. It has no wire command,
-TCP listener, crypto implementation, Vita lifecycle adapter, or module path.
+TCP listener, Vita lifecycle adapter, or module path. Version 2 currently
+defines only fixed `HELLO`, `CHALLENGE`, `PROOF`, and `RESULT` records. Its host
+model uses the repository's Ed25519 provider, and the C verifier reuses vendored
+Monocypher. The device key-store adapter remains deliberately unavailable.
 Its lifecycle callbacks are exercised only by host fakes. Protocol v1 remains
 read-only. See [the control model](docs/control-model.md).
 
@@ -123,10 +126,15 @@ prints the ticket, accepts a raw PID, or sends a module path.
 - `host/vdattach/` contains the strict codec and bounded stateful client.
 - `host/vdattach/control_signing.py` mirrors the canonical peer and operation
   signing transcripts for cross-language golden-vector verification.
+- `host/vdattach/auth_protocol.py`, `auth.py`, and `auth_keys.py` implement the
+  bounded protocol-v2 authentication model and atomic host key store.
 - `tools/vdattach.py` runs the package without installation.
 - `tests/` covers canonical encoding, frame limits, capability/ABI gates,
   session binding, exact-title discovery, and ticket release.
 - `docs/protocol-v1.md` is the complete version-1 wire contract.
+- `docs/protocol-v2-auth.md` is the authentication-only version-2 contract.
+- `docs/auth-provisioning.md` defines host and injected Vita key storage.
+- `docs/hardware-auth-gate.md` is the serialized future hardware runbook.
 - `docs/api-audit.md` records the relevant current and VitaSDK APIs.
 - `SECURITY.md` defines promotion gates for any later loader implementation.
 
@@ -143,7 +151,7 @@ prints the ticket, accepts a raw PID, or sends a module path.
 | Resident Vita listener/lifecycle wrapper | Not implemented or installed |
 | Trusted Vita foreign-target identity adapter | Fail-closed stub; provider required |
 | Read-only kernel target-identity/ticket export | Not implemented |
-| Broker authentication/pairing crypto | Callback boundary only; implementation required before shipping |
+| Broker authentication/pairing crypto | Host model and Monocypher verifier implemented; Vita persistent key storage and resident listener unavailable/fail closed |
 | Fixed debugger-module loader request model | Implemented and host-tested; privileged backend owns lease grant, no path input or Vita backend |
 | Foreign-process `.suprx` loader export | Not implemented or hardware-tested |
 | Injected debugger `.suprx` | Not implemented |

@@ -1,9 +1,12 @@
 # Authenticated external-attach control model
 
 This document describes `VdAttachControl`, an allocation-free C state machine
-for the next external-attach milestone. It is a control-boundary model, not a
-wire protocol or a Vita injector. Version-1 discovery remains permanently
-read-only.
+for a possible later privileged milestone. It is not a Vita injector.
+Version-1 discovery remains permanently read-only. Authentication-only wire
+protocol version 2 now establishes a peer-authorized session, but exposes no
+operation record and does not call this control model. A future layer must
+separately review and connect an operation frame before any lifecycle callback
+can become reachable.
 
 ## What is implemented
 
@@ -28,8 +31,8 @@ the operation verifier. The signed authorization includes:
 
 These C structures describe logical fields only. The C and Python encoders now
 define the canonical signing bytes below; verifiers must never sign native
-structure memory, padding, or endianness. This is a signing format, not a TCP
-record format, and adds no mutation command to protocol v1.
+structure memory, padding, or endianness. This is a future operation signing format, not a currently accepted TCP record.
+It adds no mutation command to protocol v1 or protocol v2.
 
 ## Canonical signing transcripts
 
