@@ -289,6 +289,25 @@ stopped target, network closing state, or dropped event writes. The UDP query
 transport records each timeout, transport error, and unexpected peer while
 retaining its bounded outer deadline.
 
+The next uncontaminated retail attempt passed the isolated prerequisite. Its
+UDP-only ready snapshot was pristine at epoch 0. Two consecutive sessions each
+completed `qSupported`, `qOffsets`, and detach; the terminal snapshot reported
+epoch 2, generation 2, no connected/candidate descriptor, owner and owner epoch
+zero, target running, no network close, no exception/protocol rejection, no
+dropped event write, and a replacement listener. This rejects a deterministic
+detach-to-immediate-reconnect ownership defect in the tested build.
+
+The remaining matrix still did not run. A later reuse launch and a fresh signed
+reinstall of the exact same VPK both failed before TCP contact: each produced
+40 consecutive UDP-ready timeouts over 20 seconds, with no transport error,
+reply, or malformed snapshot. The signed reinstall completed successfully and
+its installed eboot hash and size matched the frozen identity. Because the
+identical artifact had already produced a valid ready snapshot and two complete
+sessions, this is an intermittent title startup/readiness failure rather than
+evidence against RSP negotiation. Repeating the same launch is uninformative;
+the next hardware action requires a separate startup marker that does not
+depend on the title main-loop UDP responder.
+
 The corrected diagnostic passed this boundary on retail 3.65. The out-of-band
 ready snapshot showed listener 88, no candidate or connected socket, the test
 title ready, and no closing/stopped/owner state. The first request then produced

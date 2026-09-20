@@ -1,0 +1,104 @@
+{
+  "schema": 1,
+  "tested_at": "2026-09-20T23:05:08.190116Z",
+  "firmware": "3.65",
+  "device_class": "retail-handheld",
+  "title_id": "SLRS00001",
+  "target_source_commit": "9c7907f007371e053a30374721bbaa64642dde2d",
+  "prerequisite_runner_commit": "ab8812751467f5e23f3857425a391d9f5f1ad929",
+  "completion_runner_commit": "a69714c069557ff4826d2b9ca17dbb8509283f63",
+  "artifacts": {
+    "vpk_sha256": "fd3baf82659dcfb53752372e25bbf480f87d0e8a96fc70f6802f1d572010bbc9",
+    "elf_sha256": "82207147efcf5a4fbcf925f93b75c03b38a0fb8d4d3761308633be5791b3ece4",
+    "eboot_sha256": "026f7a67c51d0bd299519ae02335c046578f38e8d6c45f6a748bad451acb4720",
+    "build_identity_sha256": "34c8a6d9397da0aa1deba6598668f86179c2adcbee4f3686a400d34f030593e1",
+    "prerequisite_freeze_manifest_sha256": "2c16d9dc1547a9e704802b8c407865205b9c5f8899153b5840fb3c60289ad471",
+    "completion_freeze_manifest_sha256": "cc4552a2b795ce331a42de1c760c966034f11431dc1a43d09e612473bdbf1400",
+    "kubridge_source_commit": "417ddde9a744eba98d769382c1c1372b8e119139",
+    "kubridge_stub_sha256": "fe05a117421b375d77bdc5102d5753f5dcf300e33176222688e490f2d03f5796"
+  },
+  "second_admission_prerequisite": {
+    "status": "pass",
+    "explicit_ready": {
+      "transport": "udp-only",
+      "connection_epoch": 0,
+      "listener": 8,
+      "candidate": -1,
+      "socket": -1,
+      "generation": 0,
+      "owner": 0,
+      "owner_epoch": 0,
+      "dropped_event_writes": 0
+    },
+    "first_qSupported": "pass",
+    "first_qOffsets": "pass",
+    "first_detach": "pass",
+    "second_qSupported": "pass",
+    "second_qOffsets": "pass",
+    "second_detach": "pass",
+    "final_connection_epoch": 2,
+    "final_generation": 2,
+    "final_listener": 15,
+    "final_candidate": -1,
+    "final_socket": -1,
+    "final_owner": 0,
+    "final_owner_epoch": 0,
+    "protocol_rejections": 0,
+    "exception_rejections": 0,
+    "dropped_event_writes": 0,
+    "listener_reopened": true,
+    "sealed_evidence_manifest_sha256": "a283bf0be6a12ca77556337bf99f548b9775e027adb4871132165fc5cdd23c29"
+  },
+  "completion_attempts": [
+    {
+      "installed_artifact": "reused exact identity",
+      "tcp_1234_contacted": false,
+      "udp_ready_queries": 40,
+      "udp_timeouts": 40,
+      "udp_transport_errors": 0,
+      "status": "hard-stop-before-rsp",
+      "sealed_evidence_manifest_sha256": "9536757d214bfe1860938aaffb36ae9a286e89577aa5a4042cb2641e3dd00d6c"
+    },
+    {
+      "installed_artifact": "fresh signed reinstall",
+      "deployment_job": "ecbca798df6efc937099e3617a87c65e",
+      "deployment_result": "success",
+      "installed_identity": "pass",
+      "tcp_1234_contacted": false,
+      "udp_ready_queries": 40,
+      "udp_timeouts": 40,
+      "udp_transport_errors": 0,
+      "status": "hard-stop-before-rsp",
+      "sealed_evidence_manifest_sha256": "874e111f3db5eede964df2471fa6fc5496c946e5d4c3c23aa4df5bcb3d05293d"
+    }
+  ],
+  "accepted_prior_results": {
+    "ack_reset_sentinel": "pass",
+    "no_ack_reset_sentinel": "pass",
+    "disconnect_m": "pass",
+    "disconnect_M": "pass"
+  },
+  "not_run": [
+    "disconnect-g corrected parser confirmation",
+    "disconnect-p",
+    "disconnect-G",
+    "disconnect-P",
+    "second-owner protocol exclusion",
+    "detach/reconnect",
+    "connected receive cancellation",
+    "connected partial-send cancellation",
+    "intentional connected HUP shutdown",
+    "50-cycle reconnect/fault/console/shutdown soak"
+  ],
+  "final_state": {
+    "recovery_status": "clean",
+    "livearea_wait_seconds": 3,
+    "rsp_port_1234_open": false,
+    "diagnostic_port_1235_responding": false,
+    "test_title_running": false,
+    "kernel_configuration_changed": false,
+    "rebooted": false,
+    "device_ownership_released": true
+  },
+  "remaining_gate": "Add a startup/readiness path independent of the title main-loop UDP responder before another completion attempt."
+}

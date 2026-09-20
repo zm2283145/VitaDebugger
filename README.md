@@ -689,10 +689,15 @@ comparator. The detailed record is
   event writes. UDP transport records each timeout, transport error, or
   unexpected peer. See
   [the attempt record](docs/hardware/rsp-second-admission-attempt-1-3.65.json).
-  This
-  instrumentation can prove or reject the suspected detach-to-immediate-
-  reconnect ownership race, but the existing hardware evidence does not yet
-  justify a production synchronization change.
+  A corrected, uncontaminated attempt then passed pristine epoch-0 readiness
+  and two consecutive `qSupported`/`qOffsets`/detach sessions, ending at epoch
+  2 with no rejected ownership, dropped event, stale socket, or listener-reopen
+  failure. This rejects the suspected deterministic detach-to-immediate-
+  reconnect ownership bug. The remaining matrix could not start: one reused
+  launch and one fresh signed reinstall both produced 40 consecutive UDP-ready
+  timeouts before any TCP contact. Further identical retries are therefore
+  blocked pending separate startup/readiness telemetry. See
+  [the confirmation record](docs/hardware/rsp-second-admission-confirmation-3.65.json).
 
 ## Documentation map
 
