@@ -189,6 +189,18 @@ classification remains hardware-pending; the stopped-RST and larger lifecycle
 matrix require separate authorization. See
 [`rsp-raw-recv-diagnostic-3.65.json`](hardware/rsp-raw-recv-diagnostic-3.65.json).
 
+The first authorized confirmation from exact fix commit `3a6250a` built a
+non-kernel, console-enabled production artifact and matched the installed
+eboot. The ACK sentinel established TCP and fully sent a valid `qSupported`
+frame, but the target produced neither its RSP ACK nor a response within the
+15-second bound. Therefore the deliberate idle gap, `qOffsets`, fixture
+preflight, RST injection, no-ack sentinel, and remaining matrix were not
+reached. This run neither confirms nor disproves the `-SCE_NET_EAGAIN` fix
+because no response-ACK or request-empty poll was reached. Final recovery was
+clean, `SLRS00001` was destroyed, and port 1234 was closed without a reboot or
+kernel configuration change. See
+[`rsp-network-fix-confirmation-3.65.json`](hardware/rsp-network-fix-confirmation-3.65.json).
+
 Stop-token acquisition/recovery, thread-context snapshots, cache maintenance,
 and exception-slot replacement still execute inside the global state lock.
 Those calls protect coupled breakpoint/lease/handler invariants, and moving

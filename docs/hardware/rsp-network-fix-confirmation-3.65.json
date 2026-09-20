@@ -1,0 +1,62 @@
+{
+  "schema": 1,
+  "tested_at": "2026-09-20T09:50:35.239382Z",
+  "firmware": "3.65",
+  "device_class": "retail-handheld",
+  "source_commit": "3a6250ab68c293d392e72ad772794b3437a52f79",
+  "title_id": "SLRS00001",
+  "outcome": "hard-stop-before-ack-sentinel-negotiation",
+  "artifacts": {
+    "vpk_sha256": "3f33feacc93d3db8c217b3c96ce47bb682f4271292b36e14bb77f7eda29823ec",
+    "elf_sha256": "6726aa32019ac94375cfa067dfb8e5ba6defca425b3c4b5f1c77163a6e49af7b",
+    "installed_eboot_sha256": "226eea11d84f9772109ff1240b098f960e4b57a720a1a888953c3714f5f1e59d",
+    "kubridge_stub_sha256": "141e458f82166a8b8c04ae01c4533346cf11ceb6df8f940d002895420ac2ac01",
+    "runner_sha256": "e997f06c19a7fdda8b6e85a4109c119b75cd000818c47d715e7777baadb81885"
+  },
+  "deployment": {
+    "transport": "ftp",
+    "action": "install_launch",
+    "job": "d7e752d3c6cafd0baaf81bba6e5d0d58",
+    "manifest_sha256": "2ad02e1d939f12153b0cd68991931b7db558c573ecc2c2f61c6c42de9cce65b9",
+    "result_stage": "complete",
+    "result_code": 0,
+    "launch": "Launched.",
+    "installed_identity": "match"
+  },
+  "ack_sentinel": {
+    "status": "fail",
+    "tcp_connect": "pass",
+    "qSupported_frame_send": "complete",
+    "target_ack": "timeout",
+    "target_response": "not-received",
+    "timeout_seconds": 15,
+    "idle_gap_reached": false,
+    "qOffsets_sent": false,
+    "fixture_preflight_reached": false,
+    "rst_injected": false,
+    "listener_reopen_tested": false
+  },
+  "not_run": [
+    "no-ack stopped-wait RST sentinel",
+    "m/M/g/p/G/P disconnect matrix",
+    "connected receive cancellation",
+    "connected partial-send cancellation",
+    "second-owner protocol exclusion",
+    "intentional connected HUP",
+    "detach/reconnect",
+    "50-cycle reconnect/fault/console/shutdown soak",
+    "exception/thread/KuBridge/profiler/foreign-register gates"
+  ],
+  "final_state": {
+    "recovery_status": "clean",
+    "companion_destroy_response": "Apps destroyed.",
+    "livearea_wait_seconds": 3,
+    "rsp_port_1234_open": false,
+    "test_title_running": false,
+    "kernel_configuration_changed": false,
+    "rebooted": false,
+    "device_ownership_released": true
+  },
+  "sealed_evidence_manifest_sha256": "068515c7a8d18ea6569435c8c6a8f489f848a1fc8fa6f50a87a0599f1292eb82",
+  "remaining_gate": "Investigate or rerun the pre-negotiation ACK sentinel under separate authorization; the raw -SCE_NET_EAGAIN fix and all downstream lifecycle cases remain hardware-unconfirmed."
+}

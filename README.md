@@ -625,8 +625,12 @@ comparator. The detailed record is
   would-block representation mismatch. The local follow-up accepts exactly
   encoded `SCE_NET_ERROR_EAGAIN` and raw negative `SCE_NET_EAGAIN`/
   `SCE_NET_EWOULDBLOCK`; generic `-1` and unrelated negatives remain fatal.
-  Hardware confirmation of that fix and the stopped-RST plus long-duration-
-  equivalent cancellation/soak matrix remain pending.
+  The first exact-fix retail confirmation deployed and matched the installed
+  eboot, but hard-stopped before exercising the fix: TCP accepted the ACK
+  sentinel and the client fully sent valid `qSupported`, yet the target sent
+  neither the RSP ACK nor a response within 15 seconds. The title cleaned up
+  normally. Hardware confirmation of the fix and the stopped-RST plus long-
+  duration-equivalent cancellation/soak matrix therefore remain pending.
 
 ## Documentation map
 
