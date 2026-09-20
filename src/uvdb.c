@@ -299,6 +299,38 @@ static volatile int uvdb_shutdown_pending;
 static volatile int uvdb_accept_active;
 static volatile int uvdb_packet_io_active;
 static volatile int uvdb_network_closing;
+#ifdef UVDB_ADMISSION_DIAGNOSTIC
+struct uvdb_admission_diagnostic_state_internal
+{
+    volatile uint32_t active_writers;
+    volatile uint32_t revision;
+    volatile uint32_t next_sequence;
+    volatile uint32_t event_sequence[
+        UVDB_ADMISSION_DIAGNOSTIC_EVENT_COUNT];
+    volatile uint32_t event_occurrences[
+        UVDB_ADMISSION_DIAGNOSTIC_EVENT_COUNT];
+    volatile int32_t event_descriptor[
+        UVDB_ADMISSION_DIAGNOSTIC_EVENT_COUNT];
+    volatile uint32_t event_generation[
+        UVDB_ADMISSION_DIAGNOSTIC_EVENT_COUNT];
+    volatile uint32_t event_owner[
+        UVDB_ADMISSION_DIAGNOSTIC_EVENT_COUNT];
+    volatile uint32_t event_state[
+        UVDB_ADMISSION_DIAGNOSTIC_EVENT_COUNT];
+    volatile int32_t current_socket;
+    volatile int32_t current_candidate;
+    volatile int32_t current_listener;
+    volatile uint32_t current_generation;
+    volatile uint32_t current_owner;
+    volatile uint32_t test_title_ready;
+    volatile uint32_t first_packet_size;
+    volatile uint32_t first_packet_recorded;
+    volatile uint32_t connection_epoch;
+};
+
+static struct uvdb_admission_diagnostic_state_internal
+    uvdb_admission_diagnostic_state;
+#endif
 static SceUID uvdb_server_thread = -1;
 static int uvdb_server_thread_ended;
 /*
@@ -545,6 +577,17 @@ static void uvdb_active_socket_snapshot(int* descriptor,
 static int uvdb_begin_packet_io(int* descriptor, uint32_t* generation);
 static int uvdb_packet_io_cancelled(int descriptor, uint32_t generation);
 static int uvdb_raw_io_would_block(ssize_t result);
+#ifdef UVDB_ADMISSION_DIAGNOSTIC
+static void uvdb_admission_diagnostic_reset(void);
+static void uvdb_admission_diagnostic_record(
+    enum uvdb_admission_diagnostic_event event,
+    int descriptor,
+    uint32_t generation,
+    uint32_t owner);
+static void uvdb_admission_diagnostic_begin_connection(void);
+static void uvdb_admission_diagnostic_socket_state(
+    int* socket, int descriptor, uint32_t generation);
+#endif
 #ifdef UVDB_RAW_RECV_DIAGNOSTIC
 static void uvdb_capture_raw_recv_diagnostic(
     ssize_t result, int descriptor, uint32_t generation);
@@ -778,6 +821,9 @@ static void uvdb_close_socket(int* socket)
     if(descriptor >= 0)
     {
         *socket = -1;
+#ifdef UVDB_ADMISSION_DIAGNOSTIC
+        uvdb_admission_diagnostic_socket_state(socket, -1, 0);
+#endif
         if(socket == &uvdb_socket)
             uvdb_console_transport_end_connection(&uvdb_console_transport);
         sceNetSyscallShutdown(descriptor, SHUT_RDWR);
@@ -802,6 +848,10 @@ static int uvdb_publish_socket(int* socket, int descriptor)
             if(!uvdb_socket_generation)
                 uvdb_socket_generation++;
         }
+#ifdef UVDB_ADMISSION_DIAGNOSTIC
+        uvdb_admission_diagnostic_socket_state(
+            socket, descriptor, uvdb_socket_generation);
+#endif
         result = 0;
     }
     uvdb_socket_lifecycle_unlock();
@@ -811,6 +861,11 @@ static int uvdb_publish_socket(int* socket, int descriptor)
 static int uvdb_promote_candidate_socket(int descriptor)
 {
     int result = -1;
+#ifdef UVDB_ADMISSION_DIAGNOSTIC
+    uint32_t generation = 0;
+    uvdb_admission_diagnostic_record(
+        UVDB_ADMISSION_EVENT_PROMOTION_BEGIN, descriptor, 0, 0);
+#endif
     uvdb_socket_lifecycle_lock();
     if(uvdb_candidate_socket == descriptor && uvdb_socket < 0)
     {
@@ -819,9 +874,22 @@ static int uvdb_promote_candidate_socket(int descriptor)
         uvdb_socket_generation++;
         if(!uvdb_socket_generation)
             uvdb_socket_generation++;
+#ifdef UVDB_ADMISSION_DIAGNOSTIC
+        generation = uvdb_socket_generation;
+        uvdb_admission_diagnostic_socket_state(
+            &uvdb_candidate_socket, -1, 0);
+        uvdb_admission_diagnostic_socket_state(
+            &uvdb_socket, descriptor, uvdb_socket_generation);
+#endif
         result = 0;
     }
     uvdb_socket_lifecycle_unlock();
+#ifdef UVDB_ADMISSION_DIAGNOSTIC
+    if(result == 0)
+        uvdb_admission_diagnostic_record(
+            UVDB_ADMISSION_EVENT_SOCKET_PUBLISHED, descriptor,
+            generation, 0);
+#endif
     return result;
 }
 
@@ -873,6 +941,296 @@ static int uvdb_raw_io_would_block(ssize_t result)
            result == -(ssize_t)SCE_NET_EAGAIN ||
            result == -(ssize_t)SCE_NET_EWOULDBLOCK;
 }
+
+#ifdef UVDB_ADMISSION_DIAGNOSTIC
+static uint32_t uvdb_admission_diagnostic_state_bits(void)
+{
+    uint32_t state = 0;
+    if(__atomic_load_n(&uvdb_target_stopped, __ATOMIC_ACQUIRE))
+        state |= UVDB_ADMISSION_STATE_TARGET_STOPPED;
+    if(__atomic_load_n(&uvdb_network_closing, __ATOMIC_ACQUIRE))
+        state |= UVDB_ADMISSION_STATE_NETWORK_CLOSING;
+    if(__atomic_load_n(
+           &uvdb_admission_diagnostic_state.test_title_ready,
+           __ATOMIC_ACQUIRE))
+        state |= UVDB_ADMISSION_STATE_TEST_TITLE_READY;
+    if(!uvdb_protocol_gate_is_idle(&uvdb_protocol_gate))
+        state |= UVDB_ADMISSION_STATE_PROTOCOL_OWNED;
+    return state;
+}
+
+static uint32_t uvdb_admission_diagnostic_owner(void)
+{
+    return __atomic_load_n(
+               &uvdb_protocol_gate.state, __ATOMIC_ACQUIRE) &
+           UINT32_C(0x7fffffff);
+}
+
+static void uvdb_admission_diagnostic_write_begin(void)
+{
+    __atomic_add_fetch(
+        &uvdb_admission_diagnostic_state.active_writers, 1u,
+        __ATOMIC_ACQ_REL);
+}
+
+static void uvdb_admission_diagnostic_write_end(void)
+{
+    __atomic_add_fetch(
+        &uvdb_admission_diagnostic_state.revision, 1u,
+        __ATOMIC_RELEASE);
+    __atomic_sub_fetch(
+        &uvdb_admission_diagnostic_state.active_writers, 1u,
+        __ATOMIC_RELEASE);
+}
+
+static void uvdb_admission_diagnostic_reset(void)
+{
+    uint32_t test_title_ready = __atomic_load_n(
+        &uvdb_admission_diagnostic_state.test_title_ready,
+        __ATOMIC_ACQUIRE);
+    uvdb_admission_diagnostic_write_begin();
+    __atomic_store_n(
+        &uvdb_admission_diagnostic_state.next_sequence, 0u,
+        __ATOMIC_RELAXED);
+    for(unsigned int event = 0;
+        event < UVDB_ADMISSION_DIAGNOSTIC_EVENT_COUNT; ++event)
+    {
+        __atomic_store_n(
+            &uvdb_admission_diagnostic_state.event_sequence[event],
+            0u, __ATOMIC_RELAXED);
+        __atomic_store_n(
+            &uvdb_admission_diagnostic_state.event_occurrences[event],
+            0u, __ATOMIC_RELAXED);
+        __atomic_store_n(
+            &uvdb_admission_diagnostic_state.event_descriptor[event],
+            0, __ATOMIC_RELAXED);
+        __atomic_store_n(
+            &uvdb_admission_diagnostic_state.event_generation[event],
+            0u, __ATOMIC_RELAXED);
+        __atomic_store_n(
+            &uvdb_admission_diagnostic_state.event_owner[event],
+            0u, __ATOMIC_RELAXED);
+        __atomic_store_n(
+            &uvdb_admission_diagnostic_state.event_state[event],
+            0u, __ATOMIC_RELAXED);
+    }
+    __atomic_store_n(
+        &uvdb_admission_diagnostic_state.current_socket, -1,
+        __ATOMIC_RELAXED);
+    __atomic_store_n(
+        &uvdb_admission_diagnostic_state.current_candidate, -1,
+        __ATOMIC_RELAXED);
+    __atomic_store_n(
+        &uvdb_admission_diagnostic_state.current_listener, -1,
+        __ATOMIC_RELAXED);
+    __atomic_store_n(
+        &uvdb_admission_diagnostic_state.current_generation, 0u,
+        __ATOMIC_RELAXED);
+    __atomic_store_n(
+        &uvdb_admission_diagnostic_state.first_packet_size, 0u,
+        __ATOMIC_RELAXED);
+    __atomic_store_n(
+        &uvdb_admission_diagnostic_state.first_packet_recorded, 0u,
+        __ATOMIC_RELAXED);
+    __atomic_store_n(
+        &uvdb_admission_diagnostic_state.connection_epoch, 0u,
+        __ATOMIC_RELAXED);
+    uvdb_admission_diagnostic_write_end();
+    if(test_title_ready)
+        uvdb_admission_diagnostic_record(
+            UVDB_ADMISSION_EVENT_TEST_TITLE_READY, -1, 0, 0);
+}
+
+static void uvdb_admission_diagnostic_begin_connection(void)
+{
+    uvdb_admission_diagnostic_write_begin();
+    for(unsigned int event = UVDB_ADMISSION_EVENT_CANDIDATE_ACCEPTED;
+        event <= UVDB_ADMISSION_EVENT_TARGET_RUNNING; ++event)
+    {
+        __atomic_store_n(
+            &uvdb_admission_diagnostic_state.event_sequence[event],
+            0u, __ATOMIC_RELAXED);
+        __atomic_store_n(
+            &uvdb_admission_diagnostic_state.event_occurrences[event],
+            0u, __ATOMIC_RELAXED);
+        __atomic_store_n(
+            &uvdb_admission_diagnostic_state.event_descriptor[event],
+            0, __ATOMIC_RELAXED);
+        __atomic_store_n(
+            &uvdb_admission_diagnostic_state.event_generation[event],
+            0u, __ATOMIC_RELAXED);
+        __atomic_store_n(
+            &uvdb_admission_diagnostic_state.event_owner[event],
+            0u, __ATOMIC_RELAXED);
+        __atomic_store_n(
+            &uvdb_admission_diagnostic_state.event_state[event],
+            0u, __ATOMIC_RELAXED);
+    }
+    __atomic_store_n(
+        &uvdb_admission_diagnostic_state.first_packet_size, 0u,
+        __ATOMIC_RELAXED);
+    __atomic_store_n(
+        &uvdb_admission_diagnostic_state.first_packet_recorded, 0u,
+        __ATOMIC_RELAXED);
+    __atomic_add_fetch(
+        &uvdb_admission_diagnostic_state.connection_epoch, 1u,
+        __ATOMIC_RELAXED);
+    uvdb_admission_diagnostic_write_end();
+}
+
+static void uvdb_admission_diagnostic_record(
+    enum uvdb_admission_diagnostic_event event,
+    int descriptor,
+    uint32_t generation,
+    uint32_t owner)
+{
+    if((unsigned int)event >= UVDB_ADMISSION_DIAGNOSTIC_EVENT_COUNT)
+        return;
+    uvdb_admission_diagnostic_write_begin();
+    uint32_t occurrence = __atomic_fetch_add(
+        &uvdb_admission_diagnostic_state.event_occurrences[event], 1u,
+        __ATOMIC_RELAXED);
+    if(occurrence != 0)
+    {
+        uvdb_admission_diagnostic_write_end();
+        return;
+    }
+
+    uint32_t sequence = __atomic_add_fetch(
+        &uvdb_admission_diagnostic_state.next_sequence, 1u,
+        __ATOMIC_ACQ_REL);
+    __atomic_store_n(
+        &uvdb_admission_diagnostic_state.event_descriptor[event],
+        descriptor, __ATOMIC_RELAXED);
+    __atomic_store_n(
+        &uvdb_admission_diagnostic_state.event_generation[event],
+        generation, __ATOMIC_RELAXED);
+    __atomic_store_n(
+        &uvdb_admission_diagnostic_state.event_owner[event],
+        owner ? owner : uvdb_admission_diagnostic_owner(),
+        __ATOMIC_RELAXED);
+    __atomic_store_n(
+        &uvdb_admission_diagnostic_state.event_state[event],
+        uvdb_admission_diagnostic_state_bits(), __ATOMIC_RELAXED);
+    __atomic_store_n(
+        &uvdb_admission_diagnostic_state.event_sequence[event],
+        sequence, __ATOMIC_RELEASE);
+    uvdb_admission_diagnostic_write_end();
+}
+
+static void uvdb_admission_diagnostic_socket_state(
+    int* socket, int descriptor, uint32_t generation)
+{
+    uvdb_admission_diagnostic_write_begin();
+    volatile int32_t* destination = NULL;
+    if(socket == &uvdb_socket)
+        destination = &uvdb_admission_diagnostic_state.current_socket;
+    else if(socket == &uvdb_candidate_socket)
+        destination = &uvdb_admission_diagnostic_state.current_candidate;
+    else if(socket == &uvdb_listen_socket)
+        destination = &uvdb_admission_diagnostic_state.current_listener;
+    if(destination)
+        __atomic_store_n(destination, descriptor, __ATOMIC_RELEASE);
+    if(socket == &uvdb_socket && descriptor >= 0)
+        __atomic_store_n(
+            &uvdb_admission_diagnostic_state.current_generation,
+            generation, __ATOMIC_RELEASE);
+    uvdb_admission_diagnostic_write_end();
+}
+
+void uvdb_admission_diagnostic_mark_test_ready(void)
+{
+    uvdb_admission_diagnostic_write_begin();
+    __atomic_store_n(
+        &uvdb_admission_diagnostic_state.test_title_ready, 1u,
+        __ATOMIC_RELEASE);
+    uvdb_admission_diagnostic_write_end();
+    uvdb_admission_diagnostic_record(
+        UVDB_ADMISSION_EVENT_TEST_TITLE_READY, -1, 0, 0);
+}
+
+int uvdb_admission_diagnostic_get(
+    struct uvdb_admission_diagnostic* diagnostic)
+{
+    if(!diagnostic)
+        return -1;
+    for(unsigned int attempt = 0; attempt < 3u; ++attempt)
+    {
+        if(__atomic_load_n(
+               &uvdb_admission_diagnostic_state.active_writers,
+               __ATOMIC_ACQUIRE))
+            continue;
+        uint32_t before = __atomic_load_n(
+            &uvdb_admission_diagnostic_state.revision,
+            __ATOMIC_ACQUIRE);
+        memset(diagnostic, 0, sizeof(*diagnostic));
+        diagnostic->version = UVDB_ADMISSION_DIAGNOSTIC_VERSION;
+        diagnostic->size = sizeof(*diagnostic);
+        diagnostic->event_count =
+            UVDB_ADMISSION_DIAGNOSTIC_EVENT_COUNT;
+        for(unsigned int event = 0;
+            event < UVDB_ADMISSION_DIAGNOSTIC_EVENT_COUNT; ++event)
+        {
+            diagnostic->event_sequence[event] = __atomic_load_n(
+                &uvdb_admission_diagnostic_state
+                     .event_sequence[event],
+                __ATOMIC_ACQUIRE);
+            diagnostic->event_occurrences[event] = __atomic_load_n(
+                &uvdb_admission_diagnostic_state
+                     .event_occurrences[event],
+                __ATOMIC_ACQUIRE);
+            diagnostic->event_descriptor[event] = __atomic_load_n(
+                &uvdb_admission_diagnostic_state
+                     .event_descriptor[event],
+                __ATOMIC_RELAXED);
+            diagnostic->event_generation[event] = __atomic_load_n(
+                &uvdb_admission_diagnostic_state
+                     .event_generation[event],
+                __ATOMIC_RELAXED);
+            diagnostic->event_owner[event] = __atomic_load_n(
+                &uvdb_admission_diagnostic_state.event_owner[event],
+                __ATOMIC_RELAXED);
+            diagnostic->event_state[event] = __atomic_load_n(
+                &uvdb_admission_diagnostic_state.event_state[event],
+                __ATOMIC_RELAXED);
+        }
+        diagnostic->current_socket = __atomic_load_n(
+            &uvdb_admission_diagnostic_state.current_socket,
+            __ATOMIC_ACQUIRE);
+        diagnostic->current_candidate = __atomic_load_n(
+            &uvdb_admission_diagnostic_state.current_candidate,
+            __ATOMIC_ACQUIRE);
+        diagnostic->current_listener = __atomic_load_n(
+            &uvdb_admission_diagnostic_state.current_listener,
+            __ATOMIC_ACQUIRE);
+        diagnostic->current_generation = __atomic_load_n(
+            &uvdb_admission_diagnostic_state.current_generation,
+            __ATOMIC_ACQUIRE);
+        diagnostic->current_owner =
+            uvdb_admission_diagnostic_owner();
+        diagnostic->current_state =
+            uvdb_admission_diagnostic_state_bits();
+        diagnostic->first_packet_size = __atomic_load_n(
+            &uvdb_admission_diagnostic_state.first_packet_size,
+            __ATOMIC_ACQUIRE);
+        diagnostic->connection_epoch = __atomic_load_n(
+            &uvdb_admission_diagnostic_state.connection_epoch,
+            __ATOMIC_ACQUIRE);
+        uint32_t after = __atomic_load_n(
+            &uvdb_admission_diagnostic_state.revision,
+            __ATOMIC_ACQUIRE);
+        if(before == after &&
+           !__atomic_load_n(
+               &uvdb_admission_diagnostic_state.active_writers,
+               __ATOMIC_ACQUIRE))
+        {
+            diagnostic->revision = after;
+            return 0;
+        }
+    }
+    return -1;
+}
+#endif
 
 #ifdef UVDB_RAW_RECV_DIAGNOSTIC
 static void uvdb_capture_raw_recv_diagnostic(
@@ -1082,6 +1440,10 @@ static int uvdb_wait_for_gdb_admission(int socket)
         if(frame_result == UVDB_RSP_FRAME_COMPLETE &&
            frame.payload_size != 0)
         {
+#ifdef UVDB_ADMISSION_DIAGNOSTIC
+            uvdb_admission_diagnostic_record(
+                UVDB_ADMISSION_EVENT_VALID_FRAME, socket, 0, 0);
+#endif
             result = 1;
             break;
         }
@@ -1261,6 +1623,10 @@ static int uvdb_stop_server_locked(void)
     __atomic_store_n(&uvdb_server_stop, 1, __ATOMIC_SEQ_CST);
     uvdb_protocol_gate_close(&uvdb_protocol_gate);
     __atomic_store_n(&uvdb_network_closing, 1, __ATOMIC_RELEASE);
+#ifdef UVDB_ADMISSION_DIAGNOSTIC
+    uvdb_admission_diagnostic_record(
+        UVDB_ADMISSION_EVENT_NETWORK_CLOSING, -1, 0, 0);
+#endif
     /* Stop accepting producer bytes immediately. The serialized socket owner
      * completes generation cleanup after its service thread has exited. */
     uvdb_console_session_close_active_gate();
@@ -1559,6 +1925,27 @@ static size_t recv_packet(char** data)
             in_buf.buf, in_buf.size, uvdb_max_buffer - 4u, &frame);
         if(result == UVDB_RSP_FRAME_COMPLETE)
         {
+#ifdef UVDB_ADMISSION_DIAGNOSTIC
+            if(!__atomic_exchange_n(
+                   &uvdb_admission_diagnostic_state.first_packet_recorded,
+                   1u, __ATOMIC_ACQ_REL))
+            {
+                uvdb_admission_diagnostic_write_begin();
+                __atomic_store_n(
+                    &uvdb_admission_diagnostic_state.first_packet_size,
+                    (uint32_t)frame.payload_size, __ATOMIC_RELAXED);
+                uvdb_admission_diagnostic_record(
+                    UVDB_ADMISSION_EVENT_FIRST_PACKET,
+                    __atomic_load_n(
+                        &uvdb_admission_diagnostic_state.current_socket,
+                        __ATOMIC_ACQUIRE),
+                    __atomic_load_n(
+                        &uvdb_admission_diagnostic_state.current_generation,
+                        __ATOMIC_ACQUIRE),
+                    0);
+                uvdb_admission_diagnostic_write_end();
+            }
+#endif
             if(!uvdb_console_transport_no_ack(&uvdb_console_transport))
             {
                 buffer_write(&out_buf, "+", 1);
@@ -2898,6 +3285,10 @@ static void uvdb_note_target_running(void)
     uvdb_thread_inventory_reset(&uvdb_inventory);
     uvdb_exception_thread = -1;
     __atomic_store_n(&uvdb_target_stopped, 0, __ATOMIC_SEQ_CST);
+#ifdef UVDB_ADMISSION_DIAGNOSTIC
+    uvdb_admission_diagnostic_record(
+        UVDB_ADMISSION_EVENT_TARGET_RUNNING, -1, 0, 0);
+#endif
 }
 
 /* The caller owns UVDB_STOP_OWNER_CONTROLLER for this entire transaction.
@@ -3493,6 +3884,17 @@ static void uvdb_main_loop(
     int stop_signal,
     enum uvdb_fileio_context fileio_context)
 {
+#ifdef UVDB_ADMISSION_DIAGNOSTIC
+    uvdb_admission_diagnostic_record(
+        UVDB_ADMISSION_EVENT_MAIN_LOOP_ENTERED,
+        __atomic_load_n(
+            &uvdb_admission_diagnostic_state.current_socket,
+            __ATOMIC_ACQUIRE),
+        __atomic_load_n(
+            &uvdb_admission_diagnostic_state.current_generation,
+            __ATOMIC_ACQUIRE),
+        0);
+#endif
 #ifdef UVDB_KERNEL_VFP_READS
     // Negotiate the extended register shape only with the exact matching ABI
     // and an explicitly enabled experimental kernel. A mismatched/default
@@ -4377,6 +4779,17 @@ static void exception_handler(KuKernelExceptionContext* ctx)
             ctx, exception_type, guard_result, protocol_owner, 0);
         return;
     }
+#ifdef UVDB_ADMISSION_DIAGNOSTIC
+    uvdb_admission_diagnostic_record(
+        UVDB_ADMISSION_EVENT_PROTOCOL_ACQUIRED,
+        __atomic_load_n(
+            &uvdb_admission_diagnostic_state.current_socket,
+            __ATOMIC_ACQUIRE),
+        __atomic_load_n(
+            &uvdb_admission_diagnostic_state.current_generation,
+            __ATOMIC_ACQUIRE),
+        protocol_owner);
+#endif
 
     /* Exception context must never spin on the global state lock. The fault
      * may have interrupted this exact thread inside a uvdb_lock critical
@@ -4394,6 +4807,17 @@ static void exception_handler(KuKernelExceptionContext* ctx)
 
     int internal_controller = uvdb_is_controller_thread(exception_thread);
     __atomic_store_n(&uvdb_target_stopped, 1, __ATOMIC_SEQ_CST);
+#ifdef UVDB_ADMISSION_DIAGNOSTIC
+    uvdb_admission_diagnostic_record(
+        UVDB_ADMISSION_EVENT_TARGET_STOPPED,
+        __atomic_load_n(
+            &uvdb_admission_diagnostic_state.current_socket,
+            __ATOMIC_ACQUIRE),
+        __atomic_load_n(
+            &uvdb_admission_diagnostic_state.current_generation,
+            __ATOMIC_ACQUIRE),
+        protocol_owner);
+#endif
     int signal = SIGSEGV;
     if(ctx->exceptionType == KU_KERNEL_EXCEPTION_TYPE_UNDEFINED_INSTRUCTION)
         signal = SIGILL;
@@ -4736,6 +5160,10 @@ static __attribute__((used)) uint64_t real_uvdb_enter(uintptr_t lr)
         uvdb_unlock();
         return no_trap;
     }
+#ifdef UVDB_ADMISSION_DIAGNOSTIC
+    uvdb_admission_diagnostic_record(
+        UVDB_ADMISSION_EVENT_LISTENER_READY, listen_socket, 0, 0);
+#endif
 
     int accepted_socket = -1;
     for(;;)
@@ -4764,6 +5192,12 @@ static __attribute__((used)) uint64_t real_uvdb_enter(uintptr_t lr)
             uvdb_unlock();
             return no_trap;
         }
+#ifdef UVDB_ADMISSION_DIAGNOSTIC
+        uvdb_admission_diagnostic_begin_connection();
+        uvdb_admission_diagnostic_record(
+            UVDB_ADMISSION_EVENT_CANDIDATE_ACCEPTED,
+            accepted_socket, 0, 0);
+#endif
         if(uvdb_publish_socket(
                &uvdb_candidate_socket, accepted_socket) < 0)
         {
@@ -5236,6 +5670,9 @@ static int uvdb_start_server_locked(void)
         return -1;
     }
 
+#ifdef UVDB_ADMISSION_DIAGNOSTIC
+    uvdb_admission_diagnostic_reset();
+#endif
     __atomic_store_n(&uvdb_server_stop, 0, __ATOMIC_SEQ_CST);
     __atomic_store_n(&uvdb_network_closing, 0, __ATOMIC_RELEASE);
     #ifdef UVDB_KERNEL_THREAD_CONTROL

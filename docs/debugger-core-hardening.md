@@ -201,6 +201,44 @@ clean, `SLRS00001` was destroyed, and port 1234 was closed without a reboot or
 kernel configuration change. See
 [`rsp-network-fix-confirmation-3.65.json`](hardware/rsp-network-fix-confirmation-3.65.json).
 
+The successful raw-receive diagnostic and the blocked exact-fix confirmation
+diverge before the fixed empty-poll path. The earlier diagnostic received and
+ACKed `qSupported`, then captured raw `-35` while the stopped protocol owner was
+waiting for the response ACK. The exact-fix confirmation only established TCP
+and fully sent the same checksum-valid first request; it received neither the
+target ACK nor the response. That evidence confines the new question to
+listener admission, candidate promotion, synthetic stop, protocol ownership,
+or the first normal packet receive. It does not implicate `qOffsets` or the
+raw-EAGAIN classification.
+
+`UVDB_ADMISSION_DIAGNOSTIC=1` adds behavior-neutral, fixed-size telemetry for
+that boundary. Each transition type retains its first sequence number, total
+occurrence count, descriptor, generation, owner, and state bits:
+
+- listener ready and test-title ready;
+- candidate accepted and first checksum-complete frame observed with
+  `MSG_PEEK`;
+- promotion begun and connected descriptor/generation published;
+- protocol owner acquired, target stopped, and main loop entered;
+- first complete packet observed by the normal receiver;
+- target-running and network-closing transitions.
+
+The ledger is lock-free and bounded; production builds omit it. The diagnostic
+Vita title answers a fixed binary snapshot query on UDP port 1235 from its main
+loop. This path uses neither the candidate nor connected RSP descriptor and
+therefore remains available when the primary connection has been promoted but
+does not answer. It is intentionally scoped to the persistent-server synthetic
+stop used by this gate; a real exception on the test title's main thread would
+also pause the UDP responder. The host runner waits for both listener-ready and
+test-title-ready markers before opening TCP, and retrieves the same snapshot on
+any `qSupported` failure. Production-TU regressions prove immediate and delayed
+first packets remain queued through admission, are consumed exactly once after
+one promotion, and retain descriptor/generation/owner consistency. A forced
+disconnect after valid admission but before normal receive fails closed, and a
+candidate withdrawn at the promotion boundary never publishes a connected
+generation. Both paths release stopped/protocol state and permit a replacement
+`qSupported` and detach generation.
+
 Stop-token acquisition/recovery, thread-context snapshots, cache maintenance,
 and exception-slot replacement still execute inside the global state lock.
 Those calls protect coupled breakpoint/lease/handler invariants, and moving

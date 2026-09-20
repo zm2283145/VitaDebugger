@@ -30,6 +30,60 @@
 #define UVDB_DEBUGNET_PORT 18194
 #endif
 
+#ifdef UVDB_ADMISSION_DIAGNOSTIC
+#ifndef UVDB_ADMISSION_DIAGNOSTIC_PORT
+#define UVDB_ADMISSION_DIAGNOSTIC_PORT 1235
+#endif
+#define UVDB_ADMISSION_DIAGNOSTIC_REQUEST "UVDB-ADMISSION-1"
+static int admission_diagnostic_socket = -1;
+
+static int admission_diagnostic_start(void)
+{
+    int descriptor = socket(AF_INET, SOCK_DGRAM, 0);
+    if(descriptor < 0)
+        return -1;
+    int reuse = 1;
+    if(setsockopt(descriptor, SOL_SOCKET, SO_REUSEADDR,
+                  &reuse, sizeof(reuse)) < 0)
+    {
+        close(descriptor);
+        return -1;
+    }
+    struct sockaddr_in address = {
+        .sin_family = AF_INET,
+        .sin_addr = {.s_addr = 0},
+        .sin_port = htons(UVDB_ADMISSION_DIAGNOSTIC_PORT),
+    };
+    if(bind(descriptor, (void*)&address, sizeof(address)) < 0)
+    {
+        close(descriptor);
+        return -1;
+    }
+    admission_diagnostic_socket = descriptor;
+    return 0;
+}
+
+static void admission_diagnostic_poll(void)
+{
+    static const char request[] = UVDB_ADMISSION_DIAGNOSTIC_REQUEST;
+    unsigned char received[sizeof(request)];
+    struct sockaddr_in peer;
+    socklen_t peer_size = sizeof(peer);
+    ssize_t size = recvfrom(
+        admission_diagnostic_socket, received, sizeof(received),
+        MSG_DONTWAIT, (void*)&peer, &peer_size);
+    if(size != (ssize_t)(sizeof(request) - 1u) ||
+       memcmp(received, request, sizeof(request) - 1u))
+        return;
+
+    struct uvdb_admission_diagnostic diagnostic;
+    if(uvdb_admission_diagnostic_get(&diagnostic) == 0)
+        (void)sendto(
+            admission_diagnostic_socket, &diagnostic,
+            sizeof(diagnostic), 0, (void*)&peer, peer_size);
+}
+#endif
+
 static volatile int test_value;
 volatile int trigger_fault;
 volatile uint32_t uvdb_thumb_exclusive_word = UINT32_C(0x13572468);
@@ -382,6 +436,16 @@ int main(void)
             ? "ready"
             : "FAILED");
 #endif
+#ifdef UVDB_ADMISSION_DIAGNOSTIC
+    int admission_diagnostic_result = admission_diagnostic_start();
+    psvDebugScreenPrintf(
+        "Admission diagnostic UDP %u: %s (%d)\n",
+        UVDB_ADMISSION_DIAGNOSTIC_PORT,
+        admission_diagnostic_result == 0 ? "READY" : "FAILED",
+        admission_diagnostic_result);
+    if(admission_diagnostic_result < 0)
+        hold_failed_gate();
+#endif
     if(uvdb_start_server() < 0)
     {
         psvDebugScreenPrintf("Failed to start persistent debugger server.\n");
@@ -395,8 +459,14 @@ int main(void)
                          stdio_result == 0 ? "READY" : "FAILED",
                          stdio_result);
 #endif
+#ifdef UVDB_ADMISSION_DIAGNOSTIC
+    uvdb_admission_diagnostic_mark_test_ready();
+#endif
     for(int i = 0;; i++)
     {
+#ifdef UVDB_ADMISSION_DIAGNOSTIC
+        admission_diagnostic_poll();
+#endif
 #ifdef UVDB_GDB_ASLR_FIXTURE
         uint32_t aslr_main_sequence = __atomic_load_n(
             &uvdb_aslr_main_request, __ATOMIC_ACQUIRE);

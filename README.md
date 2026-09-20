@@ -630,7 +630,14 @@ comparator. The detailed record is
   sentinel and the client fully sent valid `qSupported`, yet the target sent
   neither the RSP ACK nor a response within 15 seconds. The title cleaned up
   normally. Hardware confirmation of the fix and the stopped-RST plus long-
-  duration-equivalent cancellation/soak matrix therefore remain pending.
+  duration-equivalent cancellation/soak matrix therefore remain pending. A
+  compile-time-only admission diagnostic now records a fixed-size ledger from
+  listener readiness through candidate accept, valid-frame peek, promotion,
+  protocol ownership, stopped-state entry, and first packet receive. The Vita
+  test title exposes the snapshot on a separate bounded UDP query port, so a
+  wedged admitted RSP socket cannot hide the transition boundary. Production-
+  TU tests cover immediate and delayed first packets plus disconnect during
+  promotion without consuming the peeked frame or leaking ownership.
 
 ## Documentation map
 

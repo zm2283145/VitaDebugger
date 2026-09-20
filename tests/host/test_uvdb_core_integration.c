@@ -7,6 +7,7 @@
 
 #define UVDB_HOST_INTEGRATION_TEST 1
 #define UVDB_RAW_RECV_DIAGNOSTIC 1
+#define UVDB_ADMISSION_DIAGNOSTIC 1
 #include "../../src/uvdb.c"
 
 enum {
@@ -61,6 +62,9 @@ static int fake_nonblocking_receive_violation;
 static int fake_receive_would_block_count;
 static ssize_t fake_receive_would_block_result;
 static int fake_peer_reset;
+static int fake_disconnect_after_admission;
+static int fake_disconnect_on_admission_destroy;
+static int fake_withdraw_candidate_on_admission_destroy;
 static int fake_block_send;
 static int fake_send_blocked;
 static int fake_release_send;
@@ -146,6 +150,9 @@ static void reset_core(void)
     fake_receive_would_block_count = 0;
     fake_receive_would_block_result = SCE_NET_ERROR_EAGAIN;
     fake_peer_reset = 0;
+    fake_disconnect_after_admission = 0;
+    fake_disconnect_on_admission_destroy = 0;
+    fake_withdraw_candidate_on_admission_destroy = 0;
     fake_block_send = 0;
     fake_send_blocked = 0;
     fake_release_send = 0;
@@ -187,6 +194,10 @@ static void reset_core(void)
     uvdb_clear_io_failure();
     memset(&uvdb_raw_recv_diagnostic, 0,
            sizeof(uvdb_raw_recv_diagnostic));
+    __atomic_store_n(
+        &uvdb_admission_diagnostic_state.test_title_ready, 0u,
+        __ATOMIC_RELEASE);
+    uvdb_admission_diagnostic_reset();
     __atomic_store_n(
         &uvdb_raw_recv_phase, UVDB_RAW_RECV_PHASE_NONE,
         __ATOMIC_RELEASE);
@@ -605,6 +616,279 @@ static void test_silent_probe_timeout_is_bounded(void)
     check(uvdb_wait_for_gdb_admission(FAKE_SOCKET) == 1 &&
               fake_receive_offset == 0,
           "initial ACK prefix plus valid RSP is admitted without consumption");
+}
+
+static int admission_event_before(
+    const struct uvdb_admission_diagnostic* diagnostic,
+    enum uvdb_admission_diagnostic_event first,
+    enum uvdb_admission_diagnostic_event second)
+{
+    return diagnostic->event_sequence[first] != 0 &&
+           diagnostic->event_sequence[second] != 0 &&
+           diagnostic->event_sequence[first] <
+               diagnostic->event_sequence[second];
+}
+
+static void complete_admitted_session(uintptr_t resume)
+{
+    KuKernelExceptionContext context = {
+        .r0 = (uint32_t)resume,
+        .pc = (uint32_t)uvdb_trap_address(),
+        .SPSR = UINT32_C(0x60000010),
+        .exceptionType =
+            KU_KERNEL_EXCEPTION_TYPE_UNDEFINED_INSTRUCTION,
+    };
+    fake_thread = FAKE_THREAD;
+    exception_handler(&context);
+}
+
+struct fake_enter_thread
+{
+    uintptr_t resume;
+    uint64_t result;
+};
+
+static void* run_fake_enter(void* opaque)
+{
+    struct fake_enter_thread* operation = opaque;
+    fake_thread = FAKE_OTHER_THREAD;
+    operation->result = real_uvdb_enter(operation->resume);
+    return NULL;
+}
+
+static void assert_admission_transition_order(const char* label)
+{
+    struct uvdb_admission_diagnostic diagnostic;
+    check(uvdb_admission_diagnostic_get(&diagnostic) == 0,
+          label);
+    check(
+        diagnostic.version == UVDB_ADMISSION_DIAGNOSTIC_VERSION &&
+            diagnostic.size == sizeof(diagnostic) &&
+            diagnostic.event_count ==
+                UVDB_ADMISSION_DIAGNOSTIC_EVENT_COUNT,
+        label);
+    check(
+        admission_event_before(
+            &diagnostic, UVDB_ADMISSION_EVENT_LISTENER_READY,
+            UVDB_ADMISSION_EVENT_CANDIDATE_ACCEPTED) &&
+            admission_event_before(
+                &diagnostic, UVDB_ADMISSION_EVENT_CANDIDATE_ACCEPTED,
+                UVDB_ADMISSION_EVENT_VALID_FRAME) &&
+            admission_event_before(
+                &diagnostic, UVDB_ADMISSION_EVENT_VALID_FRAME,
+                UVDB_ADMISSION_EVENT_PROMOTION_BEGIN) &&
+            admission_event_before(
+                &diagnostic, UVDB_ADMISSION_EVENT_PROMOTION_BEGIN,
+                UVDB_ADMISSION_EVENT_SOCKET_PUBLISHED),
+        label);
+    check(
+        diagnostic.event_occurrences[
+            UVDB_ADMISSION_EVENT_SOCKET_PUBLISHED] == 1u &&
+            diagnostic.event_descriptor[
+                UVDB_ADMISSION_EVENT_CANDIDATE_ACCEPTED] ==
+                FAKE_SOCKET &&
+            diagnostic.event_descriptor[
+                UVDB_ADMISSION_EVENT_SOCKET_PUBLISHED] ==
+                FAKE_SOCKET &&
+            diagnostic.event_generation[
+                UVDB_ADMISSION_EVENT_SOCKET_PUBLISHED] != 0,
+        label);
+}
+
+static void test_immediate_first_packet_admission_transition(void)
+{
+    reset_core();
+    uvdb_socket = -1;
+    uvdb_state = UVDB_STATE_IDLE;
+    __atomic_store_n(&uvdb_target_stopped, 0, __ATOMIC_RELEASE);
+    uvdb_admission_diagnostic_mark_test_ready();
+    queue_rsp_payload("qSupported", strlen("qSupported"), 1);
+    append_rsp_payload("D", 1u, 1);
+    fake_accept_calls = 1;
+
+    const uintptr_t resume = UINT32_C(0x81005678);
+    const uint64_t no_trap = (uint64_t)resume << 32 | resume;
+    check(real_uvdb_enter(resume) != no_trap,
+          "immediate packet promotes one debugger session");
+    check(fake_receive_offset == 0,
+          "immediate admission peeks without consuming the first packet");
+    assert_admission_transition_order(
+        "immediate admission records ordered ownership transitions");
+
+    complete_admitted_session(resume);
+    struct uvdb_admission_diagnostic diagnostic;
+    check(uvdb_admission_diagnostic_get(&diagnostic) == 0 &&
+              admission_event_before(
+                  &diagnostic,
+                  UVDB_ADMISSION_EVENT_SOCKET_PUBLISHED,
+                  UVDB_ADMISSION_EVENT_PROTOCOL_ACQUIRED) &&
+              admission_event_before(
+                  &diagnostic,
+                  UVDB_ADMISSION_EVENT_PROTOCOL_ACQUIRED,
+                  UVDB_ADMISSION_EVENT_TARGET_STOPPED) &&
+              admission_event_before(
+                  &diagnostic,
+                  UVDB_ADMISSION_EVENT_TARGET_STOPPED,
+                  UVDB_ADMISSION_EVENT_MAIN_LOOP_ENTERED) &&
+              admission_event_before(
+                  &diagnostic,
+                  UVDB_ADMISSION_EVENT_MAIN_LOOP_ENTERED,
+                  UVDB_ADMISSION_EVENT_FIRST_PACKET) &&
+              diagnostic.first_packet_size ==
+                  strlen("qSupported") &&
+              diagnostic.current_socket < 0 &&
+              diagnostic.current_owner == 0 &&
+              uvdb_state == UVDB_STATE_IDLE,
+          "immediate first packet reaches one owner without loss");
+}
+
+static void test_delayed_first_packet_admission_transition(void)
+{
+    reset_core();
+    uvdb_socket = -1;
+    uvdb_state = UVDB_STATE_IDLE;
+    __atomic_store_n(&uvdb_target_stopped, 0, __ATOMIC_RELEASE);
+    uvdb_admission_diagnostic_mark_test_ready();
+    fake_accept_calls = 1;
+    fake_epoll_block = 1;
+
+    const uintptr_t resume = UINT32_C(0x81005678);
+    const uint64_t no_trap = (uint64_t)resume << 32 | resume;
+    struct fake_enter_thread operation = {.resume = resume};
+    pthread_t enter_thread;
+    check(pthread_create(
+              &enter_thread, NULL, run_fake_enter, &operation) == 0,
+          "start delayed admission owner");
+    check(wait_for_atomic_value(&fake_epoll_wait_blocked, 1) == 0,
+          "delayed admission reaches bounded packet wait");
+    queue_rsp_payload("qSupported", strlen("qSupported"), 1);
+    append_rsp_payload("D", 1u, 1);
+    fake_epoll_events = SCE_NET_EPOLLIN;
+    __atomic_store_n(&fake_epoll_release, 1, __ATOMIC_RELEASE);
+    check(pthread_join(enter_thread, NULL) == 0 &&
+              operation.result != no_trap,
+          "delayed valid packet promotes the debugger session");
+    fake_epoll_block = 0;
+    check(fake_receive_offset == 0,
+          "delayed admission leaves the first complete frame queued");
+    assert_admission_transition_order(
+        "delayed admission records one ordered promotion");
+
+    complete_admitted_session(resume);
+    struct uvdb_admission_diagnostic diagnostic;
+    check(uvdb_admission_diagnostic_get(&diagnostic) == 0 &&
+              diagnostic.event_occurrences[
+                  UVDB_ADMISSION_EVENT_SOCKET_PUBLISHED] == 1u &&
+              diagnostic.event_occurrences[
+                  UVDB_ADMISSION_EVENT_FIRST_PACKET] == 1u &&
+              diagnostic.current_owner == 0 &&
+              uvdb_state == UVDB_STATE_IDLE,
+          "delayed packet is consumed exactly once by the protocol owner");
+}
+
+static void test_disconnect_during_promotion_reopens(void)
+{
+    reset_core();
+    uvdb_socket = -1;
+    uvdb_state = UVDB_STATE_IDLE;
+    __atomic_store_n(&uvdb_target_stopped, 0, __ATOMIC_RELEASE);
+    uvdb_admission_diagnostic_mark_test_ready();
+    queue_rsp_payload("qSupported", strlen("qSupported"), 0);
+    fake_accept_calls = 1;
+    fake_disconnect_on_admission_destroy = 1;
+
+    const uintptr_t resume = UINT32_C(0x81005678);
+    const uint64_t no_trap = (uint64_t)resume << 32 | resume;
+    check(real_uvdb_enter(resume) != no_trap,
+          "disconnect during promotion publishes one generation");
+    assert_admission_transition_order(
+        "disconnect during promotion records exactly one promotion");
+    complete_admitted_session(resume);
+    struct uvdb_admission_diagnostic diagnostic;
+    check(uvdb_admission_diagnostic_get(&diagnostic) == 0 &&
+              diagnostic.event_occurrences[
+                  UVDB_ADMISSION_EVENT_SOCKET_PUBLISHED] == 1u &&
+              diagnostic.event_occurrences[
+                  UVDB_ADMISSION_EVENT_FIRST_PACKET] == 0u &&
+              fake_receive_offset == 0 &&
+              diagnostic.current_socket < 0 &&
+              diagnostic.current_owner == 0 &&
+              uvdb_state == UVDB_STATE_ERROR &&
+              !__atomic_load_n(
+                  &uvdb_target_stopped, __ATOMIC_ACQUIRE),
+          "promotion disconnect fails closed without consuming queued data");
+
+    uvdb_admission_diagnostic_reset();
+    uvdb_admission_diagnostic_mark_test_ready();
+    fake_disconnect_after_admission = 0;
+    fake_connected_socket_closed = 0;
+    fake_connected_socket_shutdown = 0;
+    fake_accept_calls = 1;
+    queue_rsp_payload("qSupported", strlen("qSupported"), 1);
+    append_rsp_payload("D", 1u, 1);
+    check(real_uvdb_enter(resume) != no_trap,
+          "promotion disconnect reopens a replacement listener");
+    complete_admitted_session(resume);
+    check(uvdb_admission_diagnostic_get(&diagnostic) == 0 &&
+              diagnostic.event_occurrences[
+                  UVDB_ADMISSION_EVENT_SOCKET_PUBLISHED] == 1u &&
+              diagnostic.event_occurrences[
+                  UVDB_ADMISSION_EVENT_FIRST_PACKET] == 1u &&
+              diagnostic.current_owner == 0 &&
+              uvdb_state == UVDB_STATE_IDLE,
+          "replacement listener completes qSupported and detach once");
+}
+
+static void test_candidate_withdrawn_during_promotion_reopens(void)
+{
+    reset_core();
+    uvdb_socket = -1;
+    uvdb_state = UVDB_STATE_IDLE;
+    __atomic_store_n(&uvdb_target_stopped, 0, __ATOMIC_RELEASE);
+    uvdb_admission_diagnostic_mark_test_ready();
+    queue_rsp_payload("qSupported", strlen("qSupported"), 0);
+    fake_accept_calls = 1;
+    fake_withdraw_candidate_on_admission_destroy = 1;
+
+    const uintptr_t resume = UINT32_C(0x81005678);
+    const uint64_t no_trap = (uint64_t)resume << 32 | resume;
+    check(real_uvdb_enter(resume) == no_trap,
+          "withdrawn admission candidate prevents promotion");
+    struct uvdb_admission_diagnostic diagnostic;
+    check(uvdb_admission_diagnostic_get(&diagnostic) == 0 &&
+              diagnostic.event_occurrences[
+                  UVDB_ADMISSION_EVENT_PROMOTION_BEGIN] == 1u &&
+              diagnostic.event_occurrences[
+                  UVDB_ADMISSION_EVENT_SOCKET_PUBLISHED] == 0u &&
+              diagnostic.current_socket < 0 &&
+              diagnostic.current_candidate < 0 &&
+              diagnostic.current_listener < 0 &&
+              diagnostic.current_owner == 0 &&
+              fake_receive_offset == 0 &&
+              uvdb_protocol_gate_is_idle(&uvdb_protocol_gate) &&
+              !__atomic_load_n(
+                  &uvdb_target_stopped, __ATOMIC_ACQUIRE) &&
+              uvdb_state == UVDB_STATE_ERROR,
+          "failed promotion closes candidates without consuming a packet");
+
+    uvdb_admission_diagnostic_reset();
+    fake_connected_socket_closed = 0;
+    fake_connected_socket_shutdown = 0;
+    fake_accept_calls = 1;
+    queue_rsp_payload("qSupported", strlen("qSupported"), 1);
+    append_rsp_payload("D", 1u, 1);
+    check(real_uvdb_enter(resume) != no_trap,
+          "failed promotion permits a replacement listener");
+    complete_admitted_session(resume);
+    check(uvdb_admission_diagnostic_get(&diagnostic) == 0 &&
+              diagnostic.connection_epoch == 1u &&
+              diagnostic.event_occurrences[
+                  UVDB_ADMISSION_EVENT_SOCKET_PUBLISHED] == 1u &&
+              diagnostic.event_occurrences[
+                  UVDB_ADMISSION_EVENT_FIRST_PACKET] == 1u &&
+              diagnostic.current_owner == 0 &&
+              uvdb_state == UVDB_STATE_IDLE,
+          "replacement after failed promotion negotiates and detaches");
 }
 
 static void test_candidate_socket_cleanup(void)
@@ -1276,6 +1560,10 @@ int main(void)
     test_server_join_timeout_is_bounded_and_retryable();
     test_non_rsp_probe_does_not_consume_session();
     test_silent_probe_timeout_is_bounded();
+    test_immediate_first_packet_admission_transition();
+    test_delayed_first_packet_admission_transition();
+    test_disconnect_during_promotion_reopens();
+    test_candidate_withdrawn_during_promotion_reopens();
     test_candidate_socket_cleanup();
     test_production_frame_boundaries_and_escapes();
     test_disconnect_command_matrix();
@@ -1410,6 +1698,11 @@ ssize_t sceNetSyscallRecvfrom(void* arguments)
             usleep(1000);
         return -1;
     }
+    if((int)args[0] == FAKE_SOCKET &&
+       !(args[3] & MSG_PEEK) &&
+       __atomic_load_n(
+           &fake_disconnect_after_admission, __ATOMIC_ACQUIRE))
+        return -1;
     unsigned char* source;
     size_t* offset;
     size_t source_size;
@@ -1593,7 +1886,21 @@ int sceNetEpollWait(
     events[0].data.fd = fake_epoll_socket;
     return 1;
 }
-int sceNetEpollDestroy(int epoll) { (void)epoll; return 0; }
+int sceNetEpollDestroy(int epoll)
+{
+    (void)epoll;
+    if(__atomic_exchange_n(
+           &fake_disconnect_on_admission_destroy, 0,
+           __ATOMIC_ACQ_REL))
+        __atomic_store_n(
+            &fake_disconnect_after_admission, 1,
+            __ATOMIC_RELEASE);
+    if(__atomic_exchange_n(
+           &fake_withdraw_candidate_on_admission_destroy, 0,
+           __ATOMIC_ACQ_REL))
+        uvdb_close_socket(&uvdb_candidate_socket);
+    return 0;
+}
 
 int kuKernelCpuUnrestrictedMemcpy(
     void* destination, const void* source, size_t size)

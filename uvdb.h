@@ -1,6 +1,7 @@
 #pragma once
 
 #include <stddef.h>
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -17,6 +18,68 @@ struct uvdb_config {
     unsigned short port;
     size_t max_packet_buffer;
 };
+
+#ifdef UVDB_ADMISSION_DIAGNOSTIC
+#define UVDB_ADMISSION_DIAGNOSTIC_VERSION 1u
+#define UVDB_ADMISSION_DIAGNOSTIC_EVENT_COUNT 12u
+
+enum uvdb_admission_diagnostic_event {
+    UVDB_ADMISSION_EVENT_LISTENER_READY = 0,
+    UVDB_ADMISSION_EVENT_TEST_TITLE_READY,
+    UVDB_ADMISSION_EVENT_CANDIDATE_ACCEPTED,
+    UVDB_ADMISSION_EVENT_VALID_FRAME,
+    UVDB_ADMISSION_EVENT_PROMOTION_BEGIN,
+    UVDB_ADMISSION_EVENT_SOCKET_PUBLISHED,
+    UVDB_ADMISSION_EVENT_PROTOCOL_ACQUIRED,
+    UVDB_ADMISSION_EVENT_TARGET_STOPPED,
+    UVDB_ADMISSION_EVENT_MAIN_LOOP_ENTERED,
+    UVDB_ADMISSION_EVENT_FIRST_PACKET,
+    UVDB_ADMISSION_EVENT_TARGET_RUNNING,
+    UVDB_ADMISSION_EVENT_NETWORK_CLOSING,
+};
+
+enum uvdb_admission_diagnostic_state {
+    UVDB_ADMISSION_STATE_TARGET_STOPPED = 1u << 0,
+    UVDB_ADMISSION_STATE_NETWORK_CLOSING = 1u << 1,
+    UVDB_ADMISSION_STATE_TEST_TITLE_READY = 1u << 2,
+    UVDB_ADMISSION_STATE_PROTOCOL_OWNED = 1u << 3,
+};
+
+struct uvdb_admission_diagnostic {
+    uint32_t version;
+    uint32_t size;
+    uint32_t revision;
+    uint32_t event_count;
+    uint32_t event_sequence[UVDB_ADMISSION_DIAGNOSTIC_EVENT_COUNT];
+    uint32_t event_occurrences[UVDB_ADMISSION_DIAGNOSTIC_EVENT_COUNT];
+    int32_t event_descriptor[UVDB_ADMISSION_DIAGNOSTIC_EVENT_COUNT];
+    uint32_t event_generation[UVDB_ADMISSION_DIAGNOSTIC_EVENT_COUNT];
+    uint32_t event_owner[UVDB_ADMISSION_DIAGNOSTIC_EVENT_COUNT];
+    uint32_t event_state[UVDB_ADMISSION_DIAGNOSTIC_EVENT_COUNT];
+    int32_t current_socket;
+    int32_t current_candidate;
+    int32_t current_listener;
+    uint32_t current_generation;
+    uint32_t current_owner;
+    uint32_t current_state;
+    uint32_t first_packet_size;
+    uint32_t connection_epoch;
+};
+
+#ifdef __cplusplus
+static_assert(
+#else
+_Static_assert(
+#endif
+    sizeof(struct uvdb_admission_diagnostic) == 336u,
+    "admission diagnostic wire ABI changed");
+
+// Diagnostic builds expose a fixed-size, lock-free snapshot for a separate
+// test-title transport. These functions do not perform network I/O.
+void uvdb_admission_diagnostic_mark_test_ready(void);
+int uvdb_admission_diagnostic_get(
+    struct uvdb_admission_diagnostic* diagnostic);
+#endif
 
 enum uvdb_log_level {
     UVDB_LOG_NONE = 0,
