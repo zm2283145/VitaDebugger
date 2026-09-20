@@ -696,8 +696,15 @@ comparator. The detailed record is
   reconnect ownership bug. The remaining matrix could not start: one reused
   launch and one fresh signed reinstall both produced 40 consecutive UDP-ready
   timeouts before any TCP contact. Further identical retries are therefore
-  blocked pending separate startup/readiness telemetry. See
-  [the confirmation record](docs/hardware/rsp-second-admission-confirmation-3.65.json).
+  blocked pending separate startup/readiness telemetry. A compile-time-only,
+  two-slot persistent journal retrieved through Companion FTP then proved that
+  a fresh exact build reached `test_ready` and `main_loop` with no failed
+  initialization stage, while UDP 1235 still returned no packet for 20
+  seconds. TCP 1234 was not contacted and the run stopped cleanly. This narrows
+  the unexplained boundary to post-marker loop liveness or the admission
+  receive/send poll, but does not yet support a production RSP fix. See
+  [the confirmation record](docs/hardware/rsp-second-admission-confirmation-3.65.json)
+  and [the startup diagnostic record](docs/hardware/rsp-startup-diagnostic-3.65.json).
 
 ## Documentation map
 

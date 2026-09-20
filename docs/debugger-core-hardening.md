@@ -308,6 +308,26 @@ evidence against RSP negotiation. Repeating the same launch is uninformative;
 the next hardware action requires a separate startup marker that does not
 depend on the title main-loop UDP responder.
 
+A compile-time-only persistent startup journal now records process entry,
+route setup, display setup, optional gates and fixtures, admission UDP setup,
+debugger-server setup, stdio setup, test readiness, and first main-loop entry.
+Two fixed 64-byte slots carry a system-time run identifier, monotonically
+increasing sequence, FNV-1a checksum, build flags, and a sticky failure-stage
+mask. The bounded Companion FTP reader validates the complete ABI, rejects
+mixed-run or malformed slots, requires the expected diagnostic build flags,
+and has a separate preflight action that deletes the prior journal and proves
+it absent.
+
+The first retail startup-journal run reached `test_ready` and `main_loop` with
+two valid slots, run ID 69749393007, build flags 3, and no failed stage. The
+same exact journal remained readable after the subsequent 20-second UDP-ready
+deadline, but UDP 1235 returned no packet and TCP 1234 was never contacted.
+This rules out a failure in the recorded initialization stages. It does not yet
+distinguish a crash or block immediately after the main-loop marker from a
+receive/send failure in the admission poll itself, so it does not support a
+production RSP change. The attempt stopped cleanly; poll-level and bounded
+loop-liveness telemetry are required before another attempt.
+
 The corrected diagnostic passed this boundary on retail 3.65. The out-of-band
 ready snapshot showed listener 88, no candidate or connected socket, the test
 title ready, and no closing/stopped/owner state. The first request then produced

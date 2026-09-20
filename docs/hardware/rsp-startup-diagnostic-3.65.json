@@ -1,0 +1,61 @@
+{
+  "schema": 1,
+  "tested_at": "2026-09-20T23:39:58.326450Z",
+  "firmware": "3.65",
+  "device_class": "retail-handheld",
+  "title_id": "SLRS00001",
+  "source_commit": "11db449d1e2a667eccfe0e13a4feb0fe59858575",
+  "artifacts": {
+    "vpk_sha256": "9bb718986eadb00b4dccb987a4b97ce9498f075e2254136809acab179da04963",
+    "elf_sha256": "e0721421e383500a9a9d557103b578744f75cd8338e5eaf3391bac86e206452e",
+    "eboot_sha256": "004a9978238d62506db90e9b834f96cbd3880aa5d9c330133c1166e4b68bbd6d",
+    "freeze_manifest_sha256": "a216e8e34499c3e17f93fb3432401539b1713bb84af8621a8b1ee2a826e42b3e",
+    "startup_runner_sha256": "3690934452d95e0a2523120341eed3283e4a03d459925e133be4f765630bc630",
+    "kubridge_source_commit": "417ddde9a744eba98d769382c1c1372b8e119139",
+    "kubridge_stub_sha256": "fe05a117421b375d77bdc5102d5753f5dcf300e33176222688e490f2d03f5796"
+  },
+  "deployment": {
+    "job": "1f37c4b1c892a6743061c785077bd0c9",
+    "signed_manifest_sha256": "2e9615170987a52c438b93da6a15f07a66bf515fe3f8d537217d537d9aaa8fb0",
+    "result": "success",
+    "installed_identity": "pass"
+  },
+  "startup_journal": {
+    "status": "pass",
+    "transport": "companion-ftp",
+    "remote_path": "ux0:/data/vitadebugger-rsp-startup.bin",
+    "preflight_delete_verified": true,
+    "run_id": 69749393007,
+    "latest_sequence": 12,
+    "latest_stage": 15,
+    "latest_stage_name": "main_loop",
+    "prior_stage": 14,
+    "prior_stage_name": "test_ready",
+    "failed_stage_mask": 0,
+    "build_flags": 3,
+    "valid_slots": 2,
+    "post_timeout_snapshot_unchanged": true
+  },
+  "explicit_ready": {
+    "status": "fail",
+    "transport": "udp",
+    "port": 1235,
+    "deadline_seconds": 20,
+    "response_count": 0,
+    "tcp_1234_contacted": false
+  },
+  "outcome": "hard-stop-before-rsp",
+  "rsp_cases_run": [],
+  "interpretation": "The title reached test-ready and entered its main loop with no recorded startup failure, but the UDP admission responder returned no snapshot. Initialization-stage telemetry rules out failure before the main loop but does not distinguish a post-marker crash, a blocked loop, or a receive/send failure in the first admission poll.",
+  "sealed_evidence_manifest_sha256": "77e51b5721b6c62d6fdae3e8df44d0b9fc720e4ca18b0447be4d121b69a320be",
+  "final_state": {
+    "livearea_wait_seconds": 3,
+    "rsp_port_1234_open": false,
+    "diagnostic_port_1235_responding": false,
+    "test_title_running": false,
+    "kernel_configuration_changed": false,
+    "rebooted": false,
+    "device_ownership_released": true
+  },
+  "remaining_gate": "Add bounded first-poll and main-loop liveness telemetry before another evidence-justified attempt; the remaining RSP matrix and 50-cycle soak were not run."
+}
