@@ -133,9 +133,18 @@ It then found that a Windows `SO_LINGER` RST did not wake Vita's raw blocking
 receive while the target was stopped, so no listener reopened within the
 15-second bound. The title was destroyed cleanly and port 1234 was confirmed
 closed without a reboot or kernel configuration change. The nonblocking fix
-above remains hardware-pending; rerun the stopped RST, connected cancellation,
-owner exclusion, command-specific disconnect, and bounded soak matrix before
-claiming retail closure.
+above remains hardware-pending. A renewed retry from exact commit `f6bacc8`
+froze and hashed a fresh VPK, ELF, and installed-eboot expectation, then
+hard-stopped before package staging because VitaDevDeploy did not publish a
+fresh challenge within its bounded acquisition window. The deployment agent
+launched through Companion, but no signed job, package staging, install, test-
+title launch, or RSP connection occurred. Recovery status remained clean;
+Companion destroyed active applications, the LiveArea wait completed, and port
+1234 was closed. See
+[`rsp-network-reset-retry-3.65.json`](hardware/rsp-network-reset-retry-3.65.json).
+Rerun the stopped RST, connected cancellation, owner exclusion,
+command-specific disconnect, and bounded soak matrix before claiming retail
+closure.
 
 Stop-token acquisition/recovery, thread-context snapshots, cache maintenance,
 and exception-slot replacement still execute inside the global state lock.
@@ -295,6 +304,8 @@ The focused host suite covers:
    disconnects during `m`, `M`, `g`, `p`, `G`, and `P`. Resolve writable
    fixture addresses against the ELF PT_LOAD segment corresponding to live
    `DataSeg`, read the exact bytes first, and use an idempotent `M` payload.
+   The `f6bacc8` retry did not reach this gate because the signed-deployment
+   agent failed to publish a fresh challenge.
 2. Client admission, candidate cancellation, Ctrl-C, detach, and reconnect have
    passed on Vita. Host injection now covers connected receive/send
    cancellation, whole-protocol exclusion, an intentional connected HUP, and

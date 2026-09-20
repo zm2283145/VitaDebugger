@@ -1,0 +1,52 @@
+{
+  "schema": 1,
+  "tested_at": "2026-09-20T06:32:28.9036165Z",
+  "firmware": "3.65",
+  "device_class": "retail-handheld",
+  "source_commit": "f6bacc89635c706ad4bb6a725c2152751cc85485",
+  "title_id": "SLRS00001",
+  "outcome": "hard-stop-before-deployment",
+  "artifacts": {
+    "vpk_sha256": "87dd16541c4424dd3e3c23b95691e28f73306820088c787c1d97bf11cbf26f97",
+    "elf_sha256": "9d7521545cb541ce9f99d71961441efe452b0a163863ee8c6c90d33d3a38dee4",
+    "expected_installed_eboot_sha256": "2ee3f10da4b6ae437475fcd01a486a42afc2e0dcada8ae8d115fcd105b089f92",
+    "kubridge_stub_sha256": "141e458f82166a8b8c04ae01c4533346cf11ceb6df8f940d002895420ac2ac01"
+  },
+  "deployment": {
+    "transport": "ftp",
+    "action": "install_launch",
+    "agent": "VitaDevDeploy",
+    "agent_launched": true,
+    "launched_via": "Companion",
+    "failure_stage": "challenge_acquisition",
+    "error": "Timed out waiting for a fresh VitaDevDeploy challenge; challenge.v1 was absent.",
+    "signed_job_created": false,
+    "package_staged": false,
+    "install_started": false,
+    "test_title_launched": false,
+    "rsp_contacted": false
+  },
+  "protocol_cases": {
+    "ack_stopped_wait_rst_sentinel": "not-run",
+    "no_ack_stopped_wait_rst_sentinel": "not-run",
+    "command_disconnect_matrix": "not-run",
+    "connected_receive_cancellation": "not-run",
+    "connected_send_cancellation": "not-run",
+    "second_owner_exclusion": "not-run",
+    "intentional_connected_hup": "not-run",
+    "detach_reconnect": "not-run",
+    "bounded_50_cycle_soak": "not-run"
+  },
+  "final_state": {
+    "recovery_status": "clean",
+    "companion_destroy_response": "Apps destroyed.",
+    "livearea_wait_seconds": 3,
+    "rsp_port_1234_open": false,
+    "test_title_running": false,
+    "kernel_configuration_changed": false,
+    "rebooted": false,
+    "device_ownership_released": true
+  },
+  "sealed_evidence_manifest_sha256": "6c8ad78d81378d04f118b60b0fae0824f5460c410150ff4a5f3d04eef640ebd1",
+  "remaining_gate": "Repeat deployment, then require both ACK and no-ack stopped-wait RST sentinels before the remaining matrix."
+}
