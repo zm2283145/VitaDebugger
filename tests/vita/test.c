@@ -3,6 +3,7 @@
 #include <netinet/in.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <errno.h>
 #include <pthread.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -27,8 +28,13 @@
 #define UVDB_STARTUP_DIAGNOSTIC_PATH \
     "ux0:/data/vitadebugger-rsp-startup.bin"
 #define UVDB_STARTUP_DIAGNOSTIC_MAGIC UINT32_C(0x55565344)
-#define UVDB_STARTUP_DIAGNOSTIC_VERSION UINT32_C(2)
+#define UVDB_STARTUP_DIAGNOSTIC_VERSION UINT32_C(3)
 #define UVDB_STARTUP_DIAGNOSTIC_FAILED UINT32_C(1)
+#define UVDB_STARTUP_OBS_POLL_ENTERED UINT32_C(2)
+#define UVDB_STARTUP_OBS_MALFORMED_REQUEST UINT32_C(4)
+#define UVDB_STARTUP_OBS_REQUEST_RECEIVED UINT32_C(8)
+#define UVDB_STARTUP_OBS_RESPONSE_ATTEMPTED UINT32_C(16)
+#define UVDB_STARTUP_OBS_RESPONSE_SENT UINT32_C(32)
 #define UVDB_STARTUP_BUILD_ADMISSION UINT32_C(1)
 #define UVDB_STARTUP_BUILD_CONSOLE UINT32_C(2)
 #define UVDB_STARTUP_BUILD_KERNEL UINT32_C(4)
@@ -50,6 +56,11 @@ enum uvdb_startup_diagnostic_stage
     UVDB_STARTUP_STAGE_STDIO_READY,
     UVDB_STARTUP_STAGE_TEST_READY,
     UVDB_STARTUP_STAGE_MAIN_LOOP,
+    UVDB_STARTUP_STAGE_ADMISSION_POLL_BEGIN,
+    UVDB_STARTUP_STAGE_ADMISSION_POLL_IDLE,
+    UVDB_STARTUP_STAGE_ADMISSION_REQUEST,
+    UVDB_STARTUP_STAGE_ADMISSION_RESPONSE,
+    UVDB_STARTUP_STAGE_MAIN_LOOP_HEARTBEAT,
 };
 
 struct uvdb_startup_diagnostic_record
@@ -66,7 +77,8 @@ struct uvdb_startup_diagnostic_record
     uint32_t run_id_low;
     uint32_t run_id_high;
     uint32_t failed_stage_mask;
-    uint32_t reserved[4];
+    uint32_t detail[3];
+    uint32_t reserved;
 };
 
 _Static_assert(
@@ -77,6 +89,7 @@ static int startup_diagnostic_descriptor = -1;
 static uint32_t startup_diagnostic_sequence;
 static uint64_t startup_diagnostic_run_id;
 static uint32_t startup_diagnostic_failed_stage_mask;
+static uint32_t startup_diagnostic_observation_flags;
 
 static uint32_t startup_diagnostic_checksum(
     const struct uvdb_startup_diagnostic_record* record)
@@ -111,9 +124,10 @@ static uint32_t startup_diagnostic_build_flags(void)
     return flags;
 }
 
-static void startup_diagnostic_mark(
+static void startup_diagnostic_mark_detail(
     enum uvdb_startup_diagnostic_stage stage, int result,
-    uint32_t stage_flags)
+    uint32_t stage_flags, uint32_t detail0, uint32_t detail1,
+    uint32_t detail2)
 {
     if(startup_diagnostic_descriptor < 0)
         return;
@@ -126,7 +140,8 @@ static void startup_diagnostic_mark(
         .result = (stage_flags & UVDB_STARTUP_DIAGNOSTIC_FAILED)
                       ? (uint32_t)result
                       : 0u,
-        .stage_flags = stage_flags,
+        .stage_flags =
+            stage_flags | startup_diagnostic_observation_flags,
         .build_flags = startup_diagnostic_build_flags(),
     };
     if(stage_flags & UVDB_STARTUP_DIAGNOSTIC_FAILED)
@@ -135,6 +150,9 @@ static void startup_diagnostic_mark(
     record.run_id_low = (uint32_t)startup_diagnostic_run_id;
     record.run_id_high = (uint32_t)(startup_diagnostic_run_id >> 32);
     record.failed_stage_mask = startup_diagnostic_failed_stage_mask;
+    record.detail[0] = detail0;
+    record.detail[1] = detail1;
+    record.detail[2] = detail2;
     record.checksum = startup_diagnostic_checksum(&record);
     off_t offset = (off_t)(
         (record.sequence & 1u) * sizeof(record));
@@ -148,6 +166,13 @@ static void startup_diagnostic_mark(
     }
 }
 
+static void startup_diagnostic_mark(
+    enum uvdb_startup_diagnostic_stage stage, int result,
+    uint32_t stage_flags)
+{
+    startup_diagnostic_mark_detail(stage, result, stage_flags, 0, 0, 0);
+}
+
 static void startup_diagnostic_start(void)
 {
     startup_diagnostic_sequence = 0;
@@ -155,6 +180,7 @@ static void startup_diagnostic_start(void)
     if(startup_diagnostic_run_id == 0)
         startup_diagnostic_run_id = 1;
     startup_diagnostic_failed_stage_mask = 0;
+    startup_diagnostic_observation_flags = 0;
     startup_diagnostic_descriptor = open(
         UVDB_STARTUP_DIAGNOSTIC_PATH,
         O_WRONLY | O_CREAT | O_TRUNC, 0600);
@@ -175,6 +201,8 @@ static void startup_diagnostic_start(void)
 #else
 #define startup_diagnostic_start() ((void)0)
 #define startup_diagnostic_mark(stage, result, flags) ((void)0)
+#define startup_diagnostic_mark_detail(stage, result, flags, d0, d1, d2) \
+    ((void)0)
 #endif
 
 #if defined(UVDB_GDB_VFP_FIXTURE) && !defined(UVDB_KERNEL_VFP_READS)
@@ -195,6 +223,17 @@ static void startup_diagnostic_start(void)
 #endif
 #define UVDB_ADMISSION_DIAGNOSTIC_REQUEST "UVDB-ADMISSION-1"
 static int admission_diagnostic_socket = -1;
+#ifdef UVDB_STARTUP_DIAGNOSTIC
+static uint32_t admission_diagnostic_poll_count;
+static int admission_diagnostic_last_receive;
+static int admission_diagnostic_last_errno;
+
+static int admission_diagnostic_poll_milestone(uint32_t count)
+{
+    return count == 1u || count == 10u || count == 50u ||
+           count == 100u || count == 150u || count == 200u;
+}
+#endif
 
 static int admission_diagnostic_start(void)
 {
@@ -228,18 +267,101 @@ static void admission_diagnostic_poll(void)
     unsigned char received[sizeof(request)];
     struct sockaddr_in peer;
     socklen_t peer_size = sizeof(peer);
+#ifdef UVDB_STARTUP_DIAGNOSTIC
+    uint32_t poll_count = ++admission_diagnostic_poll_count;
+    startup_diagnostic_observation_flags |=
+        UVDB_STARTUP_OBS_POLL_ENTERED;
+    errno = 0;
+#endif
     ssize_t size = recvfrom(
         admission_diagnostic_socket, received, sizeof(received),
         MSG_DONTWAIT, (void*)&peer, &peer_size);
+#ifdef UVDB_STARTUP_DIAGNOSTIC
+    admission_diagnostic_last_receive = (int)size;
+    admission_diagnostic_last_errno = size < 0 ? errno : 0;
+#endif
     if(size != (ssize_t)(sizeof(request) - 1u) ||
        memcmp(received, request, sizeof(request) - 1u))
+    {
+#ifdef UVDB_STARTUP_DIAGNOSTIC
+        int first_malformed =
+            size >= 0 &&
+            !(startup_diagnostic_observation_flags &
+              UVDB_STARTUP_OBS_MALFORMED_REQUEST);
+        if(first_malformed)
+            startup_diagnostic_observation_flags |=
+                UVDB_STARTUP_OBS_MALFORMED_REQUEST;
+        if(first_malformed ||
+           admission_diagnostic_poll_milestone(poll_count))
+            startup_diagnostic_mark_detail(
+                UVDB_STARTUP_STAGE_ADMISSION_POLL_IDLE, 0, 0,
+                (uint32_t)admission_diagnostic_last_receive,
+                (uint32_t)admission_diagnostic_last_errno, poll_count);
+#endif
         return;
+    }
 
+#ifdef UVDB_STARTUP_DIAGNOSTIC
+    int first_request =
+        !(startup_diagnostic_observation_flags &
+          UVDB_STARTUP_OBS_REQUEST_RECEIVED);
+    startup_diagnostic_observation_flags |=
+        UVDB_STARTUP_OBS_REQUEST_RECEIVED;
+    if(first_request)
+        startup_diagnostic_mark_detail(
+            UVDB_STARTUP_STAGE_ADMISSION_REQUEST, 0, 0,
+            (uint32_t)size, (uint32_t)peer_size, poll_count);
+#endif
     struct uvdb_admission_diagnostic diagnostic;
-    if(uvdb_admission_diagnostic_get(&diagnostic) == 0)
-        (void)sendto(
+    int diagnostic_result = uvdb_admission_diagnostic_get(&diagnostic);
+    if(diagnostic_result == 0)
+    {
+#ifdef UVDB_STARTUP_DIAGNOSTIC
+        errno = 0;
+#endif
+        ssize_t sent = sendto(
             admission_diagnostic_socket, &diagnostic,
             sizeof(diagnostic), 0, (void*)&peer, peer_size);
+#ifdef UVDB_STARTUP_DIAGNOSTIC
+        int first_response =
+            !(startup_diagnostic_observation_flags &
+              UVDB_STARTUP_OBS_RESPONSE_ATTEMPTED);
+        int first_success =
+            sent == (ssize_t)sizeof(diagnostic) &&
+            !(startup_diagnostic_observation_flags &
+              UVDB_STARTUP_OBS_RESPONSE_SENT);
+        startup_diagnostic_observation_flags |=
+            UVDB_STARTUP_OBS_RESPONSE_ATTEMPTED;
+        if(sent == (ssize_t)sizeof(diagnostic))
+            startup_diagnostic_observation_flags |=
+                UVDB_STARTUP_OBS_RESPONSE_SENT;
+        if(first_response || first_success)
+            startup_diagnostic_mark_detail(
+                UVDB_STARTUP_STAGE_ADMISSION_RESPONSE,
+                sent == (ssize_t)sizeof(diagnostic) ? 0 : (int)sent,
+                sent == (ssize_t)sizeof(diagnostic)
+                    ? 0
+                    : UVDB_STARTUP_DIAGNOSTIC_FAILED,
+                (uint32_t)sent, (uint32_t)errno, poll_count);
+#else
+        (void)sent;
+#endif
+    }
+#ifdef UVDB_STARTUP_DIAGNOSTIC
+    else
+    {
+        int first_response =
+            !(startup_diagnostic_observation_flags &
+              UVDB_STARTUP_OBS_RESPONSE_ATTEMPTED);
+        startup_diagnostic_observation_flags |=
+            UVDB_STARTUP_OBS_RESPONSE_ATTEMPTED;
+        if(first_response)
+            startup_diagnostic_mark_detail(
+                UVDB_STARTUP_STAGE_ADMISSION_RESPONSE,
+                diagnostic_result, UVDB_STARTUP_DIAGNOSTIC_FAILED,
+                (uint32_t)diagnostic_result, 0, poll_count);
+    }
+#endif
 }
 #endif
 
@@ -675,6 +797,16 @@ int main(void)
                 UVDB_STARTUP_STAGE_MAIN_LOOP, 0, 0);
 #ifdef UVDB_ADMISSION_DIAGNOSTIC
         admission_diagnostic_poll();
+#ifdef UVDB_STARTUP_DIAGNOSTIC
+        if(admission_diagnostic_poll_milestone(
+               admission_diagnostic_poll_count))
+            startup_diagnostic_mark_detail(
+                UVDB_STARTUP_STAGE_MAIN_LOOP_HEARTBEAT, 0, 0,
+                admission_diagnostic_poll_count,
+                (uint32_t)admission_diagnostic_last_receive,
+                ((uint32_t)(uint16_t)admission_diagnostic_socket << 16) |
+                    (uint32_t)(uint16_t)admission_diagnostic_last_errno);
+#endif
 #endif
 #ifdef UVDB_GDB_ASLR_FIXTURE
         uint32_t aslr_main_sequence = __atomic_load_n(

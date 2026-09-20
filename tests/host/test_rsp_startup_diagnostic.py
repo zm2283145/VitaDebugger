@@ -22,6 +22,7 @@ def record(
     build_flags: int = 3,
     run_id: int = 0x123456789ABCDEF0,
     failed_stage_mask: int | None = None,
+    details: tuple[int, int, int] = (0, 0, 0),
 ) -> bytes:
     if failed_stage_mask is None:
         failed_stage_mask = (
@@ -40,9 +41,7 @@ def record(
         run_id & 0xFFFFFFFF,
         run_id >> 32,
         failed_stage_mask,
-        0,
-        0,
-        0,
+        *(value & 0xFFFFFFFF for value in details),
         0,
     ]
     raw = struct.pack(diagnostic.RECORD_FORMAT, *values)
@@ -94,7 +93,7 @@ class StartupDiagnosticTests(unittest.TestCase):
 
     def test_rejects_reserved_flags_and_inconsistent_result(self) -> None:
         cases = [
-            record(1, 1, stage_flags=2),
+            record(1, 1, stage_flags=64),
             record(1, 1, build_flags=8),
             record(1, 1, result=-5),
             record(
@@ -116,11 +115,13 @@ class StartupDiagnosticTests(unittest.TestCase):
                 result=-35,
                 stage_flags=diagnostic.FAILED,
                 build_flags=4,
+                details=(-35, 35, 200),
             )
         )
         self.assertTrue(parsed["failed"])
         self.assertEqual(parsed["result"], -35)
         self.assertTrue(parsed["kernel_mode"])
+        self.assertEqual(parsed["details_signed"], [-35, 35, 200])
 
     def test_accepts_zero_result_failure_and_retains_prior_failure(self) -> None:
         current_failure = diagnostic.parse_record(
@@ -135,6 +136,45 @@ class StartupDiagnosticTests(unittest.TestCase):
         self.assertFalse(sticky_failure["failed"])
         self.assertTrue(sticky_failure["any_failed"])
         self.assertEqual(sticky_failure["failed_stages"], ["vfp_fixture"])
+
+    def test_accepts_repeated_poll_stages_with_sticky_later_failure(self) -> None:
+        flags = (
+            diagnostic.OBS_POLL_ENTERED
+            | diagnostic.OBS_REQUEST_RECEIVED
+            | diagnostic.OBS_RESPONSE_ATTEMPTED
+        )
+        failed_mask = 1 << 19
+        parsed = diagnostic.parse_journal(
+            record(
+                100, 17, stage_flags=flags,
+                failed_stage_mask=failed_mask,
+            )
+            + record(
+                101, 19, stage_flags=flags,
+                failed_stage_mask=failed_mask,
+            )
+        )
+        self.assertTrue(parsed["selected"]["any_failed"])
+        self.assertFalse(parsed["selected"]["failed"])
+
+    def test_response_stage_satisfies_poll_progress_wait(self) -> None:
+        flags = (
+            diagnostic.OBS_POLL_ENTERED
+            | diagnostic.OBS_REQUEST_RECEIVED
+            | diagnostic.OBS_RESPONSE_ATTEMPTED
+            | diagnostic.OBS_RESPONSE_SENT
+        )
+        raw = record(100, 18, stage_flags=flags) + record(
+            101, 19, stage_flags=flags
+        )
+        with mock.patch.object(
+            diagnostic, "fetch_journal", return_value=raw
+        ):
+            parsed, _returned = diagnostic.observe(
+                "10.1.1.217", 1337, 0.1, 20
+            )
+        self.assertEqual(parsed["selected"]["stage"], 19)
+        self.assertTrue(parsed["selected"]["response_sent"])
 
     def test_retries_transient_ftp_misses_until_success(self) -> None:
         raw = record(14, 14) + record(15, 15)

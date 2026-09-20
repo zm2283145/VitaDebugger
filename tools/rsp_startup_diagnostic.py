@@ -15,12 +15,25 @@ from typing import Any
 
 
 MAGIC = 0x55565344
-VERSION = 2
+VERSION = 3
 RECORD_FORMAT = "<16I"
 RECORD_SIZE = struct.calcsize(RECORD_FORMAT)
 JOURNAL_SIZE = RECORD_SIZE * 2
 REMOTE_PATH = "ux0:/data/vitadebugger-rsp-startup.bin"
 FAILED = 1
+OBS_POLL_ENTERED = 2
+OBS_MALFORMED_REQUEST = 4
+OBS_REQUEST_RECEIVED = 8
+OBS_RESPONSE_ATTEMPTED = 16
+OBS_RESPONSE_SENT = 32
+KNOWN_STAGE_FLAGS = (
+    FAILED
+    | OBS_POLL_ENTERED
+    | OBS_MALFORMED_REQUEST
+    | OBS_REQUEST_RECEIVED
+    | OBS_RESPONSE_ATTEMPTED
+    | OBS_RESPONSE_SENT
+)
 
 STAGES = {
     1: "process_entry",
@@ -38,6 +51,11 @@ STAGES = {
     13: "stdio_ready",
     14: "test_ready",
     15: "main_loop",
+    16: "admission_poll_begin",
+    17: "admission_poll_idle",
+    18: "admission_request",
+    19: "admission_response",
+    20: "main_loop_heartbeat",
 }
 
 
@@ -89,19 +107,18 @@ def parse_record(data: bytes) -> dict[str, Any]:
     failed_stage_mask = values[11]
     if run_id == 0:
         raise StartupDiagnosticFailure("startup record run ID is invalid")
-    if any(values[12:]):
+    details = values[12:15]
+    if values[15] != 0:
         raise StartupDiagnosticFailure("startup record reserved fields are nonzero")
-    if stage_flags & ~FAILED or build_flags & ~7:
+    if stage_flags & ~KNOWN_STAGE_FLAGS or build_flags & ~7:
         raise StartupDiagnosticFailure("startup record flags are invalid")
     valid_stage_mask = sum(1 << candidate for candidate in STAGES)
     if failed_stage_mask & ~valid_stage_mask:
         raise StartupDiagnosticFailure("startup failed-stage mask is invalid")
-    if failed_stage_mask & ~((1 << (stage + 1)) - 1):
-        raise StartupDiagnosticFailure("startup failed-stage mask is out of order")
     signed_result = result if result < 0x80000000 else result - 0x100000000
     if signed_result != 0 and not stage_flags & FAILED:
         raise StartupDiagnosticFailure("startup record failure result is inconsistent")
-    if bool(stage_flags & FAILED) != bool(failed_stage_mask & (1 << stage)):
+    if stage_flags & FAILED and not failed_stage_mask & (1 << stage):
         raise StartupDiagnosticFailure("startup record stage failure is inconsistent")
     return {
         "sequence": sequence,
@@ -110,6 +127,11 @@ def parse_record(data: bytes) -> dict[str, Any]:
         "result": signed_result,
         "stage_flags": stage_flags,
         "failed": bool(stage_flags & FAILED),
+        "poll_entered": bool(stage_flags & OBS_POLL_ENTERED),
+        "malformed_request_seen": bool(stage_flags & OBS_MALFORMED_REQUEST),
+        "request_received": bool(stage_flags & OBS_REQUEST_RECEIVED),
+        "response_attempted": bool(stage_flags & OBS_RESPONSE_ATTEMPTED),
+        "response_sent": bool(stage_flags & OBS_RESPONSE_SENT),
         "build_flags": build_flags,
         "run_id": run_id,
         "failed_stage_mask": failed_stage_mask,
@@ -119,6 +141,11 @@ def parse_record(data: bytes) -> dict[str, Any]:
             if failed_stage_mask & (1 << candidate)
         ],
         "any_failed": failed_stage_mask != 0,
+        "details": list(details),
+        "details_signed": [
+            value if value < 0x80000000 else value - 0x100000000
+            for value in details
+        ],
         "admission_diagnostic": bool(build_flags & 1),
         "console_test": bool(build_flags & 2),
         "kernel_mode": bool(build_flags & 4),
@@ -228,7 +255,14 @@ def observe(
                     "startup journal is missing required build flags "
                     f"0x{required_build_flags:x}"
                 )
-            elif selected["any_failed"] or selected["stage"] >= minimum_stage:
+            elif (
+                selected["any_failed"]
+                or selected["stage"] >= minimum_stage
+                or (
+                    minimum_stage >= 16
+                    and selected["stage"] in (17, 18, 19, 20)
+                )
+            ):
                 return last_snapshot, raw
         except (
             OSError,
@@ -254,7 +288,7 @@ def main() -> int:
     parser.add_argument("--host", required=True, type=numeric_ipv4)
     parser.add_argument("--ftp-port", type=int, default=1337)
     parser.add_argument("--timeout", type=float, default=20.0)
-    parser.add_argument("--minimum-stage", type=int, default=15)
+    parser.add_argument("--minimum-stage", type=int, default=20)
     parser.add_argument("--required-build-flags", type=lambda value: int(value, 0),
                         default=3)
     parser.add_argument("--reject-run-id", type=lambda value: int(value, 0))
