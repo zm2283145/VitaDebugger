@@ -20,8 +20,8 @@ struct uvdb_config {
 };
 
 #ifdef UVDB_ADMISSION_DIAGNOSTIC
-#define UVDB_ADMISSION_DIAGNOSTIC_VERSION 1u
-#define UVDB_ADMISSION_DIAGNOSTIC_EVENT_COUNT 12u
+#define UVDB_ADMISSION_DIAGNOSTIC_VERSION 2u
+#define UVDB_ADMISSION_DIAGNOSTIC_EVENT_COUNT 17u
 
 enum uvdb_admission_diagnostic_event {
     UVDB_ADMISSION_EVENT_LISTENER_READY = 0,
@@ -30,11 +30,16 @@ enum uvdb_admission_diagnostic_event {
     UVDB_ADMISSION_EVENT_VALID_FRAME,
     UVDB_ADMISSION_EVENT_PROMOTION_BEGIN,
     UVDB_ADMISSION_EVENT_SOCKET_PUBLISHED,
+    UVDB_ADMISSION_EVENT_EXCEPTION_REJECTED,
     UVDB_ADMISSION_EVENT_PROTOCOL_ACQUIRED,
+    UVDB_ADMISSION_EVENT_PROTOCOL_REJECTED,
     UVDB_ADMISSION_EVENT_TARGET_STOPPED,
     UVDB_ADMISSION_EVENT_MAIN_LOOP_ENTERED,
     UVDB_ADMISSION_EVENT_FIRST_PACKET,
     UVDB_ADMISSION_EVENT_TARGET_RUNNING,
+    UVDB_ADMISSION_EVENT_PROTOCOL_RELEASED,
+    UVDB_ADMISSION_EVENT_SESSION_NORMALIZED,
+    UVDB_ADMISSION_EVENT_LISTENER_REOPENED,
     UVDB_ADMISSION_EVENT_NETWORK_CLOSING,
 };
 
@@ -56,14 +61,18 @@ struct uvdb_admission_diagnostic {
     uint32_t event_generation[UVDB_ADMISSION_DIAGNOSTIC_EVENT_COUNT];
     uint32_t event_owner[UVDB_ADMISSION_DIAGNOSTIC_EVENT_COUNT];
     uint32_t event_state[UVDB_ADMISSION_DIAGNOSTIC_EVENT_COUNT];
+    uint32_t event_epoch[UVDB_ADMISSION_DIAGNOSTIC_EVENT_COUNT];
+    int32_t event_result[UVDB_ADMISSION_DIAGNOSTIC_EVENT_COUNT];
     int32_t current_socket;
     int32_t current_candidate;
     int32_t current_listener;
     uint32_t current_generation;
     uint32_t current_owner;
+    uint32_t current_owner_epoch;
     uint32_t current_state;
     uint32_t first_packet_size;
     uint32_t connection_epoch;
+    uint32_t dropped_event_writes;
 };
 
 #ifdef __cplusplus
@@ -71,7 +80,7 @@ static_assert(
 #else
 _Static_assert(
 #endif
-    sizeof(struct uvdb_admission_diagnostic) == 336u,
+    sizeof(struct uvdb_admission_diagnostic) == 600u,
     "admission diagnostic wire ABI changed");
 
 // Diagnostic builds expose a fixed-size, lock-free snapshot for a separate

@@ -212,16 +212,19 @@ or the first normal packet receive. It does not implicate `qOffsets` or the
 raw-EAGAIN classification.
 
 `UVDB_ADMISSION_DIAGNOSTIC=1` adds behavior-neutral, fixed-size telemetry for
-that boundary. Each transition type retains its first sequence number, total
-occurrence count, descriptor, generation, owner, and state bits:
+that boundary. ABI version 2 retains the newest epoch for each transition with
+its first sequence number, total occurrence count, descriptor, generation,
+owner, state bits, epoch, and transition result:
 
 - listener ready and test-title ready;
 - candidate accepted and first checksum-complete frame observed with
   `MSG_PEEK`;
 - promotion begun and connected descriptor/generation published;
-- protocol owner acquired, target stopped, and main loop entered;
+- exception rejection or protocol-owner acquisition/rejection, target stopped,
+  and main loop entered;
 - first complete packet observed by the normal receiver;
-- target-running and network-closing transitions.
+- target running, protocol-owner release, detach/session normalization,
+  listener reopen, and network-closing transitions.
 
 The ledger is lock-free and bounded; production builds omit it. The diagnostic
 Vita title answers a fixed binary snapshot query on UDP port 1235 from its main
@@ -235,7 +238,10 @@ escape its bounds. It waits for both listener-ready and test-title-ready
 markers before opening TCP, retries individual UDP timeouts or transport misses
 until the readiness and detach outer deadlines, and retrieves the same snapshot
 on any `qSupported` failure. Snapshot size or ABI errors remain immediate
-failures rather than retryable misses.
+failures rather than retryable misses. The snapshot also publishes the active
+owner's epoch. Each event has a nonblocking atomic writer claim; contention
+cannot corrupt a newer epoch and increments an explicit dropped-write counter
+that fails the diagnostic gate.
 
 Candidate withdrawal plus connected descriptor/generation publication are
 mirrored in one telemetry writer transaction. A reader therefore observes
@@ -250,6 +256,21 @@ release stopped/protocol state and permit a replacement `qSupported` and detach
 generation. Host runner tests cover repeated transient UDP misses followed by
 success, both outer deadline expirations, malformed snapshots, and hostname
 rejection.
+
+The retail completion retry later established a successful first diagnostic
+session and detach followed by a second TCP connection that fully sent
+`qSupported` but received no ACK or response. That attempt did not query UDP
+before cleanup, so it cannot distinguish a valid-frame/promotion failure from
+stale exception or protocol ownership. The lifecycle runner now captures a
+configured expected epoch from inside the failing RSP request while its socket
+is still open. It records expected, stale, advanced, malformed, bounded UDP
+miss, dropped-event, and local telemetry failures separately from the original
+protocol error. Production-TU regressions cover immediate and delayed second
+admission, prior-epoch terminal events arriving after the next epoch begins,
+owner/generation normalization, stale-event suppression, writer contention,
+and nested exception rejection. The source trace makes a detach-to-immediate-
+reconnect exception-ownership overlap plausible, but no production wait or
+admission change is made until retail telemetry proves that exact transition.
 
 The corrected diagnostic passed this boundary on retail 3.65. The out-of-band
 ready snapshot showed listener 88, no candidate or connected socket, the test

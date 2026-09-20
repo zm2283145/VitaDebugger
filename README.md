@@ -665,6 +665,18 @@ comparator. The detailed record is
   ACK or response for 15 seconds. It stopped before `disconnect-g`, so the
   corrected parser was not exercised on hardware and no later case ran. See
   [the completion retry record](docs/hardware/rsp-network-completion-retry-3.65.json).
+  Diagnostic ABI v2 now tags every retained transition with its connection
+  epoch and result, records exception/protocol rejection, protocol release,
+  detach normalization, and listener reopen, and publishes the active owner's
+  epoch. A nonblocking per-event writer claim prevents concurrent diagnostic
+  writers from corrupting a retained epoch; any dropped contended write is
+  explicit and fails the gate. The lifecycle runner accepts only a canonical
+  numeric IPv4 target and captures the expected epoch over UDP from inside the
+  failing RSP request, before caller cleanup can close the connected socket.
+  Expected, stale, advanced, malformed, unavailable, and locally failed
+  telemetry outcomes remain distinct. This instrumentation can prove or reject
+  the suspected detach-to-immediate-reconnect ownership race, but the existing
+  hardware evidence does not yet justify a production synchronization change.
 
 ## Documentation map
 

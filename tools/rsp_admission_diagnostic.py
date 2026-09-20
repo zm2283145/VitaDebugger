@@ -4,168 +4,28 @@
 from __future__ import annotations
 
 import argparse
-import ipaddress
 import json
-import socket
-import struct
 import time
 from pathlib import Path
 from typing import Any
 
+from rsp_admission_snapshot import (
+    AdmissionDiagnosticFailure,
+    EVENT_COUNT,
+    EVENT_NAMES,
+    SNAPSHOT_FORMAT,
+    SNAPSHOT_SIZE,
+    STATE_NETWORK_CLOSING,
+    STATE_PROTOCOL_OWNED,
+    STATE_TARGET_STOPPED,
+    STATE_TEST_TITLE_READY,
+    SnapshotUnavailable,
+    VERSION,
+    numeric_ipv4,
+    parse_snapshot,
+    query_snapshot,
+)
 from rsp_network_retail_gate import Rsp, Transcript, parse_offsets, utc_now
-
-
-class AdmissionDiagnosticFailure(RuntimeError):
-    pass
-
-
-class SnapshotUnavailable(AdmissionDiagnosticFailure):
-    pass
-
-
-REQUEST = b"UVDB-ADMISSION-1"
-VERSION = 1
-EVENT_NAMES = (
-    "listener_ready",
-    "test_title_ready",
-    "candidate_accepted",
-    "valid_frame",
-    "promotion_begin",
-    "socket_published",
-    "protocol_acquired",
-    "target_stopped",
-    "main_loop_entered",
-    "first_packet",
-    "target_running",
-    "network_closing",
-)
-EVENT_COUNT = len(EVENT_NAMES)
-STATE_TARGET_STOPPED = 1 << 0
-STATE_NETWORK_CLOSING = 1 << 1
-STATE_TEST_TITLE_READY = 1 << 2
-STATE_PROTOCOL_OWNED = 1 << 3
-SNAPSHOT_FORMAT = (
-    "<4I"
-    + f"{EVENT_COUNT}I"
-    + f"{EVENT_COUNT}I"
-    + f"{EVENT_COUNT}i"
-    + f"{EVENT_COUNT}I"
-    + f"{EVENT_COUNT}I"
-    + f"{EVENT_COUNT}I"
-    + "3i5I"
-)
-SNAPSHOT_SIZE = struct.calcsize(SNAPSHOT_FORMAT)
-
-
-def numeric_ipv4(value: str) -> str:
-    try:
-        address = ipaddress.IPv4Address(value)
-    except ipaddress.AddressValueError as exc:
-        raise argparse.ArgumentTypeError(
-            "--host must be a numeric IPv4 literal"
-        ) from exc
-    if str(address) != value:
-        raise argparse.ArgumentTypeError(
-            "--host must use canonical dotted-decimal IPv4"
-        )
-    return value
-
-
-def parse_snapshot(data: bytes) -> dict[str, Any]:
-    if len(data) != SNAPSHOT_SIZE:
-        raise AdmissionDiagnosticFailure(
-            f"diagnostic response size {len(data)} != {SNAPSHOT_SIZE}"
-        )
-    values = iter(struct.unpack(SNAPSHOT_FORMAT, data))
-    version = next(values)
-    size = next(values)
-    revision = next(values)
-    event_count = next(values)
-    if version != VERSION or size != SNAPSHOT_SIZE or event_count != EVENT_COUNT:
-        raise AdmissionDiagnosticFailure(
-            "diagnostic ABI mismatch: "
-            f"version={version} size={size} events={event_count}"
-        )
-
-    sequences = list(next(values) for _ in EVENT_NAMES)
-    occurrences = list(next(values) for _ in EVENT_NAMES)
-    descriptors = list(next(values) for _ in EVENT_NAMES)
-    generations = list(next(values) for _ in EVENT_NAMES)
-    owners = list(next(values) for _ in EVENT_NAMES)
-    states = list(next(values) for _ in EVENT_NAMES)
-    current_socket = next(values)
-    current_candidate = next(values)
-    current_listener = next(values)
-    current_generation = next(values)
-    current_owner = next(values)
-    current_state = next(values)
-    first_packet_size = next(values)
-    connection_epoch = next(values)
-    return {
-        "version": version,
-        "size": size,
-        "revision": revision,
-        "events": {
-            name: {
-                "sequence": sequences[index],
-                "occurrences": occurrences[index],
-                "descriptor": descriptors[index],
-                "generation": generations[index],
-                "owner": owners[index],
-                "state": states[index],
-            }
-            for index, name in enumerate(EVENT_NAMES)
-        },
-        "current": {
-            "socket": current_socket,
-            "candidate": current_candidate,
-            "listener": current_listener,
-            "generation": current_generation,
-            "owner": current_owner,
-            "state": current_state,
-            "target_stopped": bool(current_state & STATE_TARGET_STOPPED),
-            "network_closing": bool(current_state & STATE_NETWORK_CLOSING),
-            "test_title_ready": bool(current_state & STATE_TEST_TITLE_READY),
-            "protocol_owned": bool(current_state & STATE_PROTOCOL_OWNED),
-            "first_packet_size": first_packet_size,
-            "connection_epoch": connection_epoch,
-        },
-    }
-
-
-def query_snapshot(
-    host: str, port: int, timeout: float, transcript: Transcript
-) -> dict[str, Any]:
-    deadline = time.monotonic() + timeout
-    last_error: OSError | None = None
-    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as client:
-        while time.monotonic() < deadline:
-            client.settimeout(min(0.5, max(0.01, deadline - time.monotonic())))
-            transcript.event(
-                "diagnostic_query", peer=f"{host}:{port}",
-                request=REQUEST.decode("ascii"),
-            )
-            try:
-                client.sendto(REQUEST, (host, port))
-                data, peer = client.recvfrom(SNAPSHOT_SIZE + 1)
-            except socket.timeout:
-                continue
-            except OSError as exc:
-                last_error = exc
-                time.sleep(0.05)
-                continue
-            if peer[0] != host:
-                continue
-            snapshot = parse_snapshot(data)
-            transcript.event(
-                "diagnostic_snapshot",
-                peer=f"{peer[0]}:{peer[1]}",
-                snapshot=snapshot,
-            )
-            return snapshot
-    raise SnapshotUnavailable(
-        f"no diagnostic snapshot within {timeout}s: {last_error}"
-    )
 
 
 def wait_debugger_ready(
@@ -204,9 +64,13 @@ def wait_debugger_ready(
 
 
 def require_order(snapshot: dict[str, Any]) -> None:
+    epoch = snapshot["current"]["connection_epoch"]
+    if snapshot["current"]["dropped_event_writes"] != 0:
+        raise AdmissionDiagnosticFailure(
+            "diagnostic event writer contention dropped telemetry"
+        )
     required = (
         "listener_ready",
-        "test_title_ready",
         "candidate_accepted",
         "valid_frame",
         "promotion_begin",
@@ -221,7 +85,13 @@ def require_order(snapshot: dict[str, Any]) -> None:
         name for name in required
         if events[name]["occurrences"] != 1
         or events[name]["sequence"] == 0
+        or events[name]["epoch"] != epoch
     ]
+    if (
+        events["test_title_ready"]["occurrences"] != 1
+        or events["test_title_ready"]["sequence"] == 0
+    ):
+        missing.append("test_title_ready")
     if missing:
         raise AdmissionDiagnosticFailure(
             f"missing or repeated admission events: {missing}"
@@ -279,10 +149,24 @@ def wait_detached(
             last_miss = str(exc)
             continue
         current = last_snapshot["current"]
+        epoch = current["connection_epoch"]
+        events = last_snapshot["events"]
         if (
             current["socket"] < 0
             and current["owner"] == 0
+            and current["owner_epoch"] == 0
             and not current["target_stopped"]
+            and current["listener"] >= 0
+            and all(
+                events[name]["epoch"] == epoch
+                and events[name]["occurrences"] == 1
+                for name in (
+                    "target_running",
+                    "protocol_released",
+                    "session_normalized",
+                    "listener_reopened",
+                )
+            )
         ):
             return last_snapshot
         time.sleep(0.05)

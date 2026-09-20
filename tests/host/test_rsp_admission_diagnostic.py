@@ -10,6 +10,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "tools"))
 
 import rsp_admission_diagnostic as diagnostic  # noqa: E402
+import rsp_admission_snapshot as snapshot_transport  # noqa: E402
 
 
 class FakeClock:
@@ -35,19 +36,31 @@ class BrokenTranscript:
 
 def snapshot(*, ready: bool = False, detached: bool = False) -> dict:
     events = {
-        name: {"occurrences": 0}
+        name: {"occurrences": 0, "epoch": 0}
         for name in diagnostic.EVENT_NAMES
     }
     if ready:
         events["listener_ready"]["occurrences"] = 1
+        events["listener_ready"]["epoch"] = 1
         events["test_title_ready"]["occurrences"] = 1
+    if detached:
+        for name in (
+            "target_running",
+            "protocol_released",
+            "session_normalized",
+            "listener_reopened",
+        ):
+            events[name]["occurrences"] = 1
+            events[name]["epoch"] = 1
     return {
         "events": events,
         "current": {
-            "listener": 7 if ready else -1,
+            "listener": 7 if ready or detached else -1,
             "socket": -1 if ready or detached else 9,
             "candidate": -1,
             "owner": 0 if detached else 1,
+            "owner_epoch": 0 if detached else 1,
+            "connection_epoch": 1,
             "target_stopped": not detached,
             "network_closing": False,
             "test_title_ready": ready,
@@ -170,7 +183,7 @@ class AdmissionDiagnosticTests(unittest.TestCase):
         client.__enter__.return_value = client
         with (
             mock.patch.object(
-                diagnostic.socket, "socket", return_value=client
+                snapshot_transport.socket, "socket", return_value=client
             ),
             mock.patch.object(
                 diagnostic.time, "monotonic", side_effect=[0.0, 0.0, 0.0]
@@ -193,14 +206,19 @@ class AdmissionDiagnosticTests(unittest.TestCase):
         values = (
             [diagnostic.VERSION, diagnostic.SNAPSHOT_SIZE, 2,
              diagnostic.EVENT_COUNT]
-            + [0] * (diagnostic.EVENT_COUNT * 6)
-            + [-1, -1, 7, 3, 0, diagnostic.STATE_TEST_TITLE_READY, 0, 4]
+            + [0] * (diagnostic.EVENT_COUNT * 8)
+            + [
+                -1, -1, 7, 3, 0, 0,
+                diagnostic.STATE_TEST_TITLE_READY, 0, 4, 0,
+            ]
         )
         data = struct.pack(diagnostic.SNAPSHOT_FORMAT, *values)
         parsed = diagnostic.parse_snapshot(data)
-        self.assertEqual(parsed["size"], 336)
+        self.assertEqual(parsed["size"], 600)
         self.assertEqual(parsed["current"]["listener"], 7)
+        self.assertEqual(parsed["current"]["owner_epoch"], 0)
         self.assertTrue(parsed["current"]["test_title_ready"])
+        self.assertEqual(parsed["current"]["dropped_event_writes"], 0)
 
     def test_snapshot_parser_rejects_malformed_size(self) -> None:
         with self.assertRaisesRegex(

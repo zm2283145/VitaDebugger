@@ -17,6 +17,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from rsp_admission_snapshot import (
+    AdmissionDiagnosticFailure,
+    SnapshotUnavailable,
+    numeric_ipv4,
+    query_snapshot,
+)
+
 
 class GateFailure(RuntimeError):
     pass
@@ -74,6 +81,86 @@ class Transcript:
 
     def close(self) -> None:
         self.handle.close()
+
+
+class FailureTelemetryCapture:
+    def __init__(
+        self,
+        host: str,
+        port: int,
+        timeout: float,
+        expected_epoch: int | None,
+        log: Transcript,
+    ):
+        self.host = host
+        self.port = port
+        self.timeout = timeout
+        self.expected_epoch = expected_epoch
+        self.log = log
+        self.result: dict[str, Any] | None = None
+
+    def capture(self, client: "Rsp", error: BaseException) -> None:
+        if self.result is not None:
+            return
+        socket_open = not client.closed and client.sock.fileno() >= 0
+        try:
+            snapshot = query_snapshot(
+                self.host, self.port, self.timeout, self.log)
+            epoch = snapshot["current"]["connection_epoch"]
+            if snapshot["current"]["dropped_event_writes"]:
+                status = "dropped_event_writes"
+            elif self.expected_epoch is None or epoch == self.expected_epoch:
+                status = "captured"
+            elif epoch < self.expected_epoch:
+                status = "stale_epoch"
+            else:
+                status = "unexpected_epoch"
+            self.result = {
+                "status": status,
+                "expected_epoch": self.expected_epoch,
+                "observed_epoch": epoch,
+                "socket_open_during_capture": socket_open,
+                "case": client.case,
+                "protocol_error": type(error).__name__,
+                "protocol_detail": str(error),
+                "snapshot": snapshot,
+            }
+        except SnapshotUnavailable as exc:
+            self.result = {
+                "status": "udp_unavailable",
+                "expected_epoch": self.expected_epoch,
+                "socket_open_during_capture": socket_open,
+                "case": client.case,
+                "telemetry_error": type(exc).__name__,
+                "telemetry_detail": str(exc),
+            }
+        except AdmissionDiagnosticFailure as exc:
+            self.result = {
+                "status": "malformed_snapshot",
+                "expected_epoch": self.expected_epoch,
+                "socket_open_during_capture": socket_open,
+                "case": client.case,
+                "telemetry_error": type(exc).__name__,
+                "telemetry_detail": str(exc),
+            }
+        except BaseException as exc:
+            self.result = {
+                "status": "telemetry_local_error",
+                "expected_epoch": self.expected_epoch,
+                "socket_open_during_capture": socket_open,
+                "case": client.case,
+                "telemetry_error": type(exc).__name__,
+                "telemetry_detail": str(exc),
+            }
+        self.log.event("failure_telemetry", **self.result)
+
+
+failure_telemetry: FailureTelemetryCapture | None = None
+
+
+def capture_failure(client: "Rsp", error: BaseException) -> None:
+    if failure_telemetry is not None and failure_telemetry.result is None:
+        failure_telemetry.capture(client, error)
 
 
 class Rsp:
@@ -177,10 +264,14 @@ class Rsp:
     def request(
         self, payload: bytes, *, acknowledge_response: bool = True
     ) -> tuple[bytes, bytes]:
-        self.send(frame(payload))
-        if self.ack_mode:
-            self.expect_ack()
-        return self.read_response(acknowledge=acknowledge_response)
+        try:
+            self.send(frame(payload))
+            if self.ack_mode:
+                self.expect_ack()
+            return self.read_response(acknowledge=acknowledge_response)
+        except BaseException as exc:
+            capture_failure(self, exc)
+            raise
 
     def negotiate(self, *, no_ack: bool = False) -> int:
         response, _ = self.request(
@@ -695,7 +786,8 @@ def run_matrix(args: argparse.Namespace, log: Transcript) -> dict[str, Any]:
         if b"PacketSize=" not in response:
             raise GateFailure("second owner did not acquire after primary detach")
         second.detach()
-    except BaseException:
+    except BaseException as exc:
+        capture_failure(second, exc)
         first.close(reset=True)
         second.close(reset=True)
         raise
@@ -1033,8 +1125,10 @@ def main() -> int:
         "phase",
         choices=("rst-sentinel", "matrix", "receive-shutdown", "send-shutdown"),
     )
-    parser.add_argument("--host", required=True)
+    parser.add_argument("--host", required=True, type=numeric_ipv4)
     parser.add_argument("--port", type=int, default=1234)
+    parser.add_argument("--diagnostic-port", type=int, default=1235)
+    parser.add_argument("--expected-epoch", type=int)
     parser.add_argument("--command-port", type=int, default=1338)
     parser.add_argument("--timeout", type=float, default=10.0)
     parser.add_argument("--cycles", type=int, default=50)
@@ -1051,8 +1145,14 @@ def main() -> int:
     parser.add_argument("--transcript", required=True, type=Path)
     parser.add_argument("--summary", required=True, type=Path)
     args = parser.parse_args()
-    if not 1 <= args.port <= 65535 or not 1 <= args.command_port <= 65535:
+    if (
+        not 1 <= args.port <= 65535
+        or not 1 <= args.command_port <= 65535
+        or not 1 <= args.diagnostic_port <= 65535
+    ):
         parser.error("ports must be between 1 and 65535")
+    if args.expected_epoch is not None and args.expected_epoch < 1:
+        parser.error("--expected-epoch must be positive")
     for name in (
         "timeout",
         "run_seconds",
@@ -1076,6 +1176,14 @@ def main() -> int:
     log = Transcript(args.transcript)
     started = time.monotonic()
     started_at = utc_now()
+    global failure_telemetry
+    failure_telemetry = FailureTelemetryCapture(
+        args.host,
+        args.diagnostic_port,
+        min(args.timeout, 3.0),
+        args.expected_epoch,
+        log,
+    )
     try:
         if args.phase == "rst-sentinel":
             result = run_rst_sentinel(args, log)
@@ -1106,6 +1214,7 @@ def main() -> int:
             "error": type(exc).__name__,
             "detail": str(exc),
             "duration_seconds": time.monotonic() - started,
+            "failure_telemetry": failure_telemetry.result,
         }
         args.summary.write_text(
             json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8"
@@ -1113,6 +1222,7 @@ def main() -> int:
         print(json.dumps(result, indent=2, sort_keys=True))
         return 1
     finally:
+        failure_telemetry = None
         log.close()
 
 

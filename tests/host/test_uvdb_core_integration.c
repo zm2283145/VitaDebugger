@@ -629,6 +629,16 @@ static int admission_event_before(
                diagnostic->event_sequence[second];
 }
 
+static int admission_event_is_epoch(
+    const struct uvdb_admission_diagnostic* diagnostic,
+    enum uvdb_admission_diagnostic_event event,
+    uint32_t epoch)
+{
+    return diagnostic->event_sequence[event] != 0 &&
+           diagnostic->event_occurrences[event] == 1u &&
+           diagnostic->event_epoch[event] == epoch;
+}
+
 static void complete_admitted_session(uintptr_t resume)
 {
     KuKernelExceptionContext context = {
@@ -684,6 +694,9 @@ static void assert_admission_transition_order(const char* label)
     check(
         diagnostic.event_occurrences[
             UVDB_ADMISSION_EVENT_SOCKET_PUBLISHED] == 1u &&
+            diagnostic.event_epoch[
+                UVDB_ADMISSION_EVENT_SOCKET_PUBLISHED] ==
+                diagnostic.connection_epoch &&
             diagnostic.event_descriptor[
                 UVDB_ADMISSION_EVENT_CANDIDATE_ACCEPTED] ==
                 FAKE_SOCKET &&
@@ -738,8 +751,170 @@ static void test_immediate_first_packet_admission_transition(void)
                   strlen("qSupported") &&
               diagnostic.current_socket < 0 &&
               diagnostic.current_owner == 0 &&
+              diagnostic.current_owner_epoch == 0 &&
+              admission_event_is_epoch(
+                  &diagnostic,
+                  UVDB_ADMISSION_EVENT_PROTOCOL_RELEASED, 1u) &&
+              admission_event_is_epoch(
+                  &diagnostic,
+                  UVDB_ADMISSION_EVENT_SESSION_NORMALIZED, 1u) &&
               uvdb_state == UVDB_STATE_IDLE,
           "immediate first packet reaches one owner without loss");
+}
+
+static void test_detach_then_immediate_second_admission(void)
+{
+    reset_core();
+    uvdb_socket = -1;
+    uvdb_state = UVDB_STATE_IDLE;
+    __atomic_store_n(&uvdb_target_stopped, 0, __ATOMIC_RELEASE);
+    uvdb_admission_diagnostic_mark_test_ready();
+    fake_accept_calls = 1;
+
+    const uintptr_t resume = UINT32_C(0x81005678);
+    const uint64_t no_trap = (uint64_t)resume << 32 | resume;
+    queue_rsp_payload("qSupported", strlen("qSupported"), 1);
+    append_rsp_payload("D", 1u, 1);
+    check(real_uvdb_enter(resume) != no_trap,
+          "first reconnect fixture admits immediately");
+    complete_admitted_session(resume);
+
+    struct uvdb_admission_diagnostic diagnostic;
+    check(uvdb_admission_diagnostic_get(&diagnostic) == 0 &&
+              diagnostic.connection_epoch == 1u &&
+              diagnostic.current_socket < 0 &&
+              diagnostic.current_owner == 0 &&
+              diagnostic.current_owner_epoch == 0 &&
+              admission_event_is_epoch(
+                  &diagnostic,
+                  UVDB_ADMISSION_EVENT_SESSION_NORMALIZED, 1u) &&
+              admission_event_is_epoch(
+                  &diagnostic,
+                  UVDB_ADMISSION_EVENT_PROTOCOL_RELEASED, 1u),
+          "first detach publishes normalized ownership before reconnect");
+
+    fake_accept_calls = 1;
+    fake_connected_socket_closed = 0;
+    queue_rsp_payload("qSupported", strlen("qSupported"), 1);
+    append_rsp_payload("D", 1u, 1);
+    check(real_uvdb_enter(resume) != no_trap,
+          "immediate second connection promotes exactly once");
+    check(uvdb_admission_diagnostic_get(&diagnostic) == 0 &&
+              diagnostic.connection_epoch == 2u &&
+              admission_event_is_epoch(
+                  &diagnostic,
+                  UVDB_ADMISSION_EVENT_CANDIDATE_ACCEPTED, 2u) &&
+              admission_event_is_epoch(
+                  &diagnostic,
+                  UVDB_ADMISSION_EVENT_SOCKET_PUBLISHED, 2u) &&
+              diagnostic.event_epoch[
+                  UVDB_ADMISSION_EVENT_PROTOCOL_RELEASED] == 1u &&
+              diagnostic.current_generation ==
+                  diagnostic.event_generation[
+                      UVDB_ADMISSION_EVENT_SOCKET_PUBLISHED],
+          "second admission preserves prior terminal epoch and new generation");
+    complete_admitted_session(resume);
+    check(uvdb_admission_diagnostic_get(&diagnostic) == 0 &&
+              admission_event_is_epoch(
+                  &diagnostic,
+                  UVDB_ADMISSION_EVENT_FIRST_PACKET, 2u) &&
+              admission_event_is_epoch(
+                  &diagnostic,
+                  UVDB_ADMISSION_EVENT_SESSION_NORMALIZED, 2u) &&
+              admission_event_is_epoch(
+                  &diagnostic,
+                  UVDB_ADMISSION_EVENT_PROTOCOL_RELEASED, 2u) &&
+              diagnostic.current_owner == 0 &&
+              diagnostic.current_owner_epoch == 0,
+          "second detach consumes one packet and normalizes the second epoch");
+}
+
+static void test_late_prior_epoch_release_is_attributed(void)
+{
+    reset_core();
+    uvdb_admission_diagnostic_begin_connection();
+    uint32_t owner = uvdb_protocol_owner_for_thread(FAKE_THREAD);
+    check(uvdb_protocol_gate_try_acquire_tracked(owner, 1u) ==
+              UVDB_PROTOCOL_GATE_ACQUIRED,
+          "first epoch acquires protocol ownership");
+    uvdb_admission_diagnostic_begin_connection();
+
+    struct uvdb_admission_diagnostic diagnostic;
+    check(uvdb_admission_diagnostic_get(&diagnostic) == 0 &&
+              diagnostic.connection_epoch == 2u &&
+              diagnostic.current_owner == owner &&
+              diagnostic.current_owner_epoch == 1u,
+          "second epoch exposes retained first-epoch owner");
+    check(uvdb_protocol_gate_release_tracked(owner, 1u) == 0 &&
+              uvdb_admission_diagnostic_get(&diagnostic) == 0 &&
+              admission_event_is_epoch(
+                  &diagnostic,
+                  UVDB_ADMISSION_EVENT_PROTOCOL_RELEASED, 1u) &&
+              diagnostic.current_owner == 0 &&
+              diagnostic.current_owner_epoch == 0,
+          "late release remains attributed to its prior epoch");
+
+    uvdb_admission_diagnostic_record_for_epoch(
+        UVDB_ADMISSION_EVENT_TARGET_RUNNING, 2u, -1, 0, 0, 0);
+    uvdb_admission_diagnostic_record_for_epoch(
+        UVDB_ADMISSION_EVENT_TARGET_RUNNING, 1u, -1, 0, 0, 0);
+    check(uvdb_admission_diagnostic_get(&diagnostic) == 0 &&
+              admission_event_is_epoch(
+                  &diagnostic,
+                  UVDB_ADMISSION_EVENT_TARGET_RUNNING, 2u),
+          "stale terminal events cannot overwrite a newer epoch");
+
+    __atomic_store_n(
+        &uvdb_admission_diagnostic_state.event_writer[
+            UVDB_ADMISSION_EVENT_TARGET_RUNNING],
+        1u, __ATOMIC_RELEASE);
+    uvdb_admission_diagnostic_record_for_epoch(
+        UVDB_ADMISSION_EVENT_TARGET_RUNNING, 3u, -1, 0, 0, 0);
+    __atomic_store_n(
+        &uvdb_admission_diagnostic_state.event_writer[
+            UVDB_ADMISSION_EVENT_TARGET_RUNNING],
+        0u, __ATOMIC_RELEASE);
+    check(uvdb_admission_diagnostic_get(&diagnostic) == 0 &&
+              diagnostic.event_epoch[
+                  UVDB_ADMISSION_EVENT_TARGET_RUNNING] == 2u &&
+              diagnostic.dropped_event_writes == 1u,
+          "contended event writer cannot corrupt a published epoch");
+}
+
+static void test_second_epoch_records_nested_exception_rejection(void)
+{
+    reset_core();
+    uvdb_admission_diagnostic_begin_connection();
+    check(uvdb_exception_guard_enter(
+              &uvdb_exception_guard,
+              KU_KERNEL_EXCEPTION_TYPE_UNDEFINED_INSTRUCTION) ==
+              UVDB_EXCEPTION_GUARD_PRIMARY,
+          "first epoch retains exception ownership");
+    uvdb_admission_diagnostic_begin_connection();
+
+    KuKernelExceptionContext context = {
+        .pc = (uint32_t)uvdb_trap_address(),
+        .SPSR = UINT32_C(0x60000010),
+        .exceptionType =
+            KU_KERNEL_EXCEPTION_TYPE_UNDEFINED_INSTRUCTION,
+    };
+    exception_handler(&context);
+    struct uvdb_admission_diagnostic diagnostic;
+    check(uvdb_admission_diagnostic_get(&diagnostic) == 0 &&
+              admission_event_is_epoch(
+                  &diagnostic,
+                  UVDB_ADMISSION_EVENT_EXCEPTION_REJECTED, 2u) &&
+              diagnostic.event_result[
+                  UVDB_ADMISSION_EVENT_EXCEPTION_REJECTED] ==
+                  UVDB_EXCEPTION_GUARD_NESTED &&
+              diagnostic.event_epoch[
+                  UVDB_ADMISSION_EVENT_PROTOCOL_ACQUIRED] != 2u,
+          "second epoch distinguishes nested exception rejection");
+    check(uvdb_exception_guard_leave(
+              &uvdb_exception_guard,
+              KU_KERNEL_EXCEPTION_TYPE_UNDEFINED_INSTRUCTION,
+              UVDB_EXCEPTION_GUARD_PRIMARY) == 0,
+          "first epoch exception ownership releases after rejection capture");
 }
 
 static void test_promotion_snapshot_is_atomic(void)
@@ -820,6 +995,66 @@ static void test_delayed_first_packet_admission_transition(void)
               diagnostic.current_owner == 0 &&
               uvdb_state == UVDB_STATE_IDLE,
           "delayed packet is consumed exactly once by the protocol owner");
+}
+
+static void test_delayed_second_packet_after_detach(void)
+{
+    reset_core();
+    uvdb_socket = -1;
+    uvdb_state = UVDB_STATE_IDLE;
+    __atomic_store_n(&uvdb_target_stopped, 0, __ATOMIC_RELEASE);
+    fake_accept_calls = 1;
+    const uintptr_t resume = UINT32_C(0x81005678);
+    const uint64_t no_trap = (uint64_t)resume << 32 | resume;
+
+    queue_rsp_payload("qSupported", strlen("qSupported"), 1);
+    append_rsp_payload("D", 1u, 1);
+    check(real_uvdb_enter(resume) != no_trap,
+          "delayed second fixture admits first session");
+    complete_admitted_session(resume);
+
+    fake_accept_calls = 1;
+    fake_connected_socket_closed = 0;
+    fake_epoll_block = 1;
+    fake_epoll_wait_blocked = 0;
+    fake_epoll_release = 0;
+    fake_epoll_events = 0;
+    queue_rsp_payload("", 0u, 0);
+    struct fake_enter_thread operation = {.resume = resume};
+    pthread_t enter_thread;
+    check(pthread_create(
+              &enter_thread, NULL, run_fake_enter, &operation) == 0,
+          "start delayed second admission owner");
+    check(wait_for_atomic_value(&fake_epoll_wait_blocked, 1) == 0,
+          "second admission waits without consuming a packet");
+    queue_rsp_payload("qSupported", strlen("qSupported"), 1);
+    append_rsp_payload("D", 1u, 1);
+    fake_epoll_events = SCE_NET_EPOLLIN;
+    __atomic_store_n(&fake_epoll_release, 1, __ATOMIC_RELEASE);
+    check(pthread_join(enter_thread, NULL) == 0 &&
+              operation.result != no_trap,
+          "delayed second packet promotes one session");
+    fake_epoll_block = 0;
+
+    struct uvdb_admission_diagnostic diagnostic;
+    check(uvdb_admission_diagnostic_get(&diagnostic) == 0 &&
+              diagnostic.connection_epoch == 2u &&
+              admission_event_is_epoch(
+                  &diagnostic,
+                  UVDB_ADMISSION_EVENT_VALID_FRAME, 2u) &&
+              admission_event_is_epoch(
+                  &diagnostic,
+                  UVDB_ADMISSION_EVENT_SOCKET_PUBLISHED, 2u) &&
+              fake_receive_offset == 0,
+          "delayed second admission preserves the complete first frame");
+    complete_admitted_session(resume);
+    check(uvdb_admission_diagnostic_get(&diagnostic) == 0 &&
+              admission_event_is_epoch(
+                  &diagnostic,
+                  UVDB_ADMISSION_EVENT_FIRST_PACKET, 2u) &&
+              diagnostic.current_owner == 0 &&
+              uvdb_state == UVDB_STATE_IDLE,
+          "delayed second packet completes with normalized ownership");
 }
 
 static void test_disconnect_during_promotion_reopens(void)
@@ -1598,7 +1833,11 @@ int main(void)
     test_silent_probe_timeout_is_bounded();
     test_promotion_snapshot_is_atomic();
     test_immediate_first_packet_admission_transition();
+    test_detach_then_immediate_second_admission();
+    test_late_prior_epoch_release_is_attributed();
+    test_second_epoch_records_nested_exception_rejection();
     test_delayed_first_packet_admission_transition();
+    test_delayed_second_packet_after_detach();
     test_disconnect_during_promotion_reopens();
     test_candidate_withdrawn_during_promotion_reopens();
     test_candidate_socket_cleanup();

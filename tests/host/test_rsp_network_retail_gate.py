@@ -35,9 +35,15 @@ class WireSocket:
     def settimeout(self, _timeout: float) -> None:
         pass
 
+    def sendall(self, _data: bytes) -> None:
+        pass
+
     def recv(self, _size: int) -> bytes:
         data, self.data = self.data, b""
         return data
+
+    def fileno(self) -> int:
+        return 1
 
 
 def wire_client(data: bytes) -> gate.Rsp:
@@ -145,6 +151,90 @@ class PacketFramingTests(unittest.TestCase):
     def test_truncated_frame_is_rejected(self) -> None:
         with self.assertRaises(EOFError):
             wire_client(b"$g").read_packet()
+
+
+class FailureTelemetryTests(unittest.TestCase):
+    def tearDown(self) -> None:
+        gate.failure_telemetry = None
+
+    def capture(self, response=None, error=None, *, expected=2):
+        transcript = NullTranscript()
+        capture = gate.FailureTelemetryCapture(
+            "10.1.1.217", 1235, 1.0, expected, transcript)
+        client = wire_client(b"")
+        client.case = "second-qSupported"
+        patch = (
+            mock.patch.object(gate, "query_snapshot", side_effect=error)
+            if error is not None
+            else mock.patch.object(
+                gate, "query_snapshot", return_value=response)
+        )
+        with patch:
+            capture.capture(client, TimeoutError("qSupported timed out"))
+        return capture.result, transcript
+
+    def test_expected_epoch_is_captured_before_socket_cleanup(self) -> None:
+        response = {
+            "current": {
+                "connection_epoch": 2,
+                "dropped_event_writes": 0,
+            }
+        }
+        result, transcript = self.capture(response=response)
+        self.assertEqual(result["status"], "captured")
+        self.assertTrue(result["socket_open_during_capture"])
+        self.assertEqual(transcript.events[-1][0], "failure_telemetry")
+
+    def test_stale_epoch_is_distinct(self) -> None:
+        result, _ = self.capture(
+            response={
+                "current": {
+                    "connection_epoch": 1,
+                    "dropped_event_writes": 0,
+                }
+            })
+        self.assertEqual(result["status"], "stale_epoch")
+        self.assertEqual(result["observed_epoch"], 1)
+
+    def test_dropped_event_write_is_distinct(self) -> None:
+        result, _ = self.capture(
+            response={
+                "current": {
+                    "connection_epoch": 2,
+                    "dropped_event_writes": 1,
+                }
+            })
+        self.assertEqual(result["status"], "dropped_event_writes")
+
+    def test_bounded_udp_miss_is_distinct(self) -> None:
+        result, _ = self.capture(
+            error=gate.SnapshotUnavailable("bounded miss"))
+        self.assertEqual(result["status"], "udp_unavailable")
+
+    def test_malformed_snapshot_is_distinct(self) -> None:
+        result, _ = self.capture(
+            error=gate.AdmissionDiagnosticFailure("ABI mismatch"))
+        self.assertEqual(result["status"], "malformed_snapshot")
+
+    def test_request_timeout_captures_before_caller_cleanup(self) -> None:
+        class Capture:
+            def __init__(self):
+                self.result = None
+                self.calls = []
+
+            def capture(self, client, error):
+                self.calls.append((client, error))
+                self.result = {"status": "captured"}
+
+        client = wire_client(b"")
+        client.sock.recv = mock.Mock(side_effect=TimeoutError("timed out"))
+        capture = Capture()
+        gate.failure_telemetry = capture
+        with self.assertRaises(TimeoutError):
+            client.request(b"qSupported")
+        self.assertEqual(len(capture.calls), 1)
+        captured_client = capture.calls[0][0]
+        self.assertFalse(captured_client.closed)
 
 
 class MatrixSequencingComplete(RuntimeError):
