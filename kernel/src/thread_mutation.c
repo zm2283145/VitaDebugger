@@ -2,6 +2,8 @@
 
 #define VD_THREAD_MUTATION_ALLOWED_BANKS \
     (VD_KERNEL_THREAD_MUTATION_CORE | VD_KERNEL_THREAD_MUTATION_VFP)
+#define VD_THREAD_MUTATION_CORE_REGISTER_MASK \
+    ((1u << VD_KERNEL_THREAD_MUTATION_CORE_REGISTER_COUNT) - 1u)
 #define VD_ARM_CPSR_T (1u << 5)
 #define VD_ARM_CPSR_MODE_MASK 0x1fu
 #define VD_ARM_CPSR_MODE_USER 0x10u
@@ -212,7 +214,10 @@ unsigned int vdThreadMutationSupportedBanks(
     if(!backend->retain_target || !backend->release_target ||
        !backend->retained_target_status)
         return 0;
-    if(!backend->snapshot_core || !backend->write_core)
+    if(!backend->snapshot_core || !backend->write_core ||
+       backend->core_writable_register_mask == 0 ||
+       (backend->core_writable_register_mask &
+        ~VD_THREAD_MUTATION_CORE_REGISTER_MASK) != 0)
         supported &= ~VD_KERNEL_THREAD_MUTATION_CORE;
     if(!backend->snapshot_vfp || !backend->write_vfp)
         supported &= ~VD_KERNEL_THREAD_MUTATION_VFP;
@@ -360,6 +365,9 @@ int vdThreadMutationStage(
            request->register_index >=
                VD_KERNEL_THREAD_MUTATION_CORE_REGISTER_COUNT)
             return VD_KERNEL_ERROR_MUTATION_INVALID;
+        if((backend->core_writable_register_mask &
+            (1u << request->register_index)) == 0)
+            return VD_KERNEL_ERROR_MUTATION_UNSUPPORTED;
         if((int)request->register_bank !=
            selected_user_core_bank(&session->original_core))
             return VD_KERNEL_ERROR_MUTATION_TARGET;
@@ -634,5 +642,20 @@ int vdThreadMutationGetIdentity(
        session->state == VD_THREAD_MUTATION_EMPTY)
         return VD_KERNEL_ERROR_MUTATION_STATE;
     copy_bytes(identity, &session->identity, sizeof(*identity));
+    return 0;
+}
+
+int vdThreadMutationGetSelectedUserCoreBank(
+    const struct vd_thread_mutation_session* session,
+    unsigned int* register_bank)
+{
+    if(!session || !register_bank ||
+       session->state == VD_THREAD_MUTATION_EMPTY ||
+       (session->bank_mask & VD_KERNEL_THREAD_MUTATION_CORE) == 0)
+        return VD_KERNEL_ERROR_MUTATION_STATE;
+    const int selected = selected_user_core_bank(&session->original_core);
+    if(selected < 0)
+        return VD_KERNEL_ERROR_MUTATION_TARGET;
+    *register_bank = (unsigned int)selected;
     return 0;
 }

@@ -8,8 +8,60 @@
 extern "C" {
 #endif
 
-#define VD_THREAD_SETTER_BINDING_VERSION 1u
+#define VD_THREAD_SETTER_BINDING_VERSION 2u
 #define VD_THREAD_SETTER_FINGERPRINT_SIZE 32u
+#define VD_THREAD_CORE_SETTER_CONTRACT_VERSION 1u
+#define VD_THREAD_VFP_SETTER_CONTRACT_VERSION 1u
+
+enum vd_thread_setter_precondition {
+    VD_THREAD_SETTER_PRECONDITION_AUTHENTICATED_BINDING = 1u << 0,
+    VD_THREAD_SETTER_PRECONDITION_RETAINED_PROCESS = 1u << 1,
+    VD_THREAD_SETTER_PRECONDITION_RETAINED_THREAD = 1u << 2,
+    VD_THREAD_SETTER_PRECONDITION_PARENT_RELATION = 1u << 3,
+    VD_THREAD_SETTER_PRECONDITION_DEBUG_SUSPENDED = 1u << 4,
+    VD_THREAD_SETTER_PRECONDITION_SERIALIZED_ACCESS = 1u << 5,
+};
+
+#define VD_THREAD_SETTER_REQUIRED_PRECONDITIONS \
+    (VD_THREAD_SETTER_PRECONDITION_AUTHENTICATED_BINDING | \
+     VD_THREAD_SETTER_PRECONDITION_RETAINED_PROCESS | \
+     VD_THREAD_SETTER_PRECONDITION_RETAINED_THREAD | \
+     VD_THREAD_SETTER_PRECONDITION_PARENT_RELATION | \
+     VD_THREAD_SETTER_PRECONDITION_DEBUG_SUSPENDED | \
+     VD_THREAD_SETTER_PRECONDITION_SERIALIZED_ACCESS)
+
+enum vd_thread_setter_context_semantics {
+    VD_THREAD_SETTER_CONTEXT_EXACT_FULL_SNAPSHOT = 1,
+};
+
+enum vd_thread_setter_return_semantics {
+    VD_THREAD_SETTER_RETURN_ZERO_SUCCESS_NEGATIVE_ERROR = 1,
+};
+
+struct vd_thread_core_setter_contract {
+    unsigned int struct_size;
+    unsigned int version;
+    unsigned int native_context_size;
+    unsigned int native_context_alignment;
+    unsigned int writable_gpr_mask;
+    unsigned int required_preconditions;
+    unsigned int context_semantics;
+    unsigned int return_semantics;
+    unsigned int reserved[4];
+};
+
+struct vd_thread_vfp_setter_contract {
+    unsigned int struct_size;
+    unsigned int version;
+    unsigned int native_context_size;
+    unsigned int native_context_alignment;
+    unsigned int layout_version;
+    unsigned int d_register_count;
+    unsigned int required_preconditions;
+    unsigned int context_semantics;
+    unsigned int return_semantics;
+    unsigned int reserved[3];
+};
 
 enum vd_thread_reference_release_result {
     VD_THREAD_REFERENCE_RELEASED = 0,
@@ -33,6 +85,8 @@ struct vd_thread_setter_binding {
     uintptr_t core_set;
     uintptr_t vfp_get;
     uintptr_t vfp_set;
+    struct vd_thread_core_setter_contract core_contract;
+    struct vd_thread_vfp_setter_contract vfp_contract;
     unsigned char fingerprint[VD_THREAD_SETTER_FINGERPRINT_SIZE];
     unsigned int reserved[4];
 };
@@ -174,6 +228,10 @@ int vdThreadMutationProviderInit(
 
 const struct vd_thread_mutation_backend* vdThreadMutationProviderBackend(
     struct vd_thread_mutation_provider* provider);
+
+int vdThreadMutationProviderCoreContract(
+    const struct vd_thread_mutation_provider* provider,
+    struct vd_thread_core_setter_contract* contract);
 
 /*
  * Retry only a release for which the adapter explicitly returned

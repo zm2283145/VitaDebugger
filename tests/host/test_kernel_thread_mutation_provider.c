@@ -1,8 +1,13 @@
 #include <stdint.h>
 #include <stdio.h>
 
+#include "thread_gpr_gate.h"
 #include "thread_mutation.h"
 #include "thread_mutation_provider.h"
+
+#ifndef VD_TEST_EXPECT_GPR_GATE_COMPILED
+#define VD_TEST_EXPECT_GPR_GATE_COMPILED VD_THREAD_GPR_GATE_COMPILED
+#endif
 
 #define MOCK_PROCESS_OBJECT ((uintptr_t)0x10001000u)
 #define MOCK_THREAD_OBJECT ((uintptr_t)0x20002000u)
@@ -111,7 +116,41 @@ static int binding_matches(
                 binding->core_get == mock->binding.core_get &&
                 binding->core_set == mock->binding.core_set &&
                 binding->vfp_get == mock->binding.vfp_get &&
-                binding->vfp_set == mock->binding.vfp_set;
+                binding->vfp_set == mock->binding.vfp_set &&
+                binding->core_contract.struct_size ==
+                    mock->binding.core_contract.struct_size &&
+                binding->core_contract.version ==
+                    mock->binding.core_contract.version &&
+                binding->core_contract.native_context_size ==
+                    mock->binding.core_contract.native_context_size &&
+                binding->core_contract.native_context_alignment ==
+                    mock->binding.core_contract.native_context_alignment &&
+                binding->core_contract.writable_gpr_mask ==
+                    mock->binding.core_contract.writable_gpr_mask &&
+                binding->core_contract.required_preconditions ==
+                    mock->binding.core_contract.required_preconditions &&
+                binding->core_contract.context_semantics ==
+                    mock->binding.core_contract.context_semantics &&
+                binding->core_contract.return_semantics ==
+                    mock->binding.core_contract.return_semantics &&
+                binding->vfp_contract.struct_size ==
+                    mock->binding.vfp_contract.struct_size &&
+                binding->vfp_contract.version ==
+                    mock->binding.vfp_contract.version &&
+                binding->vfp_contract.native_context_size ==
+                    mock->binding.vfp_contract.native_context_size &&
+                binding->vfp_contract.native_context_alignment ==
+                    mock->binding.vfp_contract.native_context_alignment &&
+                binding->vfp_contract.layout_version ==
+                    mock->binding.vfp_contract.layout_version &&
+                binding->vfp_contract.d_register_count ==
+                    mock->binding.vfp_contract.d_register_count &&
+                binding->vfp_contract.required_preconditions ==
+                    mock->binding.vfp_contract.required_preconditions &&
+                binding->vfp_contract.context_semantics ==
+                    mock->binding.vfp_contract.context_semantics &&
+                binding->vfp_contract.return_semantics ==
+                    mock->binding.vfp_contract.return_semantics;
     if(valid)
     {
         for(unsigned int i = 0; i < VD_THREAD_SETTER_FINGERPRINT_SIZE; ++i)
@@ -373,6 +412,39 @@ static struct mock_platform make_mock(void)
     mock.binding.core_set = (uintptr_t)0x81002000u;
     mock.binding.vfp_get = (uintptr_t)0x81003000u;
     mock.binding.vfp_set = (uintptr_t)0x81004000u;
+    mock.binding.core_contract.struct_size =
+        sizeof(mock.binding.core_contract);
+    mock.binding.core_contract.version =
+        VD_THREAD_CORE_SETTER_CONTRACT_VERSION;
+    mock.binding.core_contract.native_context_size =
+        sizeof(struct vd_thread_registers);
+    mock.binding.core_contract.native_context_alignment =
+        _Alignof(struct vd_thread_registers);
+    mock.binding.core_contract.writable_gpr_mask = (1u << 13) - 1u;
+    mock.binding.core_contract.required_preconditions =
+        VD_THREAD_SETTER_REQUIRED_PRECONDITIONS;
+    mock.binding.core_contract.context_semantics =
+        VD_THREAD_SETTER_CONTEXT_EXACT_FULL_SNAPSHOT;
+    mock.binding.core_contract.return_semantics =
+        VD_THREAD_SETTER_RETURN_ZERO_SUCCESS_NEGATIVE_ERROR;
+    mock.binding.vfp_contract.struct_size =
+        sizeof(mock.binding.vfp_contract);
+    mock.binding.vfp_contract.version =
+        VD_THREAD_VFP_SETTER_CONTRACT_VERSION;
+    mock.binding.vfp_contract.native_context_size =
+        sizeof(struct vd_thread_vfp_registers);
+    mock.binding.vfp_contract.native_context_alignment =
+        _Alignof(struct vd_thread_vfp_registers);
+    mock.binding.vfp_contract.layout_version =
+        VD_KERNEL_VFP_LAYOUT_D32_V1;
+    mock.binding.vfp_contract.d_register_count =
+        VD_KERNEL_VFP_D_REGISTER_COUNT;
+    mock.binding.vfp_contract.required_preconditions =
+        VD_THREAD_SETTER_REQUIRED_PRECONDITIONS;
+    mock.binding.vfp_contract.context_semantics =
+        VD_THREAD_SETTER_CONTEXT_EXACT_FULL_SNAPSHOT;
+    mock.binding.vfp_contract.return_semantics =
+        VD_THREAD_SETTER_RETURN_ZERO_SUCCESS_NEGATIVE_ERROR;
     for(unsigned int i = 0; i < VD_THREAD_SETTER_FINGERPRINT_SIZE; ++i)
         mock.binding.fingerprint[i] = (unsigned char)(i + 1u);
     mock.process_reference.guid = 10;
@@ -472,6 +544,9 @@ static struct vd_kernel_thread_mutation_write_request write_request(
 
 static void test_binding_gate(void)
 {
+    check(sizeof(struct vd_thread_core_setter_contract) == 48u &&
+              sizeof(struct vd_thread_vfp_setter_contract) == 48u,
+          "setter contract ABI sizes");
     struct mock_platform mock = make_mock();
     struct vd_thread_mutation_provider_ops ops = make_ops(&mock);
     struct vd_thread_mutation_provider provider = {0};
@@ -484,6 +559,14 @@ static void test_binding_gate(void)
               (VD_KERNEL_THREAD_MUTATION_CORE |
                VD_KERNEL_THREAD_MUTATION_VFP),
           "verified binding advertises only authenticated banks");
+    struct vd_thread_core_setter_contract core_contract = {0};
+    check(vdThreadMutationProviderCoreContract(
+              &provider, &core_contract) == 0 &&
+              core_contract.struct_size == sizeof(core_contract) &&
+              core_contract.writable_gpr_mask == (1u << 13) - 1u &&
+              core_contract.required_preconditions ==
+                  VD_THREAD_SETTER_REQUIRED_PRECONDITIONS,
+          "verified provider exposes the authenticated core setter contract");
 
     mock = make_mock();
     ops = make_ops(&mock);
@@ -504,6 +587,62 @@ static void test_binding_gate(void)
     vdThreadMutationProviderInit(&provider, &ops);
     check(!vdThreadMutationProviderReady(&provider),
           "missing setter address fails closed");
+
+    mock = make_mock();
+    ops = make_ops(&mock);
+    mock.binding.core_contract.native_context_alignment = 3;
+    provider = (struct vd_thread_mutation_provider){0};
+    vdThreadMutationProviderInit(&provider, &ops);
+    check(!vdThreadMutationProviderReady(&provider),
+          "non-power-of-two native core alignment fails closed");
+
+    mock = make_mock();
+    ops = make_ops(&mock);
+    mock.binding.core_contract.native_context_size++;
+    provider = (struct vd_thread_mutation_provider){0};
+    vdThreadMutationProviderInit(&provider, &ops);
+    check(!vdThreadMutationProviderReady(&provider),
+          "native context size must preserve its claimed alignment");
+
+    mock = make_mock();
+    ops = make_ops(&mock);
+    mock.binding.core_contract.required_preconditions &=
+        ~VD_THREAD_SETTER_PRECONDITION_PARENT_RELATION;
+    provider = (struct vd_thread_mutation_provider){0};
+    vdThreadMutationProviderInit(&provider, &ops);
+    check(!vdThreadMutationProviderReady(&provider),
+          "incomplete core setter preconditions fail closed");
+
+    mock = make_mock();
+    ops = make_ops(&mock);
+    mock.binding.core_contract.writable_gpr_mask |= 1u << 16;
+    provider = (struct vd_thread_mutation_provider){0};
+    vdThreadMutationProviderInit(&provider, &ops);
+    check(!vdThreadMutationProviderReady(&provider),
+          "core contract cannot claim PC or CPSR as a writable GPR");
+
+    mock = make_mock();
+    ops = make_ops(&mock);
+    mock.binding.vfp_contract.layout_version++;
+    provider = (struct vd_thread_mutation_provider){0};
+    vdThreadMutationProviderInit(&provider, &ops);
+    check(!vdThreadMutationProviderReady(&provider),
+          "VFP contract is validated independently from core");
+
+    mock = make_mock();
+    ops = make_ops(&mock);
+    mock.binding.supported_banks = VD_KERNEL_THREAD_MUTATION_CORE;
+    mock.binding.vfp_get = 0;
+    mock.binding.vfp_set = 0;
+    mock.binding.vfp_contract =
+        (struct vd_thread_vfp_setter_contract){0};
+    provider = (struct vd_thread_mutation_provider){0};
+    vdThreadMutationProviderInit(&provider, &ops);
+    check(vdThreadMutationProviderReady(&provider) &&
+              vdThreadMutationSupportedBanks(
+                  vdThreadMutationProviderBackend(&provider)) ==
+                  VD_KERNEL_THREAD_MUTATION_CORE,
+          "core contract does not imply VFP write support");
 
     mock = make_mock();
     ops = make_ops(&mock);
@@ -1019,6 +1158,196 @@ static void test_disconnect_timeout_watchdog_and_unload(void)
           "terminal unload state rejects reconnect transactions");
 }
 
+static void test_one_gpr_restorable_gate(void)
+{
+    struct mock_platform mock = make_mock();
+    struct vd_thread_mutation_provider_ops ops = make_ops(&mock);
+    struct vd_thread_mutation_provider provider = {0};
+    vdThreadMutationProviderInit(&provider, &ops);
+    struct vd_thread_gpr_gate gate = {0};
+    check(vdThreadGprGateInit(&gate) == 0,
+          "initialize one-GPR gate once");
+    check(vdThreadGprGateInit(&gate) ==
+              VD_KERNEL_ERROR_MUTATION_STATE,
+          "one-GPR gate cannot erase initialized state");
+    check(vdThreadGprGateCompiled() ==
+              VD_TEST_EXPECT_GPR_GATE_COMPILED,
+          "one-GPR gate compile state matches forced variant");
+
+    const struct vd_thread_mutation_identity owner = identity();
+    if(!VD_TEST_EXPECT_GPR_GATE_COMPILED)
+    {
+        check(vdThreadGprGateBegin(
+                  &gate, &owner, VD_THREAD_GPR_GATE_REGISTER_R4,
+                  &provider) == VD_KERNEL_ERROR_MUTATION_UNSUPPORTED &&
+                  !vdThreadGprGateIsActive(&gate) &&
+                  mock.retain_process_calls == 0 &&
+                  mock.snapshot_core_calls == 0 &&
+                  mock.write_core_calls == 0,
+              "default-off one-GPR gate cannot acquire or write");
+        return;
+    }
+
+    check(vdThreadGprGateBegin(&gate, &owner, 3u, &provider) ==
+              VD_KERNEL_ERROR_MUTATION_INVALID,
+          "one-GPR gate rejects caller-saved registers");
+    const struct vd_thread_registers original = mock.core;
+    check(vdThreadGprGateBegin(
+              &gate, &owner, VD_THREAD_GPR_GATE_REGISTER_R4,
+              &provider) == 0 &&
+              vdThreadGprGateIsActive(&gate),
+          "one-GPR gate snapshots a retained R4 transaction");
+    check(vdThreadGprGateBegin(
+              &gate, &owner, VD_THREAD_GPR_GATE_REGISTER_R5,
+              &provider) == VD_KERNEL_ERROR_MUTATION_BUSY,
+          "one-GPR gate admits only one transaction");
+    mock.uid_thread_object = MOCK_REUSED_THREAD_OBJECT;
+    struct vd_thread_registers expected = original;
+    expected.entry[0].r[VD_THREAD_GPR_GATE_REGISTER_R4] =
+        0x44556677u;
+    check(vdThreadGprGateApply(&gate, &owner, 0x44556677u) == 0 &&
+              core_same(&mock.core, &expected) &&
+              mock.observed_uid_reuse &&
+              mock.snapshot_vfp_calls == 0 &&
+              mock.write_vfp_calls == 0,
+          "one-GPR apply changes only retained-object R4 and reads it back");
+    check(vdThreadGprGateApply(&gate, &owner, 0x11223344u) ==
+              VD_KERNEL_ERROR_MUTATION_STATE &&
+              core_same(&mock.core, &expected),
+          "one-GPR gate cannot stage a second write");
+    check(vdThreadMutationProviderPrepareUnload(&provider) ==
+              VD_KERNEL_ERROR_MUTATION_BUSY,
+          "plugin unload waits for one-GPR restoration");
+    mock.relationship_valid = 0;
+    const int writes_before = mock.write_core_calls;
+    check(vdThreadGprGateCleanup(
+              &gate, owner.owner_pid, owner.stop_token) ==
+              VD_KERNEL_ERROR_MUTATION_RESTORE &&
+              vdThreadGprGateIsActive(&gate) &&
+              mock.write_core_calls == writes_before,
+          "parent or inventory uncertainty preserves the stopped GPR lease");
+    mock.relationship_valid = 1;
+    mock.retry_release_call = mock.release_calls + 1;
+    check(vdThreadGprGateCleanup(
+              &gate, owner.owner_pid, owner.stop_token) ==
+                  VD_KERNEL_ERROR_MUTATION_RESTORE &&
+              core_same(&mock.core, &original) &&
+              !vdThreadGprGateIsActive(&gate) &&
+              provider.release_pending,
+          "watchdog restores exactly and surfaces retained release retry");
+    mock.retry_release_call = 0;
+    check(vdThreadMutationProviderDrain(&provider) == 0 &&
+              vdThreadMutationProviderPrepareUnload(&provider) == 0 &&
+              !vdThreadMutationProviderReady(&provider),
+          "ordered retained-reference drain permits terminal unload");
+
+    mock = make_mock();
+    ops = make_ops(&mock);
+    provider = (struct vd_thread_mutation_provider){0};
+    vdThreadMutationProviderInit(&provider, &ops);
+    gate = (struct vd_thread_gpr_gate){0};
+    vdThreadGprGateInit(&gate);
+    const struct vd_thread_registers rollback_original = mock.core;
+    mock.corrupt_core_snapshot_call = 2;
+    check(vdThreadGprGateBegin(
+              &gate, &owner, VD_THREAD_GPR_GATE_REGISTER_R5,
+              &provider) == 0 &&
+              vdThreadGprGateApply(&gate, &owner, 0x89abcdefu) ==
+                  VD_KERNEL_ERROR_MUTATION_VERIFY &&
+              core_same(&mock.core, &rollback_original) &&
+              !vdThreadGprGateIsActive(&gate),
+          "one-GPR read-back mismatch rolls back and verifies exactly");
+
+    mock = make_mock();
+    ops = make_ops(&mock);
+    provider = (struct vd_thread_mutation_provider){0};
+    vdThreadMutationProviderInit(&provider, &ops);
+    gate = (struct vd_thread_gpr_gate){0};
+    vdThreadGprGateInit(&gate);
+    const struct vd_thread_registers setter_original = mock.core;
+    mock.fail_write_core_call = 1;
+    check(vdThreadGprGateBegin(
+              &gate, &owner, VD_THREAD_GPR_GATE_REGISTER_R4,
+              &provider) == 0 &&
+              vdThreadGprGateApply(&gate, &owner, 0x55667788u) == -309 &&
+              core_same(&mock.core, &setter_original) &&
+              !vdThreadGprGateIsActive(&gate),
+          "one-GPR setter failure rolls back and reports the setter error");
+
+    mock = make_mock();
+    ops = make_ops(&mock);
+    provider = (struct vd_thread_mutation_provider){0};
+    vdThreadMutationProviderInit(&provider, &ops);
+    gate = (struct vd_thread_gpr_gate){0};
+    vdThreadGprGateInit(&gate);
+    const struct vd_thread_registers retry_original = mock.core;
+    mock.corrupt_core_snapshot_call = 2;
+    mock.fail_write_core_call = 2;
+    check(vdThreadGprGateBegin(
+              &gate, &owner, VD_THREAD_GPR_GATE_REGISTER_R5,
+              &provider) == 0 &&
+              vdThreadGprGateApply(&gate, &owner, 0x10203040u) ==
+                  VD_KERNEL_ERROR_MUTATION_RESTORE &&
+              vdThreadGprGateIsActive(&gate),
+          "failed automatic rollback preserves the restore obligation");
+    mock.fail_write_core_call = 0;
+    mock.corrupt_core_snapshot_call = 0;
+    check(vdThreadGprGateCleanup(
+              &gate, owner.owner_pid, owner.stop_token) == 0 &&
+              core_same(&mock.core, &retry_original) &&
+              !vdThreadGprGateIsActive(&gate),
+          "watchdog retry completes exact one-GPR rollback");
+
+    mock = make_mock();
+    ops = make_ops(&mock);
+    provider = (struct vd_thread_mutation_provider){0};
+    vdThreadMutationProviderInit(&provider, &ops);
+    gate = (struct vd_thread_gpr_gate){0};
+    vdThreadGprGateInit(&gate);
+    check(vdThreadGprGateBegin(
+              &gate, &owner, VD_THREAD_GPR_GATE_REGISTER_R4,
+              &provider) == 0 &&
+              vdThreadGprGateApply(&gate, &owner, 0xaabbccddu) == 0,
+          "stage one-GPR thread-exit fixture");
+    const int exit_writes = mock.write_core_calls;
+    mock.thread_alive = 0;
+    check(vdThreadGprGateCleanup(
+              &gate, owner.owner_pid, owner.stop_token) == 0 &&
+              mock.write_core_calls == exit_writes &&
+              !mock.thread_held && !mock.process_held,
+          "proven thread exit retires the obsolete restore without writing");
+
+    mock = make_mock();
+    mock.binding.core_contract.writable_gpr_mask &=
+        ~(1u << VD_THREAD_GPR_GATE_REGISTER_R5);
+    ops = make_ops(&mock);
+    provider = (struct vd_thread_mutation_provider){0};
+    vdThreadMutationProviderInit(&provider, &ops);
+    gate = (struct vd_thread_gpr_gate){0};
+    vdThreadGprGateInit(&gate);
+    check(vdThreadGprGateBegin(
+              &gate, &owner, VD_THREAD_GPR_GATE_REGISTER_R5,
+              &provider) == VD_KERNEL_ERROR_MUTATION_UNSUPPORTED &&
+              mock.snapshot_core_calls == 0,
+          "one-GPR gate honors the authenticated writable-GPR mask");
+
+    mock = make_mock();
+    ops = make_ops(&mock);
+    provider = (struct vd_thread_mutation_provider){0};
+    vdThreadMutationProviderInit(&provider, &ops);
+    gate = (struct vd_thread_gpr_gate){0};
+    vdThreadGprGateInit(&gate);
+    mock.ambiguous_release_call = 1;
+    check(vdThreadGprGateBegin(
+              &gate, &owner, VD_THREAD_GPR_GATE_REGISTER_R4,
+              &provider) == 0 &&
+              vdThreadGprGateApply(&gate, &owner, 0x778899aau) == 0 &&
+              vdThreadGprGateRestore(&gate, &owner) == -304 &&
+              provider.release_uncertain &&
+              vdThreadMutationProviderPrepareUnload(&provider) == -304,
+          "ambiguous fail-after-effect release is surfaced and blocks unload");
+}
+
 int main(void)
 {
     test_binding_gate();
@@ -1029,6 +1358,7 @@ int main(void)
     test_target_exit_and_unknown_state();
     test_release_drain();
     test_disconnect_timeout_watchdog_and_unload();
+    test_one_gpr_restorable_gate();
     if(failures)
         return 1;
     puts("PASS: verified-setter retained-target provider lifecycle");

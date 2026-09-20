@@ -2,6 +2,7 @@
 
 #define VD_THREAD_MUTATION_PROVIDER_ALLOWED_BANKS \
     (VD_KERNEL_THREAD_MUTATION_CORE | VD_KERNEL_THREAD_MUTATION_VFP)
+#define VD_THREAD_CORE_WRITABLE_GPR_MASK ((1u << 13) - 1u)
 
 static void zero_bytes(void* value, unsigned int size)
 {
@@ -67,14 +68,72 @@ static int binding_valid(
                       sizeof(binding->fingerprint)))
         return 0;
 
-    if((binding->supported_banks & VD_KERNEL_THREAD_MUTATION_CORE) != 0 &&
-       (binding->core_get == 0 || binding->core_set == 0 ||
-        !ops->snapshot_core || !ops->write_core))
+    if((binding->supported_banks & VD_KERNEL_THREAD_MUTATION_CORE) != 0)
+    {
+        const struct vd_thread_core_setter_contract* contract =
+            &binding->core_contract;
+        if(binding->core_get == 0 || binding->core_set == 0 ||
+           !ops->snapshot_core || !ops->write_core ||
+           contract->struct_size != sizeof(*contract) ||
+           contract->version != VD_THREAD_CORE_SETTER_CONTRACT_VERSION ||
+           contract->native_context_size == 0 ||
+           contract->native_context_alignment == 0 ||
+           (contract->native_context_alignment &
+            (contract->native_context_alignment - 1u)) != 0 ||
+           (contract->native_context_size %
+            contract->native_context_alignment) != 0 ||
+           contract->writable_gpr_mask == 0 ||
+           (contract->writable_gpr_mask &
+            ~VD_THREAD_CORE_WRITABLE_GPR_MASK) != 0 ||
+           contract->required_preconditions !=
+               VD_THREAD_SETTER_REQUIRED_PRECONDITIONS ||
+           contract->context_semantics !=
+               VD_THREAD_SETTER_CONTEXT_EXACT_FULL_SNAPSHOT ||
+           contract->return_semantics !=
+               VD_THREAD_SETTER_RETURN_ZERO_SUCCESS_NEGATIVE_ERROR ||
+           !bytes_are_zero(contract->reserved,
+                           sizeof(contract->reserved)))
+            return 0;
+    }
+    else if(binding->core_get != 0 || binding->core_set != 0 ||
+            !bytes_are_zero(&binding->core_contract,
+                            sizeof(binding->core_contract)))
+    {
         return 0;
-    if((binding->supported_banks & VD_KERNEL_THREAD_MUTATION_VFP) != 0 &&
-       (binding->vfp_get == 0 || binding->vfp_set == 0 ||
-        !ops->snapshot_vfp || !ops->write_vfp))
+    }
+    if((binding->supported_banks & VD_KERNEL_THREAD_MUTATION_VFP) != 0)
+    {
+        const struct vd_thread_vfp_setter_contract* contract =
+            &binding->vfp_contract;
+        if(binding->vfp_get == 0 || binding->vfp_set == 0 ||
+           !ops->snapshot_vfp || !ops->write_vfp ||
+           contract->struct_size != sizeof(*contract) ||
+           contract->version != VD_THREAD_VFP_SETTER_CONTRACT_VERSION ||
+           contract->native_context_size == 0 ||
+           contract->native_context_alignment == 0 ||
+           (contract->native_context_alignment &
+            (contract->native_context_alignment - 1u)) != 0 ||
+           (contract->native_context_size %
+            contract->native_context_alignment) != 0 ||
+           contract->layout_version != VD_KERNEL_VFP_LAYOUT_D32_V1 ||
+           contract->d_register_count !=
+               VD_KERNEL_VFP_D_REGISTER_COUNT ||
+           contract->required_preconditions !=
+               VD_THREAD_SETTER_REQUIRED_PRECONDITIONS ||
+           contract->context_semantics !=
+               VD_THREAD_SETTER_CONTEXT_EXACT_FULL_SNAPSHOT ||
+           contract->return_semantics !=
+               VD_THREAD_SETTER_RETURN_ZERO_SUCCESS_NEGATIVE_ERROR ||
+           !bytes_are_zero(contract->reserved,
+                           sizeof(contract->reserved)))
+            return 0;
+    }
+    else if(binding->vfp_get != 0 || binding->vfp_set != 0 ||
+            !bytes_are_zero(&binding->vfp_contract,
+                            sizeof(binding->vfp_contract)))
+    {
         return 0;
+    }
     return 1;
 }
 
@@ -433,6 +492,8 @@ int vdThreadMutationProviderInit(
         return 0;
     copy_bytes(&provider->binding, &binding, sizeof(provider->binding));
     provider->configured_banks = binding.supported_banks;
+    provider->backend.core_writable_register_mask =
+        binding.core_contract.writable_gpr_mask;
     provider->binding_ready = 1;
     if(binding_is_live(provider))
         provider->backend.supported_banks = provider->configured_banks;
@@ -443,6 +504,21 @@ const struct vd_thread_mutation_backend* vdThreadMutationProviderBackend(
     struct vd_thread_mutation_provider* provider)
 {
     return provider ? &provider->backend : 0;
+}
+
+int vdThreadMutationProviderCoreContract(
+    const struct vd_thread_mutation_provider* provider,
+    struct vd_thread_core_setter_contract* contract)
+{
+    if(!provider || !contract)
+        return VD_KERNEL_ERROR_MUTATION_INVALID;
+    if(!provider->binding_ready ||
+       (provider->configured_banks &
+        VD_KERNEL_THREAD_MUTATION_CORE) == 0)
+        return VD_KERNEL_ERROR_MUTATION_UNSUPPORTED;
+    copy_bytes(contract, &provider->binding.core_contract,
+               sizeof(*contract));
+    return 0;
 }
 
 int vdThreadMutationProviderDrain(

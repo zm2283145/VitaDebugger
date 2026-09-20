@@ -7,7 +7,8 @@ and VFP/NEON banks.**
 The transaction/provider code models the safety contract a future
 firmware-specific adapter must satisfy. It does not cast a provisional NID,
 infer a function signature, write an internal thread-object field, or bind the
-host fake to the production kernel companion.
+host fake to the production kernel companion. A disposable one-GPR contract is
+compiled out by default and is not linked into the production kernel target.
 
 ## Evidence ledger
 
@@ -32,9 +33,46 @@ unimplemented stubs, Dev Wiki internal labels, and SGI-style
 `setCpuRegisterForDebugger` leads do not supply a verified public
 signature/NID. They are not promotion evidence.
 
+The installed headers, NID YAML catalogs, and static stub archives were also
+searched for `ksceKernelSetThreadCpuRegisters`,
+`sceKernelSetThreadCpuRegisters`, and `setCpuRegisterForDebugger`. The only
+setter-related symbols found were the two VM-context names above. Repository
+history contains the provisional NIDs and unresolved hypotheses, but no
+prototype, implementation fingerprint, hardware sample, or ABI proof. No local
+firmware/module image or resolver result exists from which more evidence can be
+lawfully established.
+
 The exact setter prototype/ABI requested by the roadmap is therefore
-**unresolved**. Since setter and lifetime prerequisites are both unproven, this
-change intentionally implements no mutation gate.
+**unresolved**. No native setter address, signature, size, alignment, writable
+field, or return contract is populated by this change.
+
+## Provider setter contract v2
+
+Binding ABI v2 makes the evidence a future adapter must provide explicit rather
+than allowing callback presence to imply writability. A core binding now
+contains a 48-byte `vd_thread_core_setter_contract` with:
+
+- its exact structure size and version;
+- the proven native setter context size and power-of-two alignment;
+- an explicit writable GPR mask, limited by the provider to R0-R12;
+- the complete required precondition set: authenticated/pinned binding,
+  retained process, retained thread, verified parent relation,
+  debug-suspended target, and serialized access;
+- exact full-snapshot replacement semantics; and
+- zero-success/negative-error return semantics.
+
+Any missing, extra, or unknown contract value rejects the entire core
+capability. The transaction copies no implicit writable default: a zero mask or
+unknown mask bit removes core support, and staging a GPR outside the
+authenticated mask returns unsupported before a setter call.
+
+VFP/NEON uses a separate 48-byte `vd_thread_vfp_setter_contract`, separate
+getter/setter addresses, an independently proven native size/alignment, and an
+explicit D32 layout/version. A core contract never enables VFP. Contract fields
+in the host fake, including its `0x90` core context size and 8-byte alignment,
+are test data only and are **not** Vita ABI evidence. The binding itself is an
+in-process structure whose `struct_size` is checked against the target build;
+it is not a portable serialized ABI.
 
 ## Provider lifetime contract
 
@@ -110,17 +148,40 @@ fingerprint, and cannot enable a writable bank. See
 [`kernel/thread-setter-resolver-probe/README.md`](../kernel/thread-setter-resolver-probe/README.md)
 for its exact ABI and hardware runbook.
 
+## Disposable one-GPR contract
+
+`kernel/src/thread_gpr_gate.c` is the next host-testable layer. It is disabled
+unless `VD_THREAD_GPR_GATE_COMPILED=1`, accepts only R4 or R5, and requires an
+authenticated ABI-v2 core contract that explicitly includes the selected
+register. It has no commit operation: after one apply, the only successful
+terminal path is exact restoration or proof that the retained target was
+destroyed.
+
+The gate retains and snapshots first, writes a full context with exactly one
+selected-user-bank GPR changed, reads back the complete context, and rolls back
+to the exact snapshot on setter or verification failure. Failed rollback keeps
+the lease and restore obligation active for watchdog cleanup. Parent/inventory
+uncertainty keeps the target stopped; proven thread/process exit retires an
+obsolete write; release retry and quarantine retain the provider rules above.
+Release uncertainty is returned to the gate caller even after register
+restoration succeeds; it is never reported as fully clean completion.
+The forced-enabled tests use host callbacks only. There is no production
+provider, no native setter call, no resume integration, no Vita package for
+this gate, and no hardware validation.
+
 ## Host validation
 
 ```powershell
 C:\msys64\usr\bin\make.exe `
   host-test-kernel-thread-mutation `
   host-test-kernel-thread-mutation-provider `
+  host-test-kernel-thread-gpr-gate-enabled `
   host-test-thread-setter-resolver-record `
   HOST_CC=C:/msys64/mingw64/bin/gcc.exe
 ```
 
 The suites cover snapshot/stage/read-back/exact rollback, core/VFP separation,
+forced-disabled and forced-enabled R4/R5 admission,
 partial retain unwind, retain-contract violations, UID mapping churn,
 process/thread exit, parent changes, forced inventory uncertainty, timeout and
 disconnect cleanup, binding uncertainty, ordered release, retryable and
@@ -137,11 +198,11 @@ validation. They remain fake-platform tests.
 3. Prove an atomic retained-object lifecycle on disposable hardware across
    exit, close/reuse, UID reuse, parent changes, timeout, disconnect, release
    uncertainty, watchdog retry, and plugin unload.
-4. Only after steps 2-3, create a separate default-off title that changes one
-   controlled callee-saved GPR (`r4` or `r5`) in a same-process,
-   debug-suspended disposable worker. Require read-back, exact restoration,
-   resume, detach/reconnect, timeout, exit, UID churn, forced inventory failure,
-   and watchdog recovery.
+4. Only after steps 2-3 and independent review, bind the existing default-off
+   R4/R5 restorable contract to a separate disposable hardware title. Require
+   read-back, exact restoration, resume, detach/reconnect, timeout, exit, UID
+   churn, forced inventory failure, watchdog recovery, and complete removal
+   after the experiment.
 5. Gate VFP/NEON independently. A core setter cannot be assumed to cover
    D0-D31 or FPSCR; lazy VFP ownership keeps a cooperative in-thread trampoline
    the safer lead.

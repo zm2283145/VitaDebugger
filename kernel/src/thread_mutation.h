@@ -23,6 +23,7 @@ struct vd_thread_mutation_identity {
 
 struct vd_thread_mutation_backend {
     unsigned int supported_banks;
+    unsigned int core_writable_register_mask;
     void* context;
     // A writable backend must retain the exact process/thread objects for the
     // full transaction so integer UID reuse cannot redirect a later write.
@@ -110,6 +111,10 @@ int vdThreadMutationIsActive(
 int vdThreadMutationGetIdentity(
     const struct vd_thread_mutation_session* session,
     struct vd_thread_mutation_identity* identity);
+
+int vdThreadMutationGetSelectedUserCoreBank(
+    const struct vd_thread_mutation_session* session,
+    unsigned int* register_bank);
 
 #ifdef __cplusplus
 }

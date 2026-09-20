@@ -139,8 +139,11 @@ py -3 kernel/thread-setter-resolver-probe/decode_record.py `
    exit, UID reuse, parent changes, timeout, disconnect, cleanup retry, and
    plugin unload. Current GUID release is by numeric UID, and no public
    generation/non-reuse guarantee is documented.
-3. Only then design a separately reviewed, default-off mutation title for one
-   callee-saved GPR in a same-process disposable worker, with read-back, exact
+3. Only then bind the separately reviewed, default-off host-modeled R4/R5
+   restorable contract to a disposable hardware title. Its provider ABI still
+   requires proven native size/alignment, writable mask, full-snapshot and
+   return semantics, authenticated binding, exact retained objects, parent
+   relation, debug suspension, and serialization. Require read-back, exact
    restore, resume, detach/reconnect, and watchdog recovery.
 4. Keep VFP/NEON separate. A core setter must not be assumed to update D0-D31
    or FPSCR, especially with lazy VFP ownership.

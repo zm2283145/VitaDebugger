@@ -206,6 +206,8 @@ static struct vd_thread_mutation_backend make_backend(
 {
     const struct vd_thread_mutation_backend backend = {
         .supported_banks = banks,
+        .core_writable_register_mask =
+            (1u << VD_KERNEL_THREAD_MUTATION_CORE_REGISTER_COUNT) - 1u,
         .context = mock,
         .retain_target = retain_target,
         .release_target = release_target,
@@ -277,6 +279,17 @@ static void test_capability_and_snapshot_gate(void)
           "missing VFP setter removes only VFP capability");
     backend = make_backend(&mock, VD_KERNEL_THREAD_MUTATION_CORE |
                                   VD_KERNEL_THREAD_MUTATION_VFP);
+    backend.core_writable_register_mask = 0;
+    check(vdThreadMutationSupportedBanks(&backend) ==
+              VD_KERNEL_THREAD_MUTATION_VFP,
+          "missing authenticated GPR mask removes only core capability");
+    backend.core_writable_register_mask =
+        1u << VD_KERNEL_THREAD_MUTATION_CORE_REGISTER_COUNT;
+    check(vdThreadMutationSupportedBanks(&backend) ==
+              VD_KERNEL_THREAD_MUTATION_VFP,
+          "unknown GPR-mask bits fail the core capability closed");
+    backend = make_backend(&mock, VD_KERNEL_THREAD_MUTATION_CORE |
+                                  VD_KERNEL_THREAD_MUTATION_VFP);
     backend.retained_target_status = 0;
     check(vdThreadMutationSupportedBanks(&backend) == 0,
           "missing retained-target lifecycle removes every write capability");
@@ -330,6 +343,23 @@ static void test_capability_and_snapshot_gate(void)
               VD_KERNEL_ERROR_MUTATION_INVALID &&
               mock.snapshot_core_calls == 0,
           "begin rejects unnegotiated flags before snapshot");
+
+    backend.core_writable_register_mask = 1u << 4u;
+    check(vdThreadMutationBegin(&session, &owner, &request, &backend,
+                                &handle) == 0,
+          "begin accepts an authenticated subset writable mask");
+    struct vd_kernel_thread_mutation_write_request masked_write =
+        write_request(&handle, VD_KERNEL_THREAD_MUTATION_CORE, 0u, 5u,
+                      0x12345678u, 0u);
+    check(vdThreadMutationStage(&session, &owner, &masked_write,
+                                &backend) ==
+              VD_KERNEL_ERROR_MUTATION_UNSUPPORTED &&
+              mock.write_core_calls == 0,
+          "stage rejects a GPR absent from the authenticated contract");
+    check(vdThreadMutationRestore(&session, &owner, &handle,
+                                  &backend) == 0,
+          "masked-register rejection leaves an exactly restorable lease");
+    backend = make_backend(&mock, VD_KERNEL_THREAD_MUTATION_CORE);
 
     mock.core.entry[0].cpsr = 0x13u;
     mock.core.entry[1].cpsr = 0x13u;
