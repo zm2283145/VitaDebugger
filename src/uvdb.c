@@ -587,6 +587,8 @@ static void uvdb_admission_diagnostic_record(
 static void uvdb_admission_diagnostic_begin_connection(void);
 static void uvdb_admission_diagnostic_socket_state(
     int* socket, int descriptor, uint32_t generation);
+static void uvdb_admission_diagnostic_promote_socket(
+    int descriptor, uint32_t generation);
 #endif
 #ifdef UVDB_RAW_RECV_DIAGNOSTIC
 static void uvdb_capture_raw_recv_diagnostic(
@@ -876,10 +878,8 @@ static int uvdb_promote_candidate_socket(int descriptor)
             uvdb_socket_generation++;
 #ifdef UVDB_ADMISSION_DIAGNOSTIC
         generation = uvdb_socket_generation;
-        uvdb_admission_diagnostic_socket_state(
-            &uvdb_candidate_socket, -1, 0);
-        uvdb_admission_diagnostic_socket_state(
-            &uvdb_socket, descriptor, uvdb_socket_generation);
+        uvdb_admission_diagnostic_promote_socket(
+            descriptor, generation);
 #endif
         result = 0;
     }
@@ -1135,6 +1135,22 @@ static void uvdb_admission_diagnostic_socket_state(
         __atomic_store_n(
             &uvdb_admission_diagnostic_state.current_generation,
             generation, __ATOMIC_RELEASE);
+    uvdb_admission_diagnostic_write_end();
+}
+
+static void uvdb_admission_diagnostic_promote_socket(
+    int descriptor, uint32_t generation)
+{
+    uvdb_admission_diagnostic_write_begin();
+    __atomic_store_n(
+        &uvdb_admission_diagnostic_state.current_candidate, -1,
+        __ATOMIC_RELAXED);
+    __atomic_store_n(
+        &uvdb_admission_diagnostic_state.current_socket, descriptor,
+        __ATOMIC_RELAXED);
+    __atomic_store_n(
+        &uvdb_admission_diagnostic_state.current_generation, generation,
+        __ATOMIC_RELAXED);
     uvdb_admission_diagnostic_write_end();
 }
 

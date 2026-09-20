@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import ipaddress
 import json
 import socket
 import struct
@@ -15,6 +16,10 @@ from rsp_network_retail_gate import Rsp, Transcript, parse_offsets, utc_now
 
 
 class AdmissionDiagnosticFailure(RuntimeError):
+    pass
+
+
+class SnapshotUnavailable(AdmissionDiagnosticFailure):
     pass
 
 
@@ -50,6 +55,20 @@ SNAPSHOT_FORMAT = (
     + "3i5I"
 )
 SNAPSHOT_SIZE = struct.calcsize(SNAPSHOT_FORMAT)
+
+
+def numeric_ipv4(value: str) -> str:
+    try:
+        address = ipaddress.IPv4Address(value)
+    except ipaddress.AddressValueError as exc:
+        raise argparse.ArgumentTypeError(
+            "--host must be a numeric IPv4 literal"
+        ) from exc
+    if str(address) != value:
+        raise argparse.ArgumentTypeError(
+            "--host must use canonical dotted-decimal IPv4"
+        )
+    return value
 
 
 def parse_snapshot(data: bytes) -> dict[str, Any]:
@@ -119,32 +138,32 @@ def query_snapshot(
 ) -> dict[str, Any]:
     deadline = time.monotonic() + timeout
     last_error: OSError | None = None
-    expected_host = socket.gethostbyname(host)
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as client:
         while time.monotonic() < deadline:
             client.settimeout(min(0.5, max(0.01, deadline - time.monotonic())))
+            transcript.event(
+                "diagnostic_query", peer=f"{host}:{port}",
+                request=REQUEST.decode("ascii"),
+            )
             try:
-                transcript.event(
-                    "diagnostic_query", peer=f"{host}:{port}",
-                    request=REQUEST.decode("ascii"),
-                )
                 client.sendto(REQUEST, (host, port))
                 data, peer = client.recvfrom(SNAPSHOT_SIZE + 1)
-                if peer[0] != expected_host:
-                    continue
-                snapshot = parse_snapshot(data)
-                transcript.event(
-                    "diagnostic_snapshot",
-                    peer=f"{peer[0]}:{peer[1]}",
-                    snapshot=snapshot,
-                )
-                return snapshot
             except socket.timeout:
                 continue
             except OSError as exc:
                 last_error = exc
                 time.sleep(0.05)
-    raise AdmissionDiagnosticFailure(
+                continue
+            if peer[0] != host:
+                continue
+            snapshot = parse_snapshot(data)
+            transcript.event(
+                "diagnostic_snapshot",
+                peer=f"{peer[0]}:{peer[1]}",
+                snapshot=snapshot,
+            )
+            return snapshot
+    raise SnapshotUnavailable(
         f"no diagnostic snapshot within {timeout}s: {last_error}"
     )
 
@@ -154,11 +173,16 @@ def wait_debugger_ready(
 ) -> dict[str, Any]:
     deadline = time.monotonic() + timeout
     last_snapshot: dict[str, Any] | None = None
+    last_miss: str | None = None
     while time.monotonic() < deadline:
         remaining = deadline - time.monotonic()
-        last_snapshot = query_snapshot(
-            host, port, min(1.0, remaining), transcript
-        )
+        try:
+            last_snapshot = query_snapshot(
+                host, port, min(1.0, remaining), transcript
+            )
+        except SnapshotUnavailable as exc:
+            last_miss = str(exc)
+            continue
         events = last_snapshot["events"]
         current = last_snapshot["current"]
         if (
@@ -174,7 +198,8 @@ def wait_debugger_ready(
             return last_snapshot
         time.sleep(0.1)
     raise AdmissionDiagnosticFailure(
-        f"debugger-ready marker not observed: {last_snapshot}"
+        "debugger-ready marker not observed before deadline: "
+        f"snapshot={last_snapshot}; last_miss={last_miss}"
     )
 
 
@@ -243,10 +268,16 @@ def wait_detached(
 ) -> dict[str, Any]:
     deadline = time.monotonic() + timeout
     last_snapshot: dict[str, Any] | None = None
+    last_miss: str | None = None
     while time.monotonic() < deadline:
-        last_snapshot = query_snapshot(
-            host, port, min(1.0, deadline - time.monotonic()), transcript
-        )
+        try:
+            last_snapshot = query_snapshot(
+                host, port,
+                min(1.0, deadline - time.monotonic()), transcript
+            )
+        except SnapshotUnavailable as exc:
+            last_miss = str(exc)
+            continue
         current = last_snapshot["current"]
         if (
             current["socket"] < 0
@@ -256,7 +287,8 @@ def wait_detached(
             return last_snapshot
         time.sleep(0.05)
     raise AdmissionDiagnosticFailure(
-        f"detach state did not quiesce: {last_snapshot}"
+        "detach state did not quiesce before deadline: "
+        f"snapshot={last_snapshot}; last_miss={last_miss}"
     )
 
 
@@ -325,7 +357,7 @@ def run(args: argparse.Namespace, transcript: Transcript) -> dict[str, Any]:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--host", required=True)
+    parser.add_argument("--host", required=True, type=numeric_ipv4)
     parser.add_argument("--port", type=int, default=1234)
     parser.add_argument("--diagnostic-port", type=int, default=1235)
     parser.add_argument("--timeout", type=float, default=15.0)

@@ -637,7 +637,11 @@ comparator. The detailed record is
   test title exposes the snapshot on a separate bounded UDP query port, so a
   wedged admitted RSP socket cannot hide the transition boundary. Production-
   TU tests cover immediate and delayed first packets plus disconnect during
-  promotion without consuming the peeked frame or leaking ownership.
+  promotion without consuming the peeked frame or leaking ownership. Candidate
+  withdrawal and connected descriptor/generation publication are mirrored in
+  one snapshot transaction. The bounded host runner requires a numeric IPv4
+  literal and tolerates individual UDP telemetry misses until the outer
+  readiness or detach deadline; malformed snapshots still fail immediately.
 
 ## Documentation map
 

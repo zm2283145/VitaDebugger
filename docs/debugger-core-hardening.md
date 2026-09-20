@@ -229,15 +229,27 @@ loop. This path uses neither the candidate nor connected RSP descriptor and
 therefore remains available when the primary connection has been promoted but
 does not answer. It is intentionally scoped to the persistent-server synthetic
 stop used by this gate; a real exception on the test title's main thread would
-also pause the UDP responder. The host runner waits for both listener-ready and
-test-title-ready markers before opening TCP, and retrieves the same snapshot on
-any `qSupported` failure. Production-TU regressions prove immediate and delayed
-first packets remain queued through admission, are consumed exactly once after
-one promotion, and retain descriptor/generation/owner consistency. A forced
-disconnect after valid admission but before normal receive fails closed, and a
-candidate withdrawn at the promotion boundary never publishes a connected
-generation. Both paths release stopped/protocol state and permit a replacement
-`qSupported` and detach generation.
+also pause the UDP responder. The host runner requires a canonical numeric IPv4
+literal before it opens a socket or transcript, so name resolution cannot
+escape its bounds. It waits for both listener-ready and test-title-ready
+markers before opening TCP, retries individual UDP timeouts or transport misses
+until the readiness and detach outer deadlines, and retrieves the same snapshot
+on any `qSupported` failure. Snapshot size or ABI errors remain immediate
+failures rather than retryable misses.
+
+Candidate withdrawal plus connected descriptor/generation publication are
+mirrored in one telemetry writer transaction. A reader therefore observes
+either the admitted candidate or the complete promoted tuple, never a
+diagnostic-only transient where both descriptors appear idle. Production-TU
+regressions prove immediate and delayed first packets remain queued through
+admission, are consumed exactly once after one promotion, and retain
+descriptor/generation/owner consistency. A forced disconnect after valid
+admission but before normal receive fails closed, and a candidate withdrawn at
+the promotion boundary never publishes a connected generation. Both paths
+release stopped/protocol state and permit a replacement `qSupported` and detach
+generation. Host runner tests cover repeated transient UDP misses followed by
+success, both outer deadline expirations, malformed snapshots, and hostname
+rejection.
 
 Stop-token acquisition/recovery, thread-context snapshots, cache maintenance,
 and exception-slot replacement still execute inside the global state lock.

@@ -742,6 +742,42 @@ static void test_immediate_first_packet_admission_transition(void)
           "immediate first packet reaches one owner without loss");
 }
 
+static void test_promotion_snapshot_is_atomic(void)
+{
+    reset_core();
+    uvdb_admission_diagnostic_socket_state(
+        &uvdb_candidate_socket, FAKE_SOCKET, 0);
+    struct uvdb_admission_diagnostic diagnostic;
+
+    uvdb_admission_diagnostic_write_begin();
+    __atomic_store_n(
+        &uvdb_admission_diagnostic_state.current_candidate, -1,
+        __ATOMIC_RELAXED);
+    check(uvdb_admission_diagnostic_get(&diagnostic) < 0,
+          "snapshot rejects the transient promotion write");
+    __atomic_store_n(
+        &uvdb_admission_diagnostic_state.current_socket, FAKE_SOCKET,
+        __ATOMIC_RELAXED);
+    __atomic_store_n(
+        &uvdb_admission_diagnostic_state.current_generation, 19u,
+        __ATOMIC_RELAXED);
+    uvdb_admission_diagnostic_write_end();
+    check(uvdb_admission_diagnostic_get(&diagnostic) == 0 &&
+              diagnostic.current_candidate < 0 &&
+              diagnostic.current_socket == FAKE_SOCKET &&
+              diagnostic.current_generation == 19u,
+          "snapshot publishes the complete promotion tuple");
+
+    uvdb_admission_diagnostic_socket_state(
+        &uvdb_candidate_socket, FAKE_SOCKET, 0);
+    uvdb_admission_diagnostic_promote_socket(FAKE_SOCKET, 20u);
+    check(uvdb_admission_diagnostic_get(&diagnostic) == 0 &&
+              diagnostic.current_candidate < 0 &&
+              diagnostic.current_socket == FAKE_SOCKET &&
+              diagnostic.current_generation == 20u,
+          "production promotion mirror updates atomically");
+}
+
 static void test_delayed_first_packet_admission_transition(void)
 {
     reset_core();
@@ -1560,6 +1596,7 @@ int main(void)
     test_server_join_timeout_is_bounded_and_retryable();
     test_non_rsp_probe_does_not_consume_session();
     test_silent_probe_timeout_is_bounded();
+    test_promotion_snapshot_is_atomic();
     test_immediate_first_packet_admission_transition();
     test_delayed_first_packet_admission_transition();
     test_disconnect_during_promotion_reopens();
