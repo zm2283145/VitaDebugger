@@ -1,0 +1,70 @@
+{
+  "schema": 1,
+  "tested_at": "2026-09-20T08:51:41.658334Z",
+  "firmware": "3.65",
+  "device_class": "retail-handheld",
+  "source_commit": "28b11c874b70fc71b202d16dfbaf4ce38ff7d912",
+  "title_id": "SLRS00001",
+  "outcome": "native-would-block-identified",
+  "artifacts": {
+    "vpk_sha256": "2a5d63d70286b2bd3ab2c9e27abb9a5ec25c1a2521d9288874424b8099c9d1c0",
+    "elf_sha256": "f0be9b9e8f527be22bcb3f8e5f5333777cde695d7d10c9a03018890cbd0b8168",
+    "installed_eboot_sha256": "be6e3f1a2c1addd7fc873fbce7aef33cf82d425d4d9ddf1aea9985ff125de4e6",
+    "kubridge_stub_sha256": "141e458f82166a8b8c04ae01c4533346cf11ceb6df8f940d002895420ac2ac01"
+  },
+  "deployment": {
+    "transport": "ftp",
+    "action": "install_launch",
+    "job": "0ca702e5c9da22daca8fc54e82f7ae4b",
+    "manifest_sha256": "2e119d37b139150ae8c53224a2f4a0a57e824e442656f687b81e39c39b216bfe",
+    "result_stage": "complete",
+    "result_code": 0,
+    "launch": "Launched.",
+    "installed_identity": "match"
+  },
+  "diagnostic": {
+    "qSupported": "pass",
+    "packet_size": "3fffc",
+    "requested_gap_seconds": 0.5,
+    "observed_gap_seconds": 0.5005753,
+    "qOffsets_send_completed": false,
+    "qOffsets_host_error": "WinError 10053",
+    "raw_result_hex": "ffffffdd",
+    "raw_result_signed": -35,
+    "descriptor": 69,
+    "session_generation": 1,
+    "network_closing": false,
+    "phase": "response-ack-poll",
+    "packet_io_active": true,
+    "target_stopped": true,
+    "protocol_owned": true,
+    "errno_available": false
+  },
+  "conclusion": {
+    "proven": "Retail sceNetSyscallRecvfrom(MSG_DONTWAIT) reports an empty connected receive as -SCE_NET_EAGAIN, not SCE_NET_ERROR_EAGAIN.",
+    "production_behavior": "The existing exact encoded-only predicate misclassifies -35 as fatal and performs fail-stopped teardown.",
+    "precise_safe_fix": "Accept exactly -SCE_NET_EAGAIN in addition to the encoded SCE_NET_ERROR_EAGAIN value; do not accept generic -1 or other negative results."
+  },
+  "not_run": [
+    "stopped-wait RST sentinels",
+    "m/M/g/p/G/P disconnect matrix",
+    "connected receive/send cancellation",
+    "second-owner protocol exclusion",
+    "intentional connected HUP",
+    "detach/reconnect validation",
+    "50-cycle reconnect/fault/console/shutdown soak",
+    "exception/thread/KuBridge gates"
+  ],
+  "final_state": {
+    "recovery_status": "clean",
+    "companion_destroy_response": "Apps destroyed.",
+    "livearea_wait_seconds": 3,
+    "rsp_port_1234_open": false,
+    "test_title_running": false,
+    "kernel_configuration_changed": false,
+    "rebooted": false,
+    "device_ownership_released": true
+  },
+  "sealed_evidence_manifest_sha256": "5b210e32872f908fe28be710556705b47d3f3ed82fd794b083b654df13b089ce",
+  "remaining_gate": "Implement the exact -SCE_NET_EAGAIN classification fix locally, then rerun the stopped-RST sentinels and remaining lifecycle matrix under separate authorization."
+}

@@ -158,7 +158,8 @@ anomaly rule. Final recovery was clean; Companion returned `Apps destroyed.`,
 the LiveArea wait completed, and port 1234 was closed. See
 [`rsp-network-reset-retry-2-3.65.json`](hardware/rsp-network-reset-retry-2-3.65.json).
 
-For the next diagnostic build only, `UVDB_RAW_RECV_DIAGNOSTIC=1` records the
+The diagnostic build from exact commit `28b11c8` used
+`UVDB_RAW_RECV_DIAGNOSTIC=1` to record the
 first nonpositive raw stopped-state receive without changing its
 classification. The write-once record includes the raw result, descriptor,
 socket generation, closing state, request-versus-response-ACK phase,
@@ -168,6 +169,20 @@ Exception-side instrumentation deliberately does not call `sceNetErrnoLoc()`:
 the raw syscall path avoids public-wrapper thread-local errno state, and
 observing it there would change the boundary under test. The option is disabled
 by default and is not a supported protocol extension.
+
+The retail 3.65 diagnostic returned `0xffffffdd` (`-35`) from
+`sceNetSyscallRecvfrom(MSG_DONTWAIT)` during the response-ACK poll, with
+`network_closing=0`, packet I/O active, the target stopped, and protocol
+ownership held. VitaSDK defines both `SCE_NET_EAGAIN` and
+`SCE_NET_EWOULDBLOCK` as 35, while `SCE_NET_ERROR_EAGAIN` is the distinct
+encoded value `0x80410123`. This proves the close was normal empty-poll
+misclassification, not `qOffsets` handling or a client framing error. A
+precise production fix can accept exactly `-SCE_NET_EAGAIN` in addition to the
+encoded constant without treating generic negative results as retryable. The
+diagnostic did not change that classification, and the stopped-RST and larger
+lifecycle matrix remain pending until a corrected build is separately
+authorized. See
+[`rsp-raw-recv-diagnostic-3.65.json`](hardware/rsp-raw-recv-diagnostic-3.65.json).
 
 Stop-token acquisition/recovery, thread-context snapshots, cache maintenance,
 and exception-slot replacement still execute inside the global state lock.

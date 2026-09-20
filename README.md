@@ -617,8 +617,14 @@ comparator. The detailed record is
   RSP case ran. A second authorized attempt deployed the same frozen artifact
   and matched its installed eboot, but the ACK sentinel peer closed immediately
   after `qOffsets`, before fixture access or reset injection. Both attempts
-  cleaned up to LiveArea with port 1234 closed. The stopped-RST validation and
-  long-duration-equivalent cancellation/soak matrix therefore remain pending.
+  cleaned up to LiveArea with port 1234 closed. A diagnostic-only retail build
+  then captured the first empty raw receive as `-35`
+  (`-SCE_NET_EAGAIN`) during response-ACK polling, while the target was stopped
+  and the connection was still owned. The current predicate accepts only the
+  distinct encoded `SCE_NET_ERROR_EAGAIN`, proving the lifecycle failure is a
+  would-block representation mismatch. No production classification was
+  changed in that diagnostic build. The precise fix and the stopped-RST plus
+  long-duration-equivalent cancellation/soak matrix remain pending.
 
 ## Documentation map
 
