@@ -30,6 +30,8 @@ KUBRIDGE_DIR ?= ../kubridge-review
 KUBRIDGE_LIB_DIR ?= $(KUBRIDGE_DIR)/build-local
 VITADEBUG_KERNEL_DIR ?= kernel
 VITADEBUG_KERNEL_BUILD_DIR ?= $(VITADEBUG_KERNEL_DIR)/build
+UVDB_HARDWARE_SAFETY_GATE ?= 0
+UVDB_SAFETY_GATE_NULL_PREDECESSOR_TYPE ?=
 UVDB_ASLR_FIXTURE_BUILD_DIR ?= build-aslr-fixture
 UVDB_ASLR_FIXTURE_OBJECT := $(UVDB_ASLR_FIXTURE_BUILD_DIR)/uvdb_aslr_fixture.o
 UVDB_ASLR_FIXTURE_ELF := $(UVDB_ASLR_FIXTURE_BUILD_DIR)/uvdb_aslr_fixture.elf
@@ -59,6 +61,15 @@ endif
 ifeq ($(UVDB_KERNEL_THREAD_CONTROL),1)
 override CFLAGS += -DUVDB_KERNEL_THREAD_CONTROL -I $(VITADEBUG_KERNEL_DIR)/include
 EXTRA_LDFLAGS += $(VITADEBUG_KERNEL_BUILD_DIR)/vitadebug_stubs/libvitadebug_kernel_stub.a
+endif
+
+ifeq ($(UVDB_HARDWARE_SAFETY_GATE),1)
+override CFLAGS += -DUVDB_HARDWARE_SAFETY_GATE
+override EXTRA_CFLAGS += -DUVDB_HARDWARE_SAFETY_GATE
+ifneq ($(strip $(UVDB_SAFETY_GATE_NULL_PREDECESSOR_TYPE)),)
+override CFLAGS += -DUVDB_EXPERIMENTAL_NESTED_FAULT_EXIT
+override EXTRA_CFLAGS += -DUVDB_SAFETY_GATE_NULL_PREDECESSOR_TYPE=$(UVDB_SAFETY_GATE_NULL_PREDECESSOR_TYPE)
+endif
 endif
 
 ifeq ($(UVDB_KERNEL_VFP_READS),1)
@@ -249,7 +260,7 @@ host-test-aslr-lifecycle:
 	$(HOST_PYTHON) -m unittest tests.host.test_gdb_aslr_lifecycle
 
 host-test-live-gates:
-	$(HOST_PYTHON) -m unittest tests.host.test_gdb_monitor_smoke tests.host.test_gdb_step_register_gate
+	$(HOST_PYTHON) -m unittest tests.host.test_gdb_monitor_smoke tests.host.test_gdb_step_register_gate tests.host.test_gdb_exception_memory_fileio_gate
 
 host-test-target-xml:
 	$(HOST_PYTHON) -m unittest tests.host.test_target_xml

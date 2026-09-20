@@ -5,6 +5,10 @@ the hardware checks that are still required. Host tests are evidence for the
 portable state machines and parsers only; they do not prove Vita kernel,
 exception-return, or socket-cancellation behavior.
 
+The bounded candidate-build and hardware procedure for exception predecessor
+chaining, transactional live memory writes, and File-I/O Ctrl-C is in
+[`exception-memory-fileio-hardware-gate.md`](exception-memory-fileio-hardware-gate.md).
+
 ## Packet and mutation invariants
 
 - RSP framing is bounded by the configured packet limit. Invalid checksums,

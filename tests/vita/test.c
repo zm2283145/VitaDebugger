@@ -6,8 +6,10 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <psp2/kernel/modulemgr.h>
+#include <psp2/kernel/processmgr.h>
 #include "debugScreen.h"
 #include "uvdb.h"
+#include "uvdb_safety_gate.h"
 #ifdef UVDB_GDB_CONSOLE_TEST
 #include "uvdb_console.h"
 #endif
@@ -16,6 +18,9 @@
 #endif
 #ifdef UVDB_GDB_ASLR_FIXTURE
 #include "tests/aslr_fixture/control.h"
+#endif
+#ifdef UVDB_HARDWARE_SAFETY_GATE
+#include <kubridge.h>
 #endif
 
 #if defined(UVDB_GDB_VFP_FIXTURE) && !defined(UVDB_KERNEL_VFP_READS)
@@ -61,6 +66,91 @@ struct uvdb_aslr_fixture_control uvdb_aslr_fixture_control
 #endif
 #ifdef UVDB_DEBUGNET_LIFECYCLE_TEST
 static volatile int debugnet_stress;
+#endif
+#ifdef UVDB_HARDWARE_SAFETY_GATE
+volatile uint32_t uvdb_safety_gate_abi_version =
+    UVDB_SAFETY_GATE_ABI_VERSION;
+volatile uint32_t uvdb_safety_gate_build_kind =
+#ifdef UVDB_SAFETY_GATE_NULL_PREDECESSOR_TYPE
+    UINT32_C(0x4e554c00) |
+        (uint32_t)UVDB_SAFETY_GATE_NULL_PREDECESSOR_TYPE;
+#else
+    UINT32_C(0x5052494f);
+#endif
+volatile uint32_t uvdb_safety_gate_exception_request;
+volatile uint32_t uvdb_safety_gate_exception_completed;
+volatile uint32_t uvdb_safety_gate_exception_observed_type;
+volatile uint32_t uvdb_safety_gate_exception_count[3];
+volatile uint32_t uvdb_safety_gate_restart_count;
+volatile uint32_t uvdb_safety_gate_fileio_request;
+volatile uint32_t uvdb_safety_gate_fileio_completed;
+volatile int32_t uvdb_safety_gate_fileio_result;
+volatile unsigned char
+    uvdb_safety_gate_memory[UVDB_SAFETY_GATE_MEMORY_SIZE]
+        __attribute__((aligned(64)));
+
+__attribute__((noreturn)) static void uvdb_safety_gate_unexpected_exit(void)
+{
+    sceKernelExitProcess(2);
+    for(;;)
+        usleep(1000000);
+}
+
+static void uvdb_safety_gate_previous_handler(
+    KuKernelExceptionContext* context)
+{
+    uint32_t in_flight = __atomic_exchange_n(
+        &uvdb_safety_gate_nested_in_flight, 0, __ATOMIC_ACQ_REL);
+    uint32_t recovery = __atomic_load_n(
+        &uvdb_safety_gate_nested_recovery_pc, __ATOMIC_ACQUIRE);
+    if(in_flight < UVDB_SAFETY_GATE_EXCEPTION_DATA_ABORT ||
+       in_flight > UVDB_SAFETY_GATE_EXCEPTION_UNDEFINED_INSTRUCTION ||
+       in_flight - 1u != context->exceptionType || !recovery)
+    {
+        uint32_t exit_pc =
+            (uint32_t)(uintptr_t)uvdb_safety_gate_unexpected_exit;
+        context->pc = exit_pc & ~UINT32_C(1);
+        if(exit_pc & 1u)
+            context->SPSR |= UINT32_C(32);
+        else
+            context->SPSR &= ~UINT32_C(32);
+        return;
+    }
+    uint32_t type = context->exceptionType;
+    if(type < 3u)
+    {
+        __atomic_store_n(
+            &uvdb_safety_gate_exception_observed_type,
+            type, __ATOMIC_RELEASE);
+        __atomic_add_fetch(
+            &uvdb_safety_gate_exception_count[type],
+            1, __ATOMIC_ACQ_REL);
+    }
+    context->pc = recovery & ~UINT32_C(1);
+    context->exceptionType = (type + 1u) % 3u;
+}
+
+static int uvdb_safety_gate_register_predecessors(void)
+{
+    struct KuKernelExceptionHandlerOpt options = {
+        .size = sizeof(options),
+    };
+    for(uint32_t type = 0; type < 3u; ++type)
+    {
+#ifdef UVDB_SAFETY_GATE_NULL_PREDECESSOR_TYPE
+        if(type == (uint32_t)UVDB_SAFETY_GATE_NULL_PREDECESSOR_TYPE)
+            continue;
+#endif
+        KuKernelExceptionHandler previous = NULL;
+        if(kuKernelRegisterExceptionHandler(
+               type, uvdb_safety_gate_previous_handler,
+               &previous, &options) < 0)
+            return -1;
+        if(previous)
+            return -1;
+    }
+    return 0;
+}
 #endif
 
 void thumb_step_pop_fixture(void);
@@ -382,6 +472,25 @@ int main(void)
             ? "ready"
             : "FAILED");
 #endif
+#ifdef UVDB_HARDWARE_SAFETY_GATE
+    memset((void*)uvdb_safety_gate_memory, 0xa5,
+           sizeof(uvdb_safety_gate_memory));
+    if(uvdb_safety_gate_register_predecessors() < 0)
+    {
+        psvDebugScreenPrintf(
+            "Safety gate predecessor registration failed; debugger not started.\n");
+        hold_failed_gate();
+    }
+    psvDebugScreenPrintf(
+        "Exception/memory/File-I/O safety fixture: READY kind=%08X ABI=%08X "
+        "null-type=%d\n",
+        uvdb_safety_gate_build_kind, uvdb_safety_gate_abi_version,
+#ifdef UVDB_SAFETY_GATE_NULL_PREDECESSOR_TYPE
+        UVDB_SAFETY_GATE_NULL_PREDECESSOR_TYPE);
+#else
+        -1);
+#endif
+#endif
     if(uvdb_start_server() < 0)
     {
         psvDebugScreenPrintf("Failed to start persistent debugger server.\n");
@@ -397,6 +506,57 @@ int main(void)
 #endif
     for(int i = 0;; i++)
     {
+#ifdef UVDB_HARDWARE_SAFETY_GATE
+        uint32_t safety_exception_sequence = __atomic_load_n(
+            &uvdb_safety_gate_exception_request, __ATOMIC_ACQUIRE);
+        uint32_t safety_exception_done = __atomic_load_n(
+            &uvdb_safety_gate_exception_completed, __ATOMIC_ACQUIRE);
+        uint32_t safety_exception = safety_exception_sequence & UINT32_C(0xff);
+        if(safety_exception >= UVDB_SAFETY_GATE_EXCEPTION_DATA_ABORT &&
+           safety_exception <=
+               UVDB_SAFETY_GATE_EXCEPTION_UNDEFINED_INSTRUCTION &&
+           safety_exception_sequence != safety_exception_done)
+        {
+            __atomic_store_n(
+                &uvdb_safety_gate_nested_completed,
+                UVDB_SAFETY_GATE_EXCEPTION_NONE,
+                __ATOMIC_RELEASE);
+            __atomic_store_n(
+                &uvdb_safety_gate_nested_request,
+                safety_exception, __ATOMIC_RELEASE);
+            uvdb_enter();
+            if(__atomic_load_n(
+                   &uvdb_safety_gate_nested_completed,
+                   __ATOMIC_ACQUIRE) == safety_exception)
+                __atomic_store_n(
+                    &uvdb_safety_gate_exception_completed,
+                    safety_exception_sequence, __ATOMIC_RELEASE);
+            if(uvdb_get_state() == UVDB_STATE_ERROR)
+            {
+                if(uvdb_stop_server() == 0 && uvdb_start_server() == 0)
+                    __atomic_add_fetch(
+                        &uvdb_safety_gate_restart_count,
+                        1, __ATOMIC_ACQ_REL);
+            }
+        }
+        uint32_t safety_fileio = __atomic_load_n(
+            &uvdb_safety_gate_fileio_request, __ATOMIC_ACQUIRE);
+        uint32_t safety_fileio_done = __atomic_load_n(
+            &uvdb_safety_gate_fileio_completed, __ATOMIC_ACQUIRE);
+        if(safety_fileio && safety_fileio != safety_fileio_done)
+        {
+            static const char message[] =
+                "VitaDebugger safety-gate File-I/O\n";
+            int result = uvdb_remote_syscall(
+                "write", 3, 1, message, sizeof(message) - 1u);
+            __atomic_store_n(
+                &uvdb_safety_gate_fileio_result,
+                result, __ATOMIC_RELEASE);
+            __atomic_store_n(
+                &uvdb_safety_gate_fileio_completed,
+                safety_fileio, __ATOMIC_RELEASE);
+        }
+#endif
 #ifdef UVDB_GDB_ASLR_FIXTURE
         uint32_t aslr_main_sequence = __atomic_load_n(
             &uvdb_aslr_main_request, __ATOMIC_ACQUIRE);
