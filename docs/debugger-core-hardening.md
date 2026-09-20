@@ -251,6 +251,33 @@ generation. Host runner tests cover repeated transient UDP misses followed by
 success, both outer deadline expirations, malformed snapshots, and hostname
 rejection.
 
+The corrected diagnostic passed this boundary on retail 3.65. The out-of-band
+ready snapshot showed listener 88, no candidate or connected socket, the test
+title ready, and no closing/stopped/owner state. The first request then produced
+exactly one ordered transition for candidate accept, checksum-complete peek,
+promotion, connected descriptor 92/generation 1 publication, protocol-owner
+acquisition, stopped state, main-loop entry, and first normal receive. The
+promoted snapshot exposed candidate `-1`, socket 92, generation 1, stopped and
+owned state in one consistent tuple. `qSupported`, `qOffsets`, detach, target
+resume, and listener 93 replacement all passed.
+
+The same run also confirms the exact raw-`-35` production fix under both ACK
+and no-ack modes. Each stopped session remained alive across a deliberate
+0.75-second inter-packet idle gap, completed `qOffsets` plus memory/register
+preflight, received an intentional reset after another stopped wait, reopened
+the listener within 2.33 seconds, completed replacement `qSupported`, and
+detached cleanly. The later matrix passed the baseline plus `m` and `M`
+disconnect invariants, then stopped as required at `disconnect-g`. That stop is
+local to the frozen runner: the 336-character target reply contained 136
+hexadecimal characters and 200 `x` characters, exactly the complete `xx`
+markers VitaDebugger intentionally emits for unavailable legacy/VFP register
+bytes. There were no other nonhex characters. The frozen runner required every
+character to be hexadecimal, so it rejected a valid fixed-shape register reply.
+The remaining disconnect, ownership, cancellation, HUP, reconnect, and soak
+cases were not run and require a corrected runner plus separate hardware
+authorization. See
+[`rsp-admission-confirmation-3.65.json`](hardware/rsp-admission-confirmation-3.65.json).
+
 Stop-token acquisition/recovery, thread-context snapshots, cache maintenance,
 and exception-slot replacement still execute inside the global state lock.
 Those calls protect coupled breakpoint/lease/handler invariants, and moving

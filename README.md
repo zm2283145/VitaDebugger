@@ -642,6 +642,17 @@ comparator. The detailed record is
   one snapshot transaction. The bounded host runner requires a numeric IPv4
   literal and tolerates individual UDP telemetry misses until the outer
   readiness or detach deadline; malformed snapshots still fail immediately.
+  The corrected diagnostic then passed on retail 3.65: explicit readiness,
+  `qSupported`, `qOffsets`, the complete ordered admission/ownership ledger,
+  clean detach, and both ACK/no-ack stopped-reset recovery sentinels all passed.
+  Listener replacement completed in 1.84 and 2.33 seconds. The subsequent
+  lifecycle matrix passed the baseline plus `m` and `M` disconnect invariants,
+  then stopped fail-closed at `g` because the frozen runner rejected the
+  protocol's valid `xx` unavailable-register markers as nonhex. No later case
+  ran. The target's 336-character reply had 136 hexadecimal characters and 200
+  `x` markers with no other characters, so this is a runner validation defect,
+  not evidence of target corruption. See
+  [the retail record](docs/hardware/rsp-admission-confirmation-3.65.json).
 
 ## Documentation map
 

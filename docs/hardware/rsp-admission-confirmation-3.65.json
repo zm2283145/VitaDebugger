@@ -1,0 +1,138 @@
+{
+  "schema": 1,
+  "tested_at": "2026-09-20T20:42:57.852734Z",
+  "firmware": "3.65",
+  "device_class": "retail-handheld",
+  "source_commit": "07e1395ac3a500e85c52878d2a0f6bd057626e8a",
+  "title_id": "SLRS00001",
+  "outcome": "admission-and-reset-sentinels-pass-matrix-stopped-on-runner-rejection",
+  "artifacts": {
+    "freeze_manifest_sha256": "c5f4d3d1a019a2c3cd16f39f7ef4daf970feea37161f98967c6e5dde55010b46",
+    "vpk_sha256": "e7612caf2c401f1686ab1ed5b1a3118cd9e168cde69d1ae2a500153e33f34ce8",
+    "elf_sha256": "072b994b50d4fe9d54f4f8779623ea450ebc33566f0c0076b78f089e67dd1b6e",
+    "installed_eboot_sha256": "2ba97fe5ecdb49e46564d125c354127f5011a56033f8d1cf67e4c83c56b62f24",
+    "admission_runner_sha256": "9360ca79b2cfbf1886b558b6133f7796b324ebe99900ae5153a9e2583abaf0a3",
+    "lifecycle_runner_sha256": "e997f06c19a7fdda8b6e85a4109c119b75cd000818c47d715e7777baadb81885",
+    "kubridge_source_commit": "417ddde9a744eba98d769382c1c1372b8e119139",
+    "kubridge_stub_sha256": "fe05a117421b375d77bdc5102d5753f5dcf300e33176222688e490f2d03f5796"
+  },
+  "deployment": {
+    "transport": "ftp",
+    "action": "install_launch",
+    "job": "37e33323e53c15f15d67290d42e93339",
+    "manifest_sha256": "59e95094f54dc60894778195ca297a583f350fb20859f5efa49206be4ae97828",
+    "result_stage": "complete",
+    "result_code": 0,
+    "launch": "Launched.",
+    "installed_identity": "match"
+  },
+  "admission": {
+    "status": "pass",
+    "explicit_ready": true,
+    "packet_size": 262140,
+    "text_segment": "0x8102d000",
+    "data_segment": "0x810c0000",
+    "candidate_descriptor": 92,
+    "connected_descriptor": 92,
+    "generation": 1,
+    "protocol_owner": 1073807663,
+    "first_packet_size": 49,
+    "ordered_sequences": {
+      "listener_ready": 1,
+      "test_title_ready": 2,
+      "candidate_accepted": 3,
+      "valid_frame": 4,
+      "promotion_begin": 5,
+      "socket_published": 6,
+      "protocol_acquired": 7,
+      "target_stopped": 8,
+      "main_loop_entered": 9,
+      "first_packet": 10,
+      "target_running": 11
+    },
+    "promoted_snapshot": {
+      "candidate": -1,
+      "socket": 92,
+      "generation": 1,
+      "target_stopped": true,
+      "protocol_owned": true,
+      "network_closing": false
+    },
+    "detached_snapshot": {
+      "candidate": -1,
+      "socket": -1,
+      "generation": 1,
+      "listener": 93,
+      "target_stopped": false,
+      "protocol_owned": false,
+      "network_closing": false
+    },
+    "qSupported": "pass",
+    "qOffsets": "pass",
+    "detach": "pass"
+  },
+  "reset_sentinels": [
+    {
+      "mode": "ack",
+      "status": "pass",
+      "idle_gap_seconds": 0.75,
+      "reset_gap_seconds": 0.5,
+      "reopen_seconds": 1.8359304000041448,
+      "replacement_qSupported": "pass",
+      "replacement_detach": "pass"
+    },
+    {
+      "mode": "no-ack",
+      "status": "pass",
+      "idle_gap_seconds": 0.75,
+      "reset_gap_seconds": 0.5,
+      "reopen_seconds": 2.32894259999739,
+      "replacement_qSupported": "pass",
+      "replacement_detach": "pass"
+    }
+  ],
+  "matrix": {
+    "status": "fail-closed-runner-rejection",
+    "passed": [
+      "invariant-baseline",
+      "disconnect-m",
+      "disconnect-M"
+    ],
+    "stopped_at": "disconnect-g",
+    "target_payload_characters": 336,
+    "target_hex_characters": 136,
+    "target_unavailable_x_characters": 200,
+    "target_other_nonhex_characters": 0,
+    "diagnosis": "The frozen runner incorrectly required every g character to be hexadecimal. VitaDebugger intentionally encodes unavailable legacy and VFP register bytes as complete xx markers, so this stop does not prove a production RSP failure or state corruption."
+  },
+  "not_run": [
+    "disconnect-g verification reconnect",
+    "disconnect-p",
+    "disconnect-G",
+    "disconnect-P",
+    "second-owner protocol exclusion",
+    "detach/reconnect",
+    "50-cycle reconnect/fault/console/shutdown soak",
+    "connected receive cancellation",
+    "connected partial-send cancellation",
+    "intentional connected HUP shutdown",
+    "exception/memory gates",
+    "thread-control gates",
+    "KuBridge gates",
+    "profiler gates",
+    "foreign-register gates"
+  ],
+  "final_state": {
+    "recovery_status": "clean",
+    "companion_destroy_response": "Apps destroyed.",
+    "livearea_wait_seconds": 3,
+    "rsp_port_1234_open": false,
+    "diagnostic_port_1235_open": false,
+    "test_title_running": false,
+    "kernel_configuration_changed": false,
+    "rebooted": false,
+    "device_ownership_released": true
+  },
+  "sealed_evidence_manifest_sha256": "e40f040a5bac065fe996c128c6977955075ce00a95325bb04408111ff1a8b6b5",
+  "remaining_gate": "Correct and locally validate the lifecycle runner's complete-xx register parsing, then rerun only the uncompleted lifecycle matrix under separate authorization."
+}
