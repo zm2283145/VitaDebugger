@@ -44,6 +44,24 @@ static void clear_transaction(
     transaction->state = UVDB_MEMORY_TRANSACTION_IDLE;
 }
 
+static int restore_original(
+    const struct uvdb_memory_transaction_io* io,
+    void* context,
+    uintptr_t address,
+    const unsigned char* original,
+    size_t size)
+{
+    size_t written = io->write(context, address, original, size);
+    int sync_result = io->sync
+        ? io->sync(context, address, size)
+        : 0;
+    int verify_result = verify_bytes(
+        io, context, address, original, size);
+    return written == size && sync_result >= 0 && verify_result == 0
+        ? UVDB_MEMORY_TRANSACTION_WRITE_FAILED_RESTORED
+        : UVDB_MEMORY_TRANSACTION_RESTORE_PENDING;
+}
+
 void uvdb_memory_transaction_init(
     struct uvdb_memory_transaction* transaction,
     void* storage,
@@ -90,20 +108,13 @@ int uvdb_memory_transaction_restore(
        !transaction->original || !transaction->size ||
        transaction->size > transaction->capacity)
         return UVDB_MEMORY_TRANSACTION_STATE_ERROR;
-    size_t written = io->write(
-        context, transaction->address, transaction->original,
-        transaction->size);
-    int sync_result = io->sync
-        ? io->sync(context, transaction->address, transaction->size)
-        : 0;
-    int verify_result = verify_bytes(
+    int result = restore_original(
         io, context, transaction->address, transaction->original,
         transaction->size);
-    if(written != transaction->size || sync_result < 0 ||
-       verify_result < 0)
-        return UVDB_MEMORY_TRANSACTION_RESTORE_PENDING;
+    if(result != UVDB_MEMORY_TRANSACTION_WRITE_FAILED_RESTORED)
+        return result;
     clear_transaction(transaction);
-    return UVDB_MEMORY_TRANSACTION_WRITE_FAILED_RESTORED;
+    return result;
 }
 
 int uvdb_memory_transaction_apply(
@@ -172,4 +183,25 @@ int uvdb_memory_write_transaction(
     if(result != UVDB_MEMORY_TRANSACTION_OK)
         return result;
     return uvdb_memory_transaction_commit(&transaction);
+}
+
+int uvdb_memory_restore_transaction(
+    const struct uvdb_memory_transaction_io* io,
+    void* context,
+    uintptr_t address,
+    size_t size,
+    const void* scratch,
+    size_t scratch_size)
+{
+    if(!io || !io->read || !io->write ||
+       (size && !scratch) || scratch_size < size ||
+       (size && address > UINTPTR_MAX - (size - 1u)))
+        return UVDB_MEMORY_TRANSACTION_INVALID;
+    if(!size)
+        return UVDB_MEMORY_TRANSACTION_OK;
+    return restore_original(
+               io, context, address, scratch, size) ==
+               UVDB_MEMORY_TRANSACTION_WRITE_FAILED_RESTORED
+        ? UVDB_MEMORY_TRANSACTION_OK
+        : UVDB_MEMORY_TRANSACTION_RESTORE_PENDING;
 }

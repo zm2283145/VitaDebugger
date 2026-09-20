@@ -372,10 +372,20 @@ The focused host suite covers:
 - a deterministic 1,000-generation stress run with three concurrent
   protocol/fault workers plus console pressure, checking exclusive ownership,
   guard quiescence, reconnect publication, and bounded shutdown drain;
-- 2,048 logical-tick cycles through the production stop-lease helpers with
-  late-thread reconciliation, controller/lease exclusion, injected renew/end
-  failures, watchdog expiry, generation replacement, disconnect, restart, and
-  zero leaked fake-kernel ownership;
+- 8,192 logical-tick cycles through the production stop-lease helpers with
+  late-thread reconciliation, controller/lease exclusion, fake-kernel and
+  application-boundary renew/end failures, watchdog expiry, generation
+  replacement, disconnect, restart, and zero leaked fake-kernel ownership;
+- a test-build-only, one-shot stop-failure control bound to the exact published
+  token/generation; stale requests are consumed without failure, successful
+  injection skips one kernel call, and `monitor status` reports the consumed
+  operation and generation;
+- a foreign-step provider transaction model that refuses incomplete or stale
+  capabilities, always attempts restoration and verification after provider
+  preparation, and leaves rollback pending on either cleanup failure; no Vita
+  provider or production call site is enabled;
+- a whole-protocol fake-buffer race proving close blocks a second owner and
+  retains storage until the dropped-lock owner drains;
 - File-I/O literal-C/attachment fuzzing and a transition gate proving one T02
   only for real all-stop while the synthetic context fails closed;
 - a production saved-context File-I/O path

@@ -33,6 +33,58 @@ static void check_step_target(
           target->breakpoint_size == breakpoint_size, name);
 }
 
+struct fake_foreign_step_provider {
+    char calls[8];
+    size_t call_count;
+    int prepare_result;
+    int execute_result;
+    int restore_result;
+    int verify_result;
+};
+
+static void note_foreign_step_call(
+    struct fake_foreign_step_provider* provider, char call)
+{
+    if(provider->call_count < sizeof(provider->calls))
+        provider->calls[provider->call_count++] = call;
+}
+
+static int fake_foreign_step_prepare(
+    void* user, const struct uvdb_foreign_step_capability* capability)
+{
+    struct fake_foreign_step_provider* provider = user;
+    note_foreign_step_call(provider, 'P');
+    return capability->stop_generation == 7u
+        ? provider->prepare_result : -99;
+}
+
+static int fake_foreign_step_execute(
+    void* user, const struct uvdb_foreign_step_capability* capability)
+{
+    struct fake_foreign_step_provider* provider = user;
+    note_foreign_step_call(provider, 'E');
+    return capability->selected_thread == 0x202
+        ? provider->execute_result : -99;
+}
+
+static int fake_foreign_step_restore(
+    void* user, const struct uvdb_foreign_step_capability* capability)
+{
+    struct fake_foreign_step_provider* provider = user;
+    note_foreign_step_call(provider, 'R');
+    return capability->rollback_generation == 7u
+        ? provider->restore_result : -99;
+}
+
+static int fake_foreign_step_verify(
+    void* user, const struct uvdb_foreign_step_capability* capability)
+{
+    struct fake_foreign_step_provider* provider = user;
+    note_foreign_step_call(provider, 'V');
+    return capability->trap_generation == 7u
+        ? provider->verify_result : -99;
+}
+
 int main(void)
 {
     struct uvdb_thread_inventory inventory;
@@ -861,6 +913,80 @@ int main(void)
     check(uvdb_foreign_step_capability_validate(NULL, &missing) < 0 &&
           missing == UVDB_FOREIGN_STEP_REQUIRED_PROOFS,
           "absent foreign-step provider remains explicitly disabled");
+
+    foreign.selected_thread = 0x202;
+    struct fake_foreign_step_provider provider_state = {0};
+    struct uvdb_foreign_step_provider provider = {
+        .user = &provider_state,
+        .prepare = fake_foreign_step_prepare,
+        .execute_one = fake_foreign_step_execute,
+        .restore = fake_foreign_step_restore,
+        .verify_restored = fake_foreign_step_verify,
+    };
+    struct uvdb_foreign_step_transaction_result transaction;
+    check(uvdb_foreign_step_transaction_run(
+              &foreign, &provider, &transaction) ==
+                  UVDB_FOREIGN_STEP_TRANSACTION_OK &&
+              provider_state.call_count == 4u &&
+              !memcmp(provider_state.calls, "PERV", 4u) &&
+              transaction.prepare_called &&
+              transaction.execute_called &&
+              transaction.restore_called &&
+              transaction.verify_called &&
+              !transaction.rollback_pending,
+          "foreign-step provider model requires execute plus exact restoration");
+
+    memset(&provider_state, 0, sizeof(provider_state));
+    provider_state.prepare_result = -10;
+    check(uvdb_foreign_step_transaction_run(
+              &foreign, &provider, &transaction) ==
+                  UVDB_FOREIGN_STEP_TRANSACTION_PREPARE_FAILED &&
+              provider_state.call_count == 3u &&
+              !memcmp(provider_state.calls, "PRV", 3u) &&
+              !transaction.execute_called &&
+              !transaction.rollback_pending,
+          "failed foreign-step preparation still restores and verifies");
+
+    memset(&provider_state, 0, sizeof(provider_state));
+    provider_state.execute_result = -11;
+    check(uvdb_foreign_step_transaction_run(
+              &foreign, &provider, &transaction) ==
+                  UVDB_FOREIGN_STEP_TRANSACTION_EXECUTE_FAILED &&
+              provider_state.call_count == 4u &&
+              !memcmp(provider_state.calls, "PERV", 4u) &&
+              !transaction.rollback_pending,
+          "failed foreign execution remains a restored transaction");
+
+    memset(&provider_state, 0, sizeof(provider_state));
+    provider_state.restore_result = -12;
+    check(uvdb_foreign_step_transaction_run(
+              &foreign, &provider, &transaction) ==
+                  UVDB_FOREIGN_STEP_TRANSACTION_RESTORE_FAILED &&
+              transaction.verify_called && transaction.rollback_pending,
+          "foreign-step restore failure remains fail-closed and verified");
+
+    memset(&provider_state, 0, sizeof(provider_state));
+    provider_state.verify_result = -13;
+    check(uvdb_foreign_step_transaction_run(
+              &foreign, &provider, &transaction) ==
+                  UVDB_FOREIGN_STEP_TRANSACTION_VERIFY_FAILED &&
+              transaction.rollback_pending,
+          "foreign-step verification failure cannot report success");
+
+    memset(&provider_state, 0, sizeof(provider_state));
+    foreign.context_generation = 6;
+    check(uvdb_foreign_step_transaction_run(
+              &foreign, &provider, &transaction) ==
+                  UVDB_FOREIGN_STEP_TRANSACTION_INVALID &&
+              provider_state.call_count == 0u,
+          "stale foreign-step capability invokes no provider callback");
+    foreign.context_generation = 7;
+    provider.execute_one = NULL;
+    check(uvdb_foreign_step_transaction_run(
+              &foreign, &provider, &transaction) ==
+                  UVDB_FOREIGN_STEP_TRANSACTION_INVALID &&
+              provider_state.call_count == 0u,
+          "incomplete foreign-step provider remains disabled");
 
     if(failures)
         return 1;

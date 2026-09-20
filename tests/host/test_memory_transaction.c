@@ -127,8 +127,26 @@ int main(void)
     int result = uvdb_memory_write_transaction(
         &fake_io, &kernel, 64, input, sizeof(input), scratch,
         sizeof(scratch));
-    check(result == UVDB_MEMORY_TRANSACTION_RESTORE_PENDING,
+    check(result == UVDB_MEMORY_TRANSACTION_RESTORE_PENDING &&
+              memcmp(scratch, original, sizeof(original)) == 0,
           "persistent short writes retain restoration obligation");
+    check(uvdb_memory_restore_transaction(
+              &fake_io, &kernel, 64, sizeof(input), scratch,
+              sizeof(scratch)) == UVDB_MEMORY_TRANSACTION_RESTORE_PENDING &&
+              memcmp(scratch, original, sizeof(original)) == 0,
+          "partial restore retry preserves the original-byte obligation");
+    kernel.write_limit = SIZE_MAX;
+    kernel.corrupt_after_write = 1;
+    check(uvdb_memory_restore_transaction(
+              &fake_io, &kernel, 64, sizeof(input), scratch,
+              sizeof(scratch)) == UVDB_MEMORY_TRANSACTION_RESTORE_PENDING &&
+              memcmp(scratch, original, sizeof(original)) == 0,
+          "corrupted restore readback preserves the original-byte obligation");
+    check(uvdb_memory_restore_transaction(
+              &fake_io, &kernel, 64, sizeof(input), scratch,
+              sizeof(scratch)) == UVDB_MEMORY_TRANSACTION_OK &&
+              memcmp(kernel.memory + 64, original, sizeof(original)) == 0,
+          "exact memory restoration retry completes after injected failures");
 
     reset_kernel(&kernel);
     memcpy(original, kernel.memory + 64, sizeof(original));
@@ -181,6 +199,13 @@ int main(void)
               &fake_io, &kernel, 0, scratch, 8u, scratch,
               sizeof(scratch)) == UVDB_MEMORY_TRANSACTION_INVALID,
           "aliased input and rollback scratch rejected");
+    check(uvdb_memory_restore_transaction(
+              &fake_io, &kernel, UINTPTR_MAX - 3u, 8u, scratch,
+              sizeof(scratch)) == UVDB_MEMORY_TRANSACTION_INVALID &&
+              uvdb_memory_restore_transaction(
+                  &fake_io, &kernel, 0u, 0u, NULL, 0u) ==
+                  UVDB_MEMORY_TRANSACTION_OK,
+          "restore retry validates ranges and permits empty obligations");
 
     reset_kernel(&kernel);
     struct uvdb_memory_transaction transaction;

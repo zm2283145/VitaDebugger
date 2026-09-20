@@ -155,17 +155,19 @@ static int command_equals(const char* command, size_t size, const char* value)
     return size == value_size && !memcmp(command, value, size);
 }
 
-int uvdb_monitor_parse_qrcmd(
+static int decode_qrcmd_text(
     const char* packet,
     size_t packet_size,
-    enum uvdb_monitor_command* command)
+    char decoded[UVDB_MONITOR_COMMAND_TEXT_MAX],
+    size_t* text_start,
+    size_t* text_size)
 {
     static const char prefix[] = "qRcmd,";
-    if(!packet || !command || packet_size < STRING_SIZE(prefix) ||
+    if(!packet || !decoded || !text_start || !text_size ||
+       packet_size < STRING_SIZE(prefix) ||
        memcmp(packet, prefix, STRING_SIZE(prefix)))
         return UVDB_MONITOR_PARSE_MALFORMED;
 
-    *command = UVDB_MONITOR_COMMAND_NONE;
     size_t encoded_size = packet_size - STRING_SIZE(prefix);
     if(encoded_size & 1u)
         return UVDB_MONITOR_PARSE_MALFORMED;
@@ -173,7 +175,6 @@ int uvdb_monitor_parse_qrcmd(
     if(decoded_size > UVDB_MONITOR_COMMAND_TEXT_MAX)
         return UVDB_MONITOR_PARSE_MALFORMED;
 
-    char decoded[UVDB_MONITOR_COMMAND_TEXT_MAX];
     for(size_t i = 0; i < decoded_size; ++i)
     {
         int high = hex_value(packet[STRING_SIZE(prefix) + i * 2u]);
@@ -195,8 +196,44 @@ int uvdb_monitor_parse_qrcmd(
           (decoded[end - 1u] == ' ' || decoded[end - 1u] == '\t'))
         end--;
 
+    *text_start = start;
+    *text_size = end - start;
+    return UVDB_MONITOR_PARSE_OK;
+}
+
+int uvdb_monitor_qrcmd_text_equals(
+    const char* packet,
+    size_t packet_size,
+    const char* expected)
+{
+    char decoded[UVDB_MONITOR_COMMAND_TEXT_MAX];
+    size_t start = 0;
+    size_t size = 0;
+    return expected &&
+           decode_qrcmd_text(
+               packet, packet_size, decoded, &start, &size) ==
+               UVDB_MONITOR_PARSE_OK &&
+           command_equals(decoded + start, size, expected);
+}
+
+int uvdb_monitor_parse_qrcmd(
+    const char* packet,
+    size_t packet_size,
+    enum uvdb_monitor_command* command)
+{
+    if(!packet || !command)
+        return UVDB_MONITOR_PARSE_MALFORMED;
+
+    *command = UVDB_MONITOR_COMMAND_NONE;
+    char decoded[UVDB_MONITOR_COMMAND_TEXT_MAX];
+    size_t start = 0;
+    size_t size = 0;
+    int decode_result = decode_qrcmd_text(
+        packet, packet_size, decoded, &start, &size);
+    if(decode_result != UVDB_MONITOR_PARSE_OK)
+        return decode_result;
+
     const char* text = decoded + start;
-    size_t size = end - start;
     if(command_equals(text, size, "help"))
         *command = UVDB_MONITOR_COMMAND_HELP;
     else if(command_equals(text, size, "status"))
@@ -332,6 +369,28 @@ static const char* fault_name(int32_t fault)
     return "unknown";
 }
 
+static const char* stop_injection_operation_name(int32_t operation)
+{
+    switch(operation)
+    {
+        case UVDB_MONITOR_STOP_INJECTION_RENEW: return "renew";
+        case UVDB_MONITOR_STOP_INJECTION_END: return "end";
+    }
+    return "none";
+}
+
+static const char* stop_injection_outcome_name(int32_t outcome)
+{
+    switch(outcome)
+    {
+        case UVDB_MONITOR_STOP_INJECTION_OUTCOME_INJECTED:
+            return "injected";
+        case UVDB_MONITOR_STOP_INJECTION_OUTCOME_STALE:
+            return "stale";
+    }
+    return "none";
+}
+
 static void render_help(struct monitor_builder* builder)
 {
     append_string(builder,
@@ -402,6 +461,47 @@ static void render_status(
                                                           "active, healthy");
     append_string(builder, "\n  VFP reads: ");
     append_string(builder, status->vfp_reads_enabled ? "enabled" : "disabled");
+
+    append_string(builder, "\n  stop-injection: ");
+    if(!status->stop_injection_available)
+        append_string(builder, "disabled");
+    else
+    {
+        append_string(builder, "pending=");
+        append_string(
+            builder,
+            stop_injection_operation_name(
+                status->stop_injection_pending_operation));
+        if(status->stop_injection_pending_operation)
+        {
+            append_string(builder, "/token=");
+            append_hex32(builder, status->stop_injection_pending_token);
+            append_string(builder, "/generation=");
+            append_u64_decimal(
+                builder, status->stop_injection_pending_generation);
+        }
+        append_string(builder, ", last=");
+        append_string(
+            builder,
+            stop_injection_operation_name(
+                status->stop_injection_last_operation));
+        append_char(builder, '/');
+        append_string(
+            builder,
+            stop_injection_outcome_name(
+                status->stop_injection_last_outcome));
+        if(status->stop_injection_last_operation)
+        {
+            append_string(builder, "/token=");
+            append_hex32(builder, status->stop_injection_last_token);
+            append_string(builder, "/generation=");
+            append_u64_decimal(
+                builder, status->stop_injection_last_generation);
+            append_string(builder, "/result=");
+            append_i32_decimal(
+                builder, status->stop_injection_last_result);
+        }
+    }
 
     append_string(builder, "\n  last-fault: ");
     if(!status->last_fault_available)
@@ -822,6 +922,12 @@ static int snapshot_valid(
     if(command == UVDB_MONITOR_COMMAND_HELP)
         return 1;
     if(!snapshot || snapshot->status.state > UVDB_MONITOR_STATE_ERROR ||
+       snapshot->status.stop_injection_pending_operation >
+           UVDB_MONITOR_STOP_INJECTION_END ||
+       snapshot->status.stop_injection_last_operation >
+           UVDB_MONITOR_STOP_INJECTION_END ||
+       snapshot->status.stop_injection_last_outcome >
+           UVDB_MONITOR_STOP_INJECTION_OUTCOME_STALE ||
        snapshot->thread_count > UVDB_MONITOR_MAX_THREADS ||
        snapshot->module_count > UVDB_MONITOR_MAX_MODULES)
         return 0;

@@ -70,6 +70,56 @@ int uvdb_foreign_step_capability_validate(
     const struct uvdb_foreign_step_capability* capability,
     uint32_t* missing_proofs);
 
+/*
+ * Provider boundary for a future scheduler-isolated foreign-thread step.
+ * No Vita provider is wired today. A provider must keep every peer stopped,
+ * preserve exact context/trap identity, and make restore idempotent. Restore
+ * and verification are attempted after every prepare call, including failed
+ * preparation, so partial provider acquisition cannot be mistaken for a clean
+ * rejection.
+ */
+struct uvdb_foreign_step_provider {
+    void* user;
+    int (*prepare)(
+        void* user,
+        const struct uvdb_foreign_step_capability* capability);
+    int (*execute_one)(
+        void* user,
+        const struct uvdb_foreign_step_capability* capability);
+    int (*restore)(
+        void* user,
+        const struct uvdb_foreign_step_capability* capability);
+    int (*verify_restored)(
+        void* user,
+        const struct uvdb_foreign_step_capability* capability);
+};
+
+struct uvdb_foreign_step_transaction_result {
+    int prepare_result;
+    int execute_result;
+    int restore_result;
+    int verify_result;
+    int prepare_called;
+    int execute_called;
+    int restore_called;
+    int verify_called;
+    int rollback_pending;
+};
+
+enum uvdb_foreign_step_transaction_status {
+    UVDB_FOREIGN_STEP_TRANSACTION_OK = 0,
+    UVDB_FOREIGN_STEP_TRANSACTION_INVALID = -1,
+    UVDB_FOREIGN_STEP_TRANSACTION_PREPARE_FAILED = -2,
+    UVDB_FOREIGN_STEP_TRANSACTION_EXECUTE_FAILED = -3,
+    UVDB_FOREIGN_STEP_TRANSACTION_RESTORE_FAILED = -4,
+    UVDB_FOREIGN_STEP_TRANSACTION_VERIFY_FAILED = -5,
+};
+
+int uvdb_foreign_step_transaction_run(
+    const struct uvdb_foreign_step_capability* capability,
+    const struct uvdb_foreign_step_provider* provider,
+    struct uvdb_foreign_step_transaction_result* result);
+
 void uvdb_thread_inventory_reset(struct uvdb_thread_inventory* inventory);
 int uvdb_thread_inventory_add(struct uvdb_thread_inventory* inventory,
                               int32_t id);

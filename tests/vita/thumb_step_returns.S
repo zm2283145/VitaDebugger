@@ -268,8 +268,11 @@ arm_step_exclusive_after:
 .global uvdb_step_supported_arm_encodings_end
 uvdb_step_supported_arm_encodings:
     .word 0xe280f004 /* ADD PC, R0, #4 */
+    .word 0xe1a0f000 /* MOV PC, R0 */
     .word 0xe12fff10 /* BX R0 */
+    .word 0xfa000000 /* BLX immediate */
     .word 0xe590f004 /* LDR PC, [R0, #4] */
+    .word 0xe790f101 /* LDR PC, [R0, R1, LSL #2] */
     .word 0xe8b08010 /* LDMIA R0!, {R4, PC} */
 uvdb_step_supported_arm_encodings_end:
 
@@ -278,7 +281,9 @@ uvdb_step_supported_arm_encodings_end:
 uvdb_step_rejected_arm_encodings:
     .word 0xe1b0f000 /* MOVS PC, R0: privileged exception return */
     .word 0xf8900a00 /* RFEIA R0 */
+    .word 0xe8f08010 /* LDMIA R0!, {R4, PC}^ exception return */
     .word 0xe12fff20 /* BXJ R0 */
+    .word 0xe12fff3f /* unpredictable BLX PC */
     .word 0xe1a0f110 /* MOV PC, R0, LSL R1 */
     .word 0xef000000 /* SVC #0 */
     .word 0xe320f002 /* WFE */
@@ -293,7 +298,11 @@ uvdb_step_rejected_arm_encodings_end:
 .global uvdb_step_supported_thumb_encodings_end
 uvdb_step_supported_thumb_encodings:
     .hword 0xd102 /* BNE */
+    .hword 0xb11b /* CBZ R3 */
+    .hword 0x468f /* MOV PC, R1 */
     .hword 0x4710 /* BX R2 */
+    .hword 0x4770 /* BX LR */
+    .hword 0xbd10 /* POP {R4, PC} */
     .hword 0xf8d0, 0xf004 /* LDR.W PC, [R0, #4] */
     .hword 0xe8bd, 0x8010 /* POP.W {R4, PC} */
 uvdb_step_supported_thumb_encodings_end:
@@ -303,7 +312,9 @@ uvdb_step_supported_thumb_encodings_end:
 uvdb_step_rejected_thumb_encodings:
     .hword 0xbf04, 0x4687 /* ITT EQ followed by non-final MOV PC, R0 */
     .hword 0xf3de, 0x8f04 /* SUBS PC, LR, #4 exception return */
+    .hword 0xe9b0, 0xc000 /* RFEIA R0 privileged exception return */
     .hword 0xf3c0, 0x8f00 /* BXJ */
+    .hword 0x47f8 /* unpredictable BLX PC */
     .hword 0xdf00 /* SVC #0 */
     .hword 0xbf20 /* WFE */
     .hword 0xbf30 /* WFI */

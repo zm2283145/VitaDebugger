@@ -80,3 +80,14 @@ int uvdb_memory_write_transaction(
     size_t size,
     void* scratch,
     size_t scratch_size);
+
+/* Retry a retained RESTORE_PENDING obligation using the unchanged original
+ * bytes in scratch. Success means write, cache synchronization, and exact
+ * read-back all completed; any uncertainty remains RESTORE_PENDING. */
+int uvdb_memory_restore_transaction(
+    const struct uvdb_memory_transaction_io* io,
+    void* context,
+    uintptr_t address,
+    size_t size,
+    const void* scratch,
+    size_t scratch_size);

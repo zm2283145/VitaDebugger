@@ -229,6 +229,16 @@ CFLAGS += -I$(VITADEBUGGER_DIR)/kernel/include
 LDFLAGS += $(VITADEBUGGER_DIR)/kernel/build/vitadebug_stubs/libvitadebug_kernel_stub.a
 ```
 
+`UVDB_STOP_FAILURE_INJECTION=1` is a test-build-only application option that
+requires `UVDB_KERNEL_THREAD_CONTROL=1`. It adds two exact one-shot monitor
+commands, `monitor inject-stop-renew` and `monitor inject-stop-end`, which skip
+one matching application-to-kernel call for the current stop token/generation.
+Normal builds do not recognize these commands. This validates userspace
+recovery and watchdog behavior without changing the kernel companion; it does
+not simulate a partial kernel resume and must only be used under the serialized
+failure gate in
+[`docs/gdb-thread-control-validation.md`](docs/gdb-thread-control-validation.md).
+
 Application code and GDB commands are otherwise the same as mode 1. Startup
 validates the exact companion ABI, required thread-control capability mask,
 and 64-entry inventory contract. A mismatch fails closed before the debugger

@@ -33,12 +33,13 @@ below passes.
 
 This roadmap increment has three deliberately separate evidence levels:
 
-- **Host-modeled:** the production `uvdb.c` translation unit passes 2,048
+- **Host-modeled:** the production `uvdb.c` translation unit passes 8,192
   logical-tick fake-kernel cycles covering stop ownership, late-thread
-  reconciliation, controller/lease exclusion, renewal and `EndStop` failure,
-  socket shutdown, watchdog expiry, fresh-stop recovery, stale generation
-  completion, disconnect, restart, trap cleanup, and zero leaked ownership.
-  No wall-clock sleep determines the result.
+  reconciliation, controller/lease exclusion, fake-kernel and controlled
+  application-boundary renewal/`EndStop` failure, socket shutdown, watchdog
+  expiry, fresh-stop recovery, stale generation completion, disconnect,
+  restart, trap cleanup, and zero leaked ownership. No wall-clock sleep
+  determines the result.
 - **Vita cross-built:** library-only, kernel-thread-control, and opt-in VFP
   configurations compile and package with the current VitaSDK. The new
   encoding tables are linked as data; dangerous forms are not executed.
@@ -47,11 +48,17 @@ This roadmap increment has three deliberately separate evidence levels:
   stepping, register mutation, exclusive-sequence fixtures, abrupt disconnect,
   or controlled renew/`EndStop` failure injection.
 
-Renewal failure is now published only when both the observed stop token and
-its monotonic generation still match. A delayed failure from a retired session
-therefore cannot poison a replacement stop. Controlled renew/`EndStop`
-injection is currently a host fake-kernel facility, not a remotely exposed
-production or kernel test hook.
+Renewal failure is published only when both the observed stop token and its
+monotonic generation still match. A delayed failure from a retired session
+therefore cannot poison a replacement stop. A build with both
+`UVDB_KERNEL_THREAD_CONTROL=1` and `UVDB_STOP_FAILURE_INJECTION=1` recognizes
+exact `monitor inject-stop-renew` and `monitor inject-stop-end` commands. Each
+arms at most one operation for the currently published token/generation. The
+matching application-to-kernel call is skipped once, stale generations proceed
+without failure, and `monitor status` reports the pending and last consumed
+operation, token, generation, result, and stale/injected outcome. The option
+is absent from normal application builds and does not change the kernel
+companion or claim to simulate partial kernel resume.
 
 ## Selection contract
 
@@ -152,12 +159,19 @@ instruction rejection, ARM/Thumb direct and memory-address planners, IT
 placement, target/source alignment, conservative PC-writer classification, the
 no-EndStop-with-live-UDF cleanup policy, unsupported actions, and malformed
 packets. It also removes each foreign-step ownership proof independently and
-rejects stale context, trap, and rollback generations. The kernel-control
-integration target exercises the real lease lifecycle for 2,048 deterministic
-cycles, including renew/`EndStop` injection and cleanup. Breakpoint-patch tests
-cover partial writes, verification corruption, disconnect, competing ownership,
-exact original-byte retention, stale target/module identity, and restoration
-retry. The production core integration also reproduces a foreign state-lock
+rejects stale context, trap, and rollback generations. Its provider transaction
+model requires complete prepare/execute/restore/verify callbacks, invokes
+restore and verification after every preparation attempt, and reports rollback
+pending after either cleanup failure. No production provider calls it. The
+kernel-control integration target exercises the real lease lifecycle for 8,192
+deterministic cycles, including fake-kernel and test-build one-shot
+renew/`EndStop` injection and cleanup. Breakpoint-patch tests cover partial
+install and restore writes, verification corruption, disconnect during pending
+rollback, competing ownership, exact original-byte retention, stale
+target/module identity, and restoration retry. The generic memory transaction
+helper also exposes an exact restoration retry and tests partial writes plus
+corrupt read-back without losing its caller-retained original bytes. The
+production core integration also reproduces a foreign state-lock
 owner rejecting the first breakpoint callback without a predecessor, then
 requires the unchanged-fault callback to acquire ownership, publish `SIGTRAP`,
 consume the queued status request, send `T05`, restore bytes, and release every
@@ -625,7 +639,7 @@ Record the GDB transcript, exact application/kernel hashes, firmware, and
 whether each stop names the expected thread. Host tests and a VitaSDK cross-build
 are necessary but do not replace this lifecycle gate.
 
-## Phase 8: serialized failure and cleanup gate (not yet run)
+## Phase 9: serialized failure and cleanup gate (not yet run)
 
 Use one exclusive hardware window; do not run this gate concurrently with
 another Vita workstream. Install the matching kernel plugin, reboot before
@@ -634,16 +648,37 @@ VPK, installed `eboot.bin`, and symbol ELF. Stop immediately on a reboot,
 kernel panic, inability to reconnect, residual UDF bytes, a target thread
 remaining suspended beyond the watchdog bound, or any artifact/hash mismatch.
 
-The current build does not expose production renew/`EndStop` injection.
-Therefore Phase 8 must not simulate those failures by guessing kernel APIs or
-corrupting live tokens. First add a separately reviewed, test-build-only,
-bounded kernel control that can fail exactly one renew or end operation while
-preserving the normal watchdog and ownership bookkeeping. The control must be
-absent from release builds and must report its consumed generation.
+Build the application with `UVDB_STOP_FAILURE_INJECTION=1` and
+`UVDB_KERNEL_THREAD_CONTROL=1`; use the unchanged normal kernel companion.
+Normal application builds do not recognize the injection commands. The test
+build safely skips one matching userspace-to-kernel renew or `EndStop` call,
+leaving kernel stop state and its watchdog untouched. It records the exact
+token/generation and reports whether the request was injected or discarded as
+stale. This does not exercise a partial failure inside the kernel's resume or
+late-thread reconciliation implementation; those paths remain fake-kernel-only
+until a separately reviewed kernel test ABI exists.
+
+While stopped, use exactly one of:
+
+```gdb
+monitor inject-stop-renew
+monitor inject-stop-end
+```
+
+Do not arm both. The request becomes active only after GDB receives the
+injection command reply. `monitor status` must show the pending operation and
+current generation before an `EndStop` trigger. After arming the renew failure,
+issue no further packets: any stopped-state packet can renew the stop and
+consume the injection synchronously on the client thread. Wait for the lease
+thread to trigger the transport wake/disconnect instead. After reconnect,
+status must show the same operation/generation as `injected`. A stale request
+must be reported as `stale` and must not fail a replacement stop generation.
 
 For each injected operation, capture monitor status and raw RSP traffic before
 the injection, at disconnect, after the watchdog bound, after reconnect, and
-after clean detach. Required evidence is: the injected generation is named;
+after clean detach. Record whether the injection was consumed by the lease
+thread or synchronously by a stopped-state packet. Required evidence is: the
+injected generation is named;
 the old generation cannot mark a replacement failed; late threads are included
 before resume; original trap bytes are restored before ownership is released;
 the application advances after watchdog recovery; restart accepts a new

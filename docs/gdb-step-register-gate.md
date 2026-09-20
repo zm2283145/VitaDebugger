@@ -100,20 +100,25 @@ uses the unbound trap helper because a durable Vita target/module object
 provider has not been proven.
 
 The Vita fixture ELF now exports non-executed exact encoding tables for
-representative accepted ARM/Thumb branches, interworking, PC loads, and
-multi-register PC loads. Rejected tables cover PC-writing privileged exception
-returns, `BXJ`, register-controlled A32 shifts, SVC, WFE/WFI, nested or
-mismatched exclusive sequences, and a non-final IT-block PC write. These
-symbols prove that the encodings cross-assemble and allow a future gate to
-inspect their bytes; they do not claim that any rejected instruction was
-executed on hardware.
+representative accepted ARM/Thumb branches, `CBZ`, register and immediate
+interworking, `MOV PC`, 16/32-bit `POP {..., PC}`, immediate/register-offset PC
+loads, and multi-register PC loads. Rejected tables cover PC-writing privileged
+exception returns (including RFE and `LDM ...^`), `BXJ`, unpredictable `BLX
+PC`, register-controlled A32 shifts, SVC, WFE/WFI, nested or mismatched
+exclusive sequences, and a non-final IT-block PC write. These symbols prove
+that the encodings cross-assemble and allow a future gate to inspect their
+bytes; they do not claim that any rejected instruction was executed on
+hardware.
 
 Arbitrary foreign-thread isolation remains disabled. A host capability model
 requires scheduler ownership, context identity, trap ownership, rollback
 readiness, and matching nonzero generations before a resume-one or displaced
-step provider may run. Current VitaSDK declarations do not document a
-scheduler lock or atomic resume-one/resuspend contract, so no production
-provider is wired. Unsupported cases must continue to fail before changing
+step provider may run. The model now drives a complete provider transaction:
+every preparation attempt is followed by restoration and exact verification,
+including preparation or execution failures, and either cleanup failure leaves
+rollback pending. Current VitaSDK declarations do not document a scheduler
+lock or atomic resume-one/resuspend contract, so no production provider or
+call site is wired. Unsupported cases continue to fail before changing
 memory/registers or acquiring trap/stop ownership.
 
 ### ABI v1.14 rerun checkpoint

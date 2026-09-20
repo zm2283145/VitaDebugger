@@ -72,6 +72,13 @@ override EXTRA_CFLAGS += -DUVDB_SAFETY_GATE_NULL_PREDECESSOR_TYPE=$(UVDB_SAFETY_
 endif
 endif
 
+ifeq ($(UVDB_STOP_FAILURE_INJECTION),1)
+ifneq ($(UVDB_KERNEL_THREAD_CONTROL),1)
+$(error UVDB_STOP_FAILURE_INJECTION=1 requires UVDB_KERNEL_THREAD_CONTROL=1)
+endif
+override CFLAGS += -DUVDB_STOP_FAILURE_INJECTION
+endif
+
 ifeq ($(UVDB_KERNEL_VFP_READS),1)
 ifneq ($(UVDB_KERNEL_THREAD_CONTROL),1)
 $(error UVDB_KERNEL_VFP_READS=1 requires UVDB_KERNEL_THREAD_CONTROL=1)
@@ -299,7 +306,7 @@ test-uvdb-core-integration$(HOST_EXEEXT): src/uvdb.c tests/host/test_uvdb_core_i
 	$(HOST_CC_RUN) $(HOST_CFLAGS) -ffunction-sections -fdata-sections -Itests/host tests/host/test_uvdb_core_integration.c src/uvdb_rsp.c src/uvdb_rsp_frame.c src/uvdb_fileio_flow.c src/uvdb_memory_transaction.c src/uvdb_thread_control.c src/uvdb_console_transport.c src/uvdb_console.c src/uvdb_protocol_gate.c src/uvdb_exception_guard.c src/uvdb_exception_handlers.c src/uvdb_breakpoint_patch.c src/uvdb_exclusive_step.c src/uvdb_monitor.c src/uvdb_registers.c $(HOST_THREAD_FLAGS) -Wl,--gc-sections -o $@
 
 test-uvdb-core-integration-kernel$(HOST_EXEEXT): src/uvdb.c tests/host/test_uvdb_core_integration.c tests/host/uvdb_host_platform.h kernel/include/vitadebug_kernel.h src/uvdb_rsp.c src/uvdb_rsp_frame.c src/uvdb_fileio_flow.c src/uvdb_memory_transaction.c src/uvdb_thread_control.c src/uvdb_console_transport.c src/uvdb_console.c src/uvdb_protocol_gate.c src/uvdb_exception_guard.c src/uvdb_exception_handlers.c src/uvdb_breakpoint_patch.c src/uvdb_exclusive_step.c src/uvdb_monitor.c src/uvdb_registers.c
-	$(HOST_CC_RUN) $(HOST_CFLAGS) -DUVDB_KERNEL_THREAD_CONTROL -Ikernel/include -Itests/host/include -ffunction-sections -fdata-sections -Itests/host tests/host/test_uvdb_core_integration.c src/uvdb_rsp.c src/uvdb_rsp_frame.c src/uvdb_fileio_flow.c src/uvdb_memory_transaction.c src/uvdb_thread_control.c src/uvdb_console_transport.c src/uvdb_console.c src/uvdb_protocol_gate.c src/uvdb_exception_guard.c src/uvdb_exception_handlers.c src/uvdb_breakpoint_patch.c src/uvdb_exclusive_step.c src/uvdb_monitor.c src/uvdb_registers.c $(HOST_THREAD_FLAGS) -Wl,--gc-sections -o $@
+	$(HOST_CC_RUN) $(HOST_CFLAGS) -DUVDB_KERNEL_THREAD_CONTROL -DUVDB_STOP_FAILURE_INJECTION -Ikernel/include -Itests/host/include -ffunction-sections -fdata-sections -Itests/host tests/host/test_uvdb_core_integration.c src/uvdb_rsp.c src/uvdb_rsp_frame.c src/uvdb_fileio_flow.c src/uvdb_memory_transaction.c src/uvdb_thread_control.c src/uvdb_console_transport.c src/uvdb_console.c src/uvdb_protocol_gate.c src/uvdb_exception_guard.c src/uvdb_exception_handlers.c src/uvdb_breakpoint_patch.c src/uvdb_exclusive_step.c src/uvdb_monitor.c src/uvdb_registers.c $(HOST_THREAD_FLAGS) -Wl,--gc-sections -o $@
 
 test-memory-transaction$(HOST_EXEEXT): src/uvdb_memory_transaction.c src/uvdb_memory_transaction.h tests/host/test_memory_transaction.c
 	$(HOST_CC_RUN) $(HOST_CFLAGS) src/uvdb_memory_transaction.c tests/host/test_memory_transaction.c -o $@

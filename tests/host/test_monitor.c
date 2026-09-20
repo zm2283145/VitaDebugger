@@ -68,6 +68,18 @@ static struct uvdb_monitor_snapshot sample_snapshot(void)
     snapshot.status.kernel_max_threads = 64;
     snapshot.status.stop_session_active = 1;
     snapshot.status.vfp_reads_enabled = 1;
+    snapshot.status.stop_injection_available = 1;
+    snapshot.status.stop_injection_pending_operation =
+        UVDB_MONITOR_STOP_INJECTION_RENEW;
+    snapshot.status.stop_injection_pending_token = 0x100u;
+    snapshot.status.stop_injection_pending_generation = 7u;
+    snapshot.status.stop_injection_last_operation =
+        UVDB_MONITOR_STOP_INJECTION_END;
+    snapshot.status.stop_injection_last_outcome =
+        UVDB_MONITOR_STOP_INJECTION_OUTCOME_STALE;
+    snapshot.status.stop_injection_last_result = 0;
+    snapshot.status.stop_injection_last_token = 0xffu;
+    snapshot.status.stop_injection_last_generation = 6u;
     snapshot.status.last_fault_available = 1;
     snapshot.status.last_fault_type = 2;
     snapshot.status.last_fault_status = 0x12u;
@@ -272,6 +284,8 @@ int main(void)
           contains(output, output_size, "kernel: compatible") &&
           contains(output, output_size, "ABI=0x0001000b") &&
           contains(output, output_size, "active, healthy") &&
+          contains(output, output_size,
+                   "stop-injection: pending=renew/token=0x00000100/generation=7, last=end/stale/token=0x000000ff/generation=6/result=0") &&
           contains(output, output_size, "undefined-instruction") &&
           contains(output, output_size,
                    "stop-trace newest-first: dropped=2") &&

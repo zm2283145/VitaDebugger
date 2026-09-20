@@ -40,6 +40,18 @@ enum uvdb_monitor_state {
     UVDB_MONITOR_STATE_ERROR,
 };
 
+enum uvdb_monitor_stop_injection_operation {
+    UVDB_MONITOR_STOP_INJECTION_NONE = 0,
+    UVDB_MONITOR_STOP_INJECTION_RENEW = 1,
+    UVDB_MONITOR_STOP_INJECTION_END = 2,
+};
+
+enum uvdb_monitor_stop_injection_outcome {
+    UVDB_MONITOR_STOP_INJECTION_OUTCOME_NONE = 0,
+    UVDB_MONITOR_STOP_INJECTION_OUTCOME_INJECTED = 1,
+    UVDB_MONITOR_STOP_INJECTION_OUTCOME_STALE = 2,
+};
+
 enum uvdb_monitor_stop_trace_wait_result {
     UVDB_MONITOR_STOP_TRACE_WAIT_NONE = 0,
     UVDB_MONITOR_STOP_TRACE_WAIT_CLEAR,
@@ -157,6 +169,19 @@ struct uvdb_monitor_status {
     int stop_session_failed;
     int vfp_reads_enabled;
 
+    int stop_injection_available;
+    enum uvdb_monitor_stop_injection_operation
+        stop_injection_pending_operation;
+    uint32_t stop_injection_pending_token;
+    uint32_t stop_injection_pending_generation;
+    enum uvdb_monitor_stop_injection_operation
+        stop_injection_last_operation;
+    enum uvdb_monitor_stop_injection_outcome
+        stop_injection_last_outcome;
+    int32_t stop_injection_last_result;
+    uint32_t stop_injection_last_token;
+    uint32_t stop_injection_last_generation;
+
     int last_fault_available;
     int32_t last_fault_type;
     uint32_t last_fault_status;
@@ -262,6 +287,13 @@ int uvdb_monitor_parse_qrcmd(
     const char* packet,
     size_t packet_size,
     enum uvdb_monitor_command* command);
+
+/* Match one exact command after applying the same bounded hex decoding and
+ * surrounding-whitespace rules as uvdb_monitor_parse_qrcmd(). */
+int uvdb_monitor_qrcmd_text_equals(
+    const char* packet,
+    size_t packet_size,
+    const char* expected);
 
 /* Render one command's plain-text result. output_size is the actual number of
  * bytes written and the result reports deliberate line-safe truncation. The

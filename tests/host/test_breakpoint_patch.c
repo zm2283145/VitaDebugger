@@ -355,6 +355,20 @@ static void test_failed_rollback_then_retry(void)
               memcmp(memory.bytes + 2u, trap + 2u, 2u) == 0,
           "partial rollback leaves an explicitly tracked mixed instruction");
 
+    memory.connected = 0;
+    reads = memory.read_calls;
+    writes = memory.write_calls;
+    syncs = memory.sync_calls;
+    check(uvdb_breakpoint_patch_restore(&slot, &io) ==
+                  UVDB_BREAKPOINT_PATCH_ERROR_RESTORE_PENDING &&
+              slot.state == UVDB_BREAKPOINT_PATCH_RESTORE_PENDING &&
+              memcmp(slot.original, original, sizeof(original)) == 0 &&
+              memory.read_calls == reads + 1u &&
+              memory.write_calls == writes + 1u &&
+              memory.sync_calls == syncs + 1u,
+          "disconnect during rollback retry preserves exact recovery metadata");
+    memory.connected = 1;
+
     reads = memory.read_calls;
     writes = memory.write_calls;
     syncs = memory.sync_calls;
@@ -373,7 +387,7 @@ static void test_failed_rollback_then_retry(void)
     check(!uvdb_breakpoint_patch_requires_restore(&slot),
           "successful retry permits lifecycle guard retirement");
     check(memory.writes_without_obligation == 0u &&
-              memory.writes_while_pending == 3u,
+              memory.writes_while_pending == 4u,
           "retry also writes only after observing pending state");
 }
 
@@ -413,17 +427,94 @@ static void test_restore_requires_sync_and_exact_verification(void)
     check(uvdb_breakpoint_patch_install(&slot, &io, FAKE_BASE, trap,
                                         sizeof(trap)) ==
               UVDB_BREAKPOINT_PATCH_OK,
+          "prepare installed patch for partial-restore test");
+    memory.write_returns[1] = 2u;
+    check(uvdb_breakpoint_patch_restore(&slot, &io) ==
+                  UVDB_BREAKPOINT_PATCH_ERROR_RESTORE_PENDING &&
+              slot.state == UVDB_BREAKPOINT_PATCH_RESTORE_PENDING &&
+              memcmp(slot.original, original, sizeof(original)) == 0 &&
+              memcmp(slot.patch, trap, sizeof(trap)) == 0 &&
+              memcmp(memory.bytes, original, 2u) == 0 &&
+              memcmp(memory.bytes + 2u, trap + 2u, 2u) == 0,
+          "partial restore write retains original bytes and mixed-range obligation");
+    check(uvdb_breakpoint_patch_restore(&slot, &io) ==
+                  UVDB_BREAKPOINT_PATCH_OK &&
+              memcmp(memory.bytes, original, sizeof(original)) == 0 &&
+              slot_is_clear(&slot),
+          "partial restore write is repaired by one exact retry");
+
+    fake_init(&memory);
+    io = fake_io(&memory);
+    uvdb_breakpoint_patch_slot_init(&slot);
+    memory.observed_slot = &slot;
+    memcpy(original, memory.bytes, sizeof(original));
+    check(uvdb_breakpoint_patch_install(&slot, &io, FAKE_BASE, trap,
+                                        sizeof(trap)) ==
+              UVDB_BREAKPOINT_PATCH_OK,
           "prepare installed patch for restore-readback test");
     memory.read_xor[2] = 1u;
     check(uvdb_breakpoint_patch_restore(&slot, &io) ==
                   UVDB_BREAKPOINT_PATCH_ERROR_RESTORE_PENDING &&
               slot.state == UVDB_BREAKPOINT_PATCH_RESTORE_PENDING &&
+              memcmp(slot.original, original, sizeof(original)) == 0 &&
+              memcmp(slot.patch, trap, sizeof(trap)) == 0 &&
               memcmp(memory.bytes, original, sizeof(original)) == 0,
           "mismatched restore readback cannot clear recovery metadata");
     check(uvdb_breakpoint_patch_restore(&slot, &io) ==
                   UVDB_BREAKPOINT_PATCH_OK &&
               slot_is_clear(&slot),
           "exact restoration retry clears after prior mismatch");
+}
+
+static void test_pending_rollback_owner_and_disconnect_retry(void)
+{
+    static const uint8_t trap[4] = {0xf0u, 0x00u, 0xf0u, 0xe7u};
+    struct uvdb_breakpoint_patch_slot slot;
+    struct fake_memory memory;
+    struct uvdb_breakpoint_patch_io io;
+    struct uvdb_breakpoint_patch_owner owner;
+    struct uvdb_breakpoint_patch_owner competitor;
+    uint8_t original[4];
+    unsigned int writes;
+
+    fake_init(&memory);
+    io = fake_io(&memory);
+    owner = fake_owner(&memory);
+    uvdb_breakpoint_patch_slot_init(&slot);
+    memory.observed_slot = &slot;
+    memcpy(original, memory.bytes, sizeof(original));
+    memory.read_xor[1] = 1u;
+    memory.write_returns[1] = 2u;
+    check(uvdb_breakpoint_patch_install_owned(
+              &slot, &io, &owner, FAKE_BASE, trap, sizeof(trap)) ==
+                  UVDB_BREAKPOINT_PATCH_ERROR_RESTORE_PENDING &&
+              slot.state == UVDB_BREAKPOINT_PATCH_RESTORE_PENDING &&
+              slot.identity_bound == 1u &&
+              memcmp(slot.original, original, sizeof(original)) == 0,
+          "owned failed rollback retains exact target/module obligation");
+
+    competitor = owner;
+    competitor.identity.module++;
+    writes = memory.write_calls;
+    check(uvdb_breakpoint_patch_restore_owned(
+              &slot, &io, &competitor) ==
+                  UVDB_BREAKPOINT_PATCH_ERROR_IDENTITY &&
+              memory.write_calls == writes &&
+              memcmp(slot.original, original, sizeof(original)) == 0,
+          "competing owner cannot consume pending rollback metadata");
+
+    memory.connected = 0;
+    check(uvdb_breakpoint_patch_restore_owned(&slot, &io, &owner) ==
+                  UVDB_BREAKPOINT_PATCH_ERROR_IDENTITY &&
+              memory.write_calls == writes &&
+              memcmp(slot.original, original, sizeof(original)) == 0,
+          "disconnect blocks pending owned rollback without writing");
+    memory.connected = 1;
+    check(uvdb_breakpoint_patch_restore_owned(&slot, &io, &owner) ==
+                  UVDB_BREAKPOINT_PATCH_OK &&
+              memcmp(memory.bytes, original, sizeof(original)) == 0 &&
+              slot_is_clear(&slot),
+          "matching owner restores pending rollback after reconnect");
 }
 
 static void test_disconnect_competing_owner_and_identity_retry(void)
@@ -583,6 +674,7 @@ int main(void)
     test_install_failures_roll_back();
     test_failed_rollback_then_retry();
     test_restore_requires_sync_and_exact_verification();
+    test_pending_rollback_owner_and_disconnect_retry();
     test_disconnect_competing_owner_and_identity_retry();
     test_invalid_arguments();
 

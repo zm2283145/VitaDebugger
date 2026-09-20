@@ -47,6 +47,11 @@ typedef char uvdb_kernel_register_bank_count_must_match[
         UVDB_ARM_REGISTER_BANK_COUNT ? 1 : -1];
 #endif
 
+#if defined(UVDB_STOP_FAILURE_INJECTION) && \
+    !defined(UVDB_KERNEL_THREAD_CONTROL)
+#error "UVDB_STOP_FAILURE_INJECTION requires UVDB_KERNEL_THREAD_CONTROL"
+#endif
+
 #if defined(UVDB_KERNEL_VFP_READS) && !defined(UVDB_KERNEL_THREAD_CONTROL)
 #error "UVDB_KERNEL_VFP_READS requires UVDB_KERNEL_THREAD_CONTROL"
 #endif
@@ -300,6 +305,30 @@ static volatile unsigned int uvdb_stop_token;
 static volatile uint32_t uvdb_stop_generation;
 static SceUID uvdb_lease_thread = -1;
 static int uvdb_lease_thread_ended;
+#ifdef UVDB_STOP_FAILURE_INJECTION
+#define UVDB_STOP_INJECTION_NONE UVDB_MONITOR_STOP_INJECTION_NONE
+#define UVDB_STOP_INJECTION_RENEW UVDB_MONITOR_STOP_INJECTION_RENEW
+#define UVDB_STOP_INJECTION_END UVDB_MONITOR_STOP_INJECTION_END
+#define UVDB_STOP_INJECTION_OUTCOME_INJECTED \
+    UVDB_MONITOR_STOP_INJECTION_OUTCOME_INJECTED
+#define UVDB_STOP_INJECTION_OUTCOME_STALE \
+    UVDB_MONITOR_STOP_INJECTION_OUTCOME_STALE
+
+struct uvdb_stop_injection_control
+{
+    volatile int operation;
+    volatile int ready;
+    volatile unsigned int armed_token;
+    volatile uint32_t armed_generation;
+    volatile int last_operation;
+    volatile int last_outcome;
+    volatile int last_result;
+    volatile unsigned int last_token;
+    volatile uint32_t last_generation;
+};
+
+static struct uvdb_stop_injection_control uvdb_stop_injection;
+#endif
 #endif
 static struct uvdb_fault_info uvdb_last_fault = {
     .exception_type = UVDB_EXCEPTION_NONE,
@@ -715,6 +744,140 @@ static const struct vd_arm_registers* uvdb_kernel_user_register_bank(
  * registrations only annotate names. Library-only builds retain the
  * cooperative registry as their inventory source.
  */
+#ifdef UVDB_STOP_FAILURE_INJECTION
+/* Arming and kernel-call wrappers run only while stop_owner is held. A staged
+ * request cannot be consumed until the reply path activates it outside that
+ * ownership window; atomics also keep monitor snapshots coherent. */
+static void uvdb_stop_injection_reset(void)
+{
+    memset(&uvdb_stop_injection, 0, sizeof(uvdb_stop_injection));
+}
+
+static int uvdb_stop_injection_arm(
+    enum uvdb_monitor_stop_injection_operation operation,
+    unsigned int token,
+    uint32_t generation)
+{
+    if((operation != UVDB_STOP_INJECTION_RENEW &&
+        operation != UVDB_STOP_INJECTION_END) ||
+       !token || !generation ||
+       __atomic_load_n(&uvdb_stop_injection.operation,
+                       __ATOMIC_ACQUIRE) != UVDB_STOP_INJECTION_NONE)
+        return -1;
+
+    __atomic_store_n(&uvdb_stop_injection.armed_token, token,
+                     __ATOMIC_RELAXED);
+    __atomic_store_n(&uvdb_stop_injection.armed_generation, generation,
+                     __ATOMIC_RELAXED);
+    __atomic_store_n(&uvdb_stop_injection.ready, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&uvdb_stop_injection.operation, operation,
+                     __ATOMIC_RELEASE);
+    return 0;
+}
+
+static int uvdb_stop_injection_activate(
+    enum uvdb_monitor_stop_injection_operation operation)
+{
+    if(__atomic_load_n(&uvdb_stop_injection.operation,
+                       __ATOMIC_ACQUIRE) != (int)operation)
+        return -1;
+    int expected = 0;
+    return __atomic_compare_exchange_n(
+               &uvdb_stop_injection.ready, &expected, 1, 0,
+               __ATOMIC_RELEASE, __ATOMIC_RELAXED)
+        ? 0 : -1;
+}
+
+static void uvdb_stop_injection_cancel_staged(
+    enum uvdb_monitor_stop_injection_operation operation)
+{
+    if(__atomic_load_n(&uvdb_stop_injection.operation,
+                       __ATOMIC_ACQUIRE) == (int)operation &&
+       __atomic_load_n(&uvdb_stop_injection.ready,
+                       __ATOMIC_ACQUIRE) == 0)
+        __atomic_store_n(&uvdb_stop_injection.operation,
+                         UVDB_STOP_INJECTION_NONE, __ATOMIC_RELEASE);
+}
+
+static int uvdb_stop_injection_consume(
+    enum uvdb_monitor_stop_injection_operation operation,
+    unsigned int token,
+    uint32_t generation,
+    int failure_result)
+{
+    if(__atomic_load_n(&uvdb_stop_injection.operation,
+                       __ATOMIC_ACQUIRE) != (int)operation)
+        return 0;
+    int expected = 1;
+    if(!__atomic_compare_exchange_n(
+           &uvdb_stop_injection.ready, &expected, -1, 0,
+           __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+        return 0;
+
+    unsigned int armed_token = __atomic_load_n(
+        &uvdb_stop_injection.armed_token, __ATOMIC_RELAXED);
+    uint32_t armed_generation = __atomic_load_n(
+        &uvdb_stop_injection.armed_generation, __ATOMIC_RELAXED);
+    int matches = armed_token == token && armed_generation == generation;
+    __atomic_store_n(&uvdb_stop_injection.last_operation, operation,
+                     __ATOMIC_RELAXED);
+    __atomic_store_n(
+        &uvdb_stop_injection.last_outcome,
+        matches ? UVDB_STOP_INJECTION_OUTCOME_INJECTED
+                : UVDB_STOP_INJECTION_OUTCOME_STALE,
+        __ATOMIC_RELAXED);
+    __atomic_store_n(&uvdb_stop_injection.last_result,
+                     matches ? failure_result : 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&uvdb_stop_injection.last_token, armed_token,
+                     __ATOMIC_RELAXED);
+    __atomic_store_n(&uvdb_stop_injection.last_generation,
+                     armed_generation, __ATOMIC_RELAXED);
+    __atomic_store_n(&uvdb_stop_injection.operation,
+                     UVDB_STOP_INJECTION_NONE, __ATOMIC_RELEASE);
+    __atomic_store_n(&uvdb_stop_injection.ready, 0, __ATOMIC_RELEASE);
+    return matches;
+}
+
+static int uvdb_kernel_renew_stop(
+    unsigned int token, unsigned int lease_ms)
+{
+    uint32_t generation = __atomic_load_n(
+        &uvdb_stop_generation, __ATOMIC_SEQ_CST);
+    if(uvdb_stop_injection_consume(
+           UVDB_STOP_INJECTION_RENEW, token, generation, -70))
+        return -70;
+    return vdKernelRenewStop(token, lease_ms);
+}
+
+static int uvdb_kernel_end_stop_call(
+    unsigned int token, int* resumed_count)
+{
+    uint32_t generation = __atomic_load_n(
+        &uvdb_stop_generation, __ATOMIC_SEQ_CST);
+    if(uvdb_stop_injection_consume(
+           UVDB_STOP_INJECTION_END, token, generation, -71))
+        return -71;
+    return vdKernelEndStop(token, resumed_count);
+}
+
+static enum uvdb_monitor_stop_injection_operation
+uvdb_stop_injection_command(const char* packet, size_t packet_size)
+{
+    if(uvdb_monitor_qrcmd_text_equals(
+           packet, packet_size, "inject-stop-renew"))
+        return UVDB_STOP_INJECTION_RENEW;
+    if(uvdb_monitor_qrcmd_text_equals(
+           packet, packet_size, "inject-stop-end"))
+        return UVDB_STOP_INJECTION_END;
+    return UVDB_STOP_INJECTION_NONE;
+}
+#else
+#define uvdb_kernel_renew_stop(token, lease_ms) \
+    vdKernelRenewStop((token), (lease_ms))
+#define uvdb_kernel_end_stop_call(token, resumed_count) \
+    vdKernelEndStop((token), (resumed_count))
+#endif
+
 static int uvdb_refresh_thread_inventory(void)
 {
 #ifdef UVDB_KERNEL_THREAD_CONTROL
@@ -722,7 +885,7 @@ static int uvdb_refresh_thread_inventory(void)
         return -1;
     unsigned int token = __atomic_load_n(&uvdb_stop_token,
                                           __ATOMIC_SEQ_CST);
-    if(!token || vdKernelRenewStop(token, 2000) < 0)
+    if(!token || uvdb_kernel_renew_stop(token, 2000) < 0)
     {
         __atomic_store_n(&uvdb_stop_failed, 1, __ATOMIC_SEQ_CST);
         return -1;
@@ -1747,6 +1910,9 @@ void uvdb_shutdown(void)
     uvdb_stop_failed = 0;
     uvdb_stop_owner = UVDB_STOP_OWNER_NONE;
     uvdb_stop_token = 0;
+#ifdef UVDB_STOP_FAILURE_INJECTION
+    uvdb_stop_injection_reset();
+#endif
 #endif
     memset(uvdb_threads, 0, sizeof(uvdb_threads));
     /* Full shutdown is terminal. KuBridge does not expose a dispatcher
@@ -3437,7 +3603,7 @@ static int uvdb_kernel_recover_stop(void)
 {
     unsigned int token = __atomic_load_n(&uvdb_stop_token,
                                           __ATOMIC_SEQ_CST);
-    if(token && vdKernelRenewStop(token, 2000) >= 0)
+    if(token && uvdb_kernel_renew_stop(token, 2000) >= 0)
     {
         __atomic_store_n(&uvdb_stop_failed, 0, __ATOMIC_SEQ_CST);
         /* Controller ownership remains asserted for the caller's cleanup. */
@@ -3476,7 +3642,7 @@ static int uvdb_kernel_end_stop(void)
      * partial resume, recover a coherent all-stop before returning failure so
      * the common cleanup path can safely restore patched instructions. */
     int resumed = 0;
-    int result = vdKernelEndStop(token, &resumed);
+    int result = uvdb_kernel_end_stop_call(token, &resumed);
     if(result >= 0)
     {
         uvdb_retire_stop_token();
@@ -3763,6 +3929,29 @@ static void uvdb_monitor_fill_status(
         __atomic_load_n(&uvdb_stop_token, __ATOMIC_SEQ_CST) != 0;
     status->stop_session_failed =
         __atomic_load_n(&uvdb_stop_failed, __ATOMIC_SEQ_CST) != 0;
+#ifdef UVDB_STOP_FAILURE_INJECTION
+    status->stop_injection_available = 1;
+    int pending_operation = __atomic_load_n(
+        &uvdb_stop_injection.operation, __ATOMIC_ACQUIRE);
+    status->stop_injection_pending_operation = pending_operation;
+    if(pending_operation)
+    {
+        status->stop_injection_pending_token = __atomic_load_n(
+            &uvdb_stop_injection.armed_token, __ATOMIC_RELAXED);
+        status->stop_injection_pending_generation = __atomic_load_n(
+            &uvdb_stop_injection.armed_generation, __ATOMIC_RELAXED);
+    }
+    status->stop_injection_last_operation = __atomic_load_n(
+        &uvdb_stop_injection.last_operation, __ATOMIC_RELAXED);
+    status->stop_injection_last_outcome = __atomic_load_n(
+        &uvdb_stop_injection.last_outcome, __ATOMIC_RELAXED);
+    status->stop_injection_last_result = __atomic_load_n(
+        &uvdb_stop_injection.last_result, __ATOMIC_RELAXED);
+    status->stop_injection_last_token = __atomic_load_n(
+        &uvdb_stop_injection.last_token, __ATOMIC_RELAXED);
+    status->stop_injection_last_generation = __atomic_load_n(
+        &uvdb_stop_injection.last_generation, __ATOMIC_RELAXED);
+#endif
 #endif
 #ifdef UVDB_KERNEL_VFP_READS
     status->vfp_reads_enabled = uvdb_rsp_vfp_enabled;
@@ -4249,6 +4438,10 @@ static void uvdb_main_loop(
         }
         buffer_start_packet(&out_buf);
         int enable_no_ack = 0;
+#ifdef UVDB_STOP_FAILURE_INJECTION
+        enum uvdb_monitor_stop_injection_operation activate_stop_injection =
+            UVDB_STOP_INJECTION_NONE;
+#endif
         if(IS("qSupported") || STARTSWITH("qSupported:"))
         {
             buffer_write(&out_buf, STRING("qXfer:features:read+;qXfer:libraries:read+;vContSupported+;QStartNoAckMode+;PacketSize="));
@@ -4260,6 +4453,43 @@ static void uvdb_main_loop(
             enable_no_ack =
                 !uvdb_console_transport_no_ack(&uvdb_console_transport);
         }
+#ifdef UVDB_STOP_FAILURE_INJECTION
+        else if(uvdb_stop_injection_command(pkt, sz) !=
+                UVDB_STOP_INJECTION_NONE)
+        {
+            enum uvdb_monitor_stop_injection_operation operation =
+                uvdb_stop_injection_command(pkt, sz);
+            if(uvdb_begin_stopped_operation() < 0)
+                return;
+            unsigned int token = __atomic_load_n(
+                &uvdb_stop_token, __ATOMIC_SEQ_CST);
+            uint32_t generation = __atomic_load_n(
+                &uvdb_stop_generation, __ATOMIC_SEQ_CST);
+            int arm_result = uvdb_stop_injection_arm(
+                operation, token, generation);
+            uvdb_end_stopped_operation();
+            if(arm_result < 0)
+            {
+                static const char failure[] =
+                    "error: stop failure injection already armed\n";
+                write_hex(failure, sizeof(failure) - 1u);
+            }
+            else if(operation == UVDB_STOP_INJECTION_RENEW)
+            {
+                activate_stop_injection = operation;
+                static const char success[] =
+                    "armed one renew failure for the current stop generation\n";
+                write_hex(success, sizeof(success) - 1u);
+            }
+            else
+            {
+                activate_stop_injection = operation;
+                static const char success[] =
+                    "armed one EndStop failure for the current stop generation\n";
+                write_hex(success, sizeof(success) - 1u);
+            }
+        }
+#endif
         else if(STARTSWITH("qRcmd,"))
         {
             enum uvdb_monitor_command command = UVDB_MONITOR_COMMAND_NONE;
@@ -4862,9 +5092,20 @@ packet_complete:
         discard_packet(pkt, sz);
         if(send_packet() < 0)
         {
+#ifdef UVDB_STOP_FAILURE_INJECTION
+            uvdb_stop_injection_cancel_staged(activate_stop_injection);
+#endif
             uvdb_fail_stopped_client();
             return;
         }
+#ifdef UVDB_STOP_FAILURE_INJECTION
+        if(activate_stop_injection != UVDB_STOP_INJECTION_NONE &&
+           uvdb_stop_injection_activate(activate_stop_injection) < 0)
+        {
+            uvdb_fail_stopped_client();
+            return;
+        }
+#endif
         if(enable_no_ack)
         {
             if(__atomic_load_n(&uvdb_server_stop, __ATOMIC_SEQ_CST))
@@ -6114,7 +6355,7 @@ static void uvdb_lease_renew_once(void)
         return;
     }
 
-    int renew_result = vdKernelRenewStop(token, 2000);
+    int renew_result = uvdb_kernel_renew_stop(token, 2000);
     if(renew_result < 0 &&
        uvdb_publish_stop_failure(token, generation))
     {

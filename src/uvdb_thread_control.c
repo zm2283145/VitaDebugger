@@ -33,6 +33,49 @@ int uvdb_foreign_step_capability_validate(
     return 0;
 }
 
+int uvdb_foreign_step_transaction_run(
+    const struct uvdb_foreign_step_capability* capability,
+    const struct uvdb_foreign_step_provider* provider,
+    struct uvdb_foreign_step_transaction_result* result)
+{
+    if(result)
+        memset(result, 0, sizeof(*result));
+    if(!result || uvdb_foreign_step_capability_validate(
+                      capability, NULL) < 0 ||
+       !provider || !provider->prepare || !provider->execute_one ||
+       !provider->restore || !provider->verify_restored)
+        return UVDB_FOREIGN_STEP_TRANSACTION_INVALID;
+
+    result->prepare_called = 1;
+    result->prepare_result =
+        provider->prepare(provider->user, capability);
+    if(result->prepare_result == 0)
+    {
+        result->execute_called = 1;
+        result->execute_result =
+            provider->execute_one(provider->user, capability);
+    }
+
+    result->restore_called = 1;
+    result->restore_result =
+        provider->restore(provider->user, capability);
+    result->verify_called = 1;
+    result->verify_result =
+        provider->verify_restored(provider->user, capability);
+    result->rollback_pending =
+        result->restore_result != 0 || result->verify_result != 0;
+
+    if(result->rollback_pending)
+        return result->restore_result != 0
+            ? UVDB_FOREIGN_STEP_TRANSACTION_RESTORE_FAILED
+            : UVDB_FOREIGN_STEP_TRANSACTION_VERIFY_FAILED;
+    if(result->prepare_result != 0)
+        return UVDB_FOREIGN_STEP_TRANSACTION_PREPARE_FAILED;
+    if(result->execute_result != 0)
+        return UVDB_FOREIGN_STEP_TRANSACTION_EXECUTE_FAILED;
+    return UVDB_FOREIGN_STEP_TRANSACTION_OK;
+}
+
 static int thread_inventory_valid(
     const struct uvdb_thread_inventory* inventory)
 {
