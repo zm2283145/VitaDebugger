@@ -575,6 +575,7 @@ to another firmware or configuration.
 | VFP read path | [Kernel gate](docs/hardware/kernel-vfp-probe-v8-bank0-pass.jpg), [live GDB record](docs/hardware/gdb-vfp-live-3.65.json) | Guarded D0-D31/FPSCR reads and lifecycle checks passed; writes remain disabled |
 | ASLR and build identity | [Five-session record](docs/hardware/gdb-aslr-build-identity-3.65.json) | Installed main/user-module identity, mismatch rejection, relaunch symbol refresh, and source breakpoints passed |
 | GDB monitor/console | [Monitor record](docs/hardware/gdb-monitor-console-display-3.65.json) | Fixed read-only commands, state preservation, detach/reconnect, console statistics, and display metadata passed |
+| GDB client admission | [Admission record](docs/hardware/debugger-client-admission-retail-3.65.json) | Silent, HTTP, partial, and bad-checksum probes did not consume the listener; GDB Ctrl-C, detach/reconnect, and pending-candidate shutdown passed |
 | User-mode profiler | [13-check record](docs/hardware/profiler-name-dictionary-3.65.json) | Event order, zones, counters, snapshots, bounded pressure, encoding, names, and drop accounting passed without the kernel plugin |
 | Profiler TCP | [Transport record](docs/hardware/profiler-tcp-stream-retail-3.65.md) | Named capture, clean EOF, cancellation, forced disconnect, and recovery relaunch passed |
 | PMU mutation boundary | [Per-core record](docs/hardware/profiler-pmu-session-gate-3.65.md) | Fixed lane-5 software-increment transaction and exact snapshot restoration passed on application cores 0-2 |

@@ -66,6 +66,15 @@ are closed while the listening socket remains available for the next client.
 Shutdown publishes and cancels the candidate descriptor just like connected
 I/O, so admission cannot add a new unbounded wait.
 
+This admission boundary passed on retail 3.65 hardware. Seven silent, HTTP,
+partial, and bad-checksum candidates were rejected without consuming the
+listener; three later GDB cycles completed negotiation, Ctrl-C, clean detach,
+and reconnect. Killing the title with a silent candidate pending reset that
+socket within 155.2 ms. Vita title relaunch still requires a short lifecycle
+settle: an immediate relaunch raced teardown, while a two-second delay restored
+the listener and completed another GDB cycle. See
+[`debugger-client-admission-retail-3.65.json`](hardware/debugger-client-admission-retail-3.65.json).
+
 A completed request also owns an explicit payload-borrow lifetime. Ordinary
 replies discard the request and release that lifetime before `send_packet()`
 can wait for a response ACK and compact or refill the shared receive buffer.
@@ -243,9 +252,11 @@ The focused host suite covers:
 
 1. Exercise malformed and maximum-size RSP packets over a real connection,
    including disconnects during `m`, `M`, and register packets.
-2. Verify accept/receive/send cancellation, whole-protocol exclusion, and the
-   bounded stop/start/reconnect lifecycle on Vita, including a connected HUP
-   caused by intentional shutdown and immediate restart.
+2. Client admission, candidate cancellation, Ctrl-C, detach, and reconnect have
+   passed on Vita. Still verify connected receive/send cancellation,
+   whole-protocol exclusion, and a connected HUP caused by intentional
+   shutdown. Treat title relaunch as a separate lifecycle operation and wait
+   two seconds after kill before relaunch.
 3. Install alongside a known user exception handler, prove per-type chaining,
    then prove exact slot restoration and late default redispatch at terminal
    shutdown. Do not attempt dynamic unload.
