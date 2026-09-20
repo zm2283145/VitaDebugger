@@ -117,11 +117,25 @@ receive through its ordinary transport-error return.
 The timeout and cancellation contract has production-translation-unit host
 coverage for connected blocked receive, connected blocked send, whole-protocol
 exclusion during each wait, and an intentional connected HUP during shutdown.
-The fake shutdown syscall releases the exact blocked network operation, after
-which stop proves the per-call lifetime and protocol owner are both idle before
-retiring the descriptor. A Vita test is still required for firmware-level
-blocked receive/send cancellation timing, partial send, peer disconnect,
-immediate stop/start, and reconnect.
+Connected packet receive and send now use raw nonblocking syscalls with a
+one-millisecond bounded poll. Each retry revalidates the exact published socket
+generation and the closing flag, so shutdown cannot leave a packet operation
+blocked in the kernel and descriptor reuse cannot redirect it. An ACK/no-ack
+production-translation-unit regression injects a peer reset while the stopped
+handler waits for its next packet, then proves target-running recovery,
+protocol/exception-gate release, a new socket generation, and successful
+`qSupported`/detach; the test repeats this sequence 100 times in both compile
+modes. Send backpressure uses the same bounded cancellation path.
+
+A retail run on 2026-09-20 passed malformed/nonhex/truncated checksum, escaped
+delimiter, exact 262,140-byte payload, and connected one-byte-oversize cases.
+It then found that a Windows `SO_LINGER` RST did not wake Vita's raw blocking
+receive while the target was stopped, so no listener reopened within the
+15-second bound. The title was destroyed cleanly and port 1234 was confirmed
+closed without a reboot or kernel configuration change. The nonblocking fix
+above remains hardware-pending; rerun the stopped RST, connected cancellation,
+owner exclusion, command-specific disconnect, and bounded soak matrix before
+claiming retail closure.
 
 Stop-token acquisition/recovery, thread-context snapshots, cache maintenance,
 and exception-slot replacement still execute inside the global state lock.
@@ -276,14 +290,18 @@ The focused host suite covers:
 
 ## Remaining hardware gates
 
-1. Repeat the host malformed/escaped/exact-maximum RSP matrix over a real Vita
-   connection, including disconnects during `m`, `M`, `g`, `p`, `G`, and `P`.
+1. The retail malformed/escaped/exact-maximum packet prefix passed on
+   2026-09-20. Revalidate it with the nonblocking-I/O build, then complete
+   disconnects during `m`, `M`, `g`, `p`, `G`, and `P`. Resolve writable
+   fixture addresses against the ELF PT_LOAD segment corresponding to live
+   `DataSeg`, read the exact bytes first, and use an idempotent `M` payload.
 2. Client admission, candidate cancellation, Ctrl-C, detach, and reconnect have
    passed on Vita. Host injection now covers connected receive/send
-   cancellation, whole-protocol exclusion, and an intentional connected HUP;
-   repeat those cases on Vita to validate syscall wake timing and descriptor
-   behavior. Treat title relaunch as a separate lifecycle operation and wait
-   two seconds after kill before relaunch.
+   cancellation, whole-protocol exclusion, an intentional connected HUP, and
+   100 alternating ACK/no-ack stopped-RST recovery generations. Repeat those
+   cases on Vita to validate nonblocking syscall timing and descriptor behavior.
+   Treat title relaunch as a separate lifecycle operation and wait two seconds
+   after kill before relaunch.
 3. Run the deterministic reconnect/fault/console/shutdown matrix for an
    equivalent long-duration window on retail hardware and confirm bounded
    cancellation latency, no launch lock, no stale stopped target, and no

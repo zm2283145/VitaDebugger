@@ -607,8 +607,12 @@ comparator. The detailed record is
   authenticity.
 - Deterministic host stress exercises 1,000 reconnect/shutdown generations per
   run while three protocol/fault workers and a console-pressure producer race
-  the production gates. Long-duration-equivalent validation on retail hardware,
-  including real socket cancellation timing, is still pending.
+  the production gates. A separate production-translation-unit regression
+  repeats 100 ACK/no-ack stopped-peer resets and proves listener generation
+  recovery. A 2026-09-20 retail run found that a raw blocking receive did not
+  wake after `SO_LINGER` RST; packet I/O now polls nonblocking with exact socket-
+  generation cancellation, but the hardware retry and long-duration-equivalent
+  cancellation/soak matrix remain pending.
 
 ## Documentation map
 
