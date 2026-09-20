@@ -363,8 +363,8 @@ static uint32_t uvdb_protocol_owner_for_thread(SceUID id)
 {
     /* Vita thread IDs are nonzero handles. Retain a deterministic nonzero
      * fallback so an unexpected syscall failure cannot bypass serialization. */
-    uint32_t owner = (uint32_t)id;
-    return owner ? owner : UINT32_MAX;
+    uint32_t owner = (uint32_t)id & UINT32_C(0x7fffffff);
+    return owner ? owner : UINT32_C(0x7fffffff);
 }
 
 static void uvdb_note_io_failure(void)

@@ -46,7 +46,7 @@ This distinction is important: “implemented” does not automatically mean
 
 | Area | Hardware-validated on retail 3.65 | Experimental or unavailable |
 | --- | --- | --- |
-| Application debugger | GDB over TCP, up to 32 ARM/Thumb software breakpoints (`Z0`), source/function breakpoints, faults, registers, stack/memory access, live variable changes, practical stepping, detach/reconnect, Ctrl-C, bounded console output, read-only monitor commands | Some uncommon PC-writing and privileged instructions fail closed; long fault/reconnect stress is still in progress |
+| Application debugger | GDB over TCP, up to 32 ARM/Thumb software breakpoints (`Z0`), source/function breakpoints, faults, registers, stack/memory access, live variable changes, practical stepping, detach/reconnect, Ctrl-C, bounded console output, read-only monitor commands; deterministic host stress covers 1,000 concurrent reconnect generations per run | Some uncommon PC-writing and privileged instructions fail closed; equivalent long-duration fault/reconnect stress on retail hardware is still pending |
 | Kernel-assisted debugger | Caller-process thread inventory, lease-protected all-stop, late-thread reconciliation, watchdog recovery, selected foreign-thread core-register reads, exception-thread R0/CPSR writes, optional read-only VFP snapshots | Foreign-thread core/VFP writes are disabled; VFP reads use an undocumented, opt-in boundary; arbitrary scheduler-locked foreign-thread stepping is not complete |
 | Breakpoint hardware | Read-only comparator inventory | **Hardware breakpoints and watchpoints are unavailable on the tested retail hardware.** GDB does not advertise `Z1`-`Z4`; guarded probes did not produce a safely returning comparator-access path |
 | User-mode profiler | Named zones/counters, frames, memory and known-thread snapshots, bounded name dictionary, loss accounting, TCP capture, decoded JSON, and Chrome Trace/Perfetto export | Arbitrary thread PC/call-stack sampling, true GPU timestamps, and a dedicated desktop GUI remain pending |
@@ -537,7 +537,8 @@ make -C profiler vita-probe
   `profiler/build/vita-probe/vitaprofiler-probe.vpk`; it does not require the
   kernel companion.
 - `make host-tests` covers the host-testable RSP, lifecycle, kernel-boundary,
-  profiler, symbol, console, and attach scaffolds.
+  profiler, symbol, console, and attach scaffolds, including forced
+  library-only and kernel-assisted production-translation-unit variants.
 
 The isolated [VS Code sample](examples/vscode-debug-demo/README.md) turns F5
 into build, signed deployment, launch, installed-build verification, live-ASLR
@@ -604,8 +605,10 @@ comparator. The detailed record is
 - The exact installed VPK and retained unstripped ELF must match or symbols may
   be wrong. The verified-build workflow checks equality, not publisher
   authenticity.
-- Long-running reconnect, shutdown, multithread, and fault stress testing is
-  still in progress.
+- Deterministic host stress exercises 1,000 reconnect/shutdown generations per
+  run while three protocol/fault workers and a console-pressure producer race
+  the production gates. Long-duration-equivalent validation on retail hardware,
+  including real socket cancellation timing, is still pending.
 
 ## Documentation map
 

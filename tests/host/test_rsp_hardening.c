@@ -95,6 +95,48 @@ static void test_frames(void)
           uvdb_rsp_frame_should_nack(&frame, 0),
           "discard oversized unterminated payload");
 
+    static const char escaped_markers[] = {
+        '$', 'q', '}', 0x04, '}', 0x03, '#', '7', '2',
+    };
+    check(uvdb_rsp_scan_frame(
+              escaped_markers, sizeof(escaped_markers), 8u,
+              &frame) == UVDB_RSP_FRAME_COMPLETE &&
+          frame.payload_size == 5u &&
+          frame.consumed_size == sizeof(escaped_markers),
+          "escaped frame markers do not terminate or resynchronize");
+    static const char truncated_escape[] = "$q}";
+    check(uvdb_rsp_scan_frame(
+              truncated_escape, sizeof(truncated_escape) - 1u, 8u,
+              &frame) == UVDB_RSP_FRAME_INCOMPLETE &&
+          frame.consumed_size == 0u,
+          "trailing escape retains an incomplete frame");
+    static const char escaped_hash_without_terminator[] = "$}#";
+    check(uvdb_rsp_scan_frame(
+              escaped_hash_without_terminator,
+              sizeof(escaped_hash_without_terminator) - 1u, 8u,
+              &frame) == UVDB_RSP_FRAME_INCOMPLETE &&
+          frame.consumed_size == 0u,
+          "escaped hash is payload rather than a checksum delimiter");
+
+    char maximum_frame[] = "$12345678#00";
+    unsigned int maximum_checksum = 0;
+    for(size_t i = 1u; i <= 8u; ++i)
+        maximum_checksum += (unsigned char)maximum_frame[i];
+    static const char digits[] = "0123456789abcdef";
+    maximum_frame[10] = digits[(maximum_checksum >> 4) & 0xfu];
+    maximum_frame[11] = digits[maximum_checksum & 0xfu];
+    check(uvdb_rsp_scan_frame(
+              maximum_frame, sizeof(maximum_frame) - 1u, 8u, &frame) ==
+              UVDB_RSP_FRAME_COMPLETE &&
+          frame.payload_size == 8u,
+          "accept exact maximum wire payload");
+    check(uvdb_rsp_scan_frame(
+              "$123456789#00", strlen("$123456789#00"), 8u, &frame) ==
+              UVDB_RSP_FRAME_DISCARD &&
+          frame.consumed_size == 10u &&
+          uvdb_rsp_frame_should_nack(&frame, 0),
+          "reject one byte above maximum wire payload");
+
     static const char corrupt_then_valid[] = "$m0,1#00$m0,1#fa";
     check(count_discard_nacks(
               corrupt_then_valid, sizeof(corrupt_then_valid) - 1u,

@@ -42,8 +42,37 @@ int uvdb_rsp_scan_frame(
     }
 
     size_t marker = 1u;
-    while(marker < input_size && bytes[marker] != '#')
+    int escaped = 0;
+    while(marker < input_size)
     {
+        if(escaped)
+        {
+            escaped = 0;
+            if(marker - 1u >= maximum_payload_size)
+            {
+                result.consumed_size = marker + 1u;
+                result.request_nack = 1u;
+                *frame = result;
+                return UVDB_RSP_FRAME_DISCARD;
+            }
+            ++marker;
+            continue;
+        }
+        if(bytes[marker] == '#')
+            break;
+        if(bytes[marker] == '}')
+        {
+            escaped = 1;
+            if(marker - 1u >= maximum_payload_size)
+            {
+                result.consumed_size = marker + 1u;
+                result.request_nack = 1u;
+                *frame = result;
+                return UVDB_RSP_FRAME_DISCARD;
+            }
+            ++marker;
+            continue;
+        }
         /* A new start marker unambiguously supersedes an incomplete frame. */
         if(bytes[marker] == '$')
         {
