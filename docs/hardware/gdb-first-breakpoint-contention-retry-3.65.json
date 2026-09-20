@@ -1,0 +1,100 @@
+{
+  "artifacts": {
+    "elf": {
+      "sha256": "4a6c8ef908413a76a43372f78039bc4c2bea561ad471664330bd32bacf7f31fc",
+      "size_bytes": 561152
+    },
+    "kernel_plugin": {
+      "sha256": "d7553a52a458b38caa9b0b8074028f6150ae1db2dd223c3414e610f2b8c7f942",
+      "size_bytes": 11282
+    },
+    "packaged_eboot": {
+      "sha256": "555fcc242f495765a1294d7fa7285b0b4331c75bbae2737ab519da31d8d06418",
+      "size_bytes": 645214
+    },
+    "vpk": {
+      "sha256": "dfb923d01fce5b580ee68182a2abfc9eb2e4243c448cf87a038fcd83d4a0aa36",
+      "size_bytes": 267205
+    }
+  },
+  "build": {
+    "commit": "3e8e2acf986fe9734fc781ca5bc6d36452c9ef00",
+    "kernel_plugin_changed_by_fix": false
+  },
+  "evidence": {
+    "complete_mi_record_count": 262,
+    "complete_mi_sha256": "008453f30d19f7794cd6d729df3c90adfe994a13684825479819557828cd7a60",
+    "console_log_sha256": "5c52289e0eeb7f6b0d881cc693f5ef6be5515f713b0919cc31dc8e0c699ca34d",
+    "raw_json_sha256": "c15dc557258a2833d08a512b55a582e0c959872b863666e2130d299d04b122c3"
+  },
+  "hardware": {
+    "device_class": "retail-handheld",
+    "firmware": "3.65",
+    "kernel_abi": "0x0001000e",
+    "kernel_capabilities": "0x8000091f",
+    "max_threads": 64
+  },
+  "observations": {
+    "admission": {
+      "fixture_threads": 4,
+      "software_breakpoints": 0,
+      "stop_session": "active-healthy",
+      "vfp_reads": "disabled"
+    },
+    "first_breakpoint": {
+      "address": "0x8105dab0",
+      "gdb_reason": "breakpoint-hit",
+      "gdb_thread": "1",
+      "hit_count": 1,
+      "result": "PASS",
+      "symbol": "step_target"
+    },
+    "generation_3": {
+      "breakpoint_match": false,
+      "callback_exit": 75,
+      "predecessor_invoked": false,
+      "predecessor_reason": "state-lock-contention",
+      "protocol_acquired": true,
+      "raw_pc": "0x8105dab0",
+      "state_lock": "BUSY",
+      "sticky_io_failure_set": false,
+      "stop_published": false,
+      "thread": "0x40010003"
+    },
+    "generation_4": {
+      "breakpoint_match": true,
+      "kernel_stop_result": 0,
+      "protocol_acquired": true,
+      "protocol_loop_entered": true,
+      "raw_pc": "0x8105dab0",
+      "reply_result": 0,
+      "signal": "SIGTRAP",
+      "state_lock": "ACQUIRED",
+      "status_query_dispatched": true,
+      "stop_published": true,
+      "stopped_operation_result": 0,
+      "thread": "0x40010003"
+    },
+    "qOffsets": {
+      "DataSeg": "0x81100000",
+      "TextSeg": "0x8105c000"
+    },
+    "scope": {
+      "abrupt_disconnect_cleanup": "NOT RUN",
+      "broader_stepping": "NOT RUN",
+      "controlled_renew_or_end_stop_injection": "NOT RUN",
+      "exclusive_sequence_fixtures": "NOT RUN",
+      "first_breakpoint_only": true,
+      "register_mutation": "NOT RUN"
+    }
+  },
+  "result": "PASS",
+  "rollback": {
+    "candidate_entry_count": 0,
+    "config_sha256": "f3b109b6fe6d89855fbe04f842180dab6e2657e92c7d2c8763780a4d18e576d3",
+    "old_entry_count": 1,
+    "old_plugin_sha256": "a6a7fb6058f9f07ebdd401d5ecfefecd2c0d5eb4f7e95943cb0aca88df995efd",
+    "rsp_port_open": false,
+    "test_title_running": false
+  }
+}

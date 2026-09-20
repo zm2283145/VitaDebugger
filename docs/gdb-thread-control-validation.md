@@ -19,8 +19,11 @@ exposed and recovered from the register-bank bug before any foreign thread was
 stepped; Phase 6 verified its user-library fix without changing the kernel
 companion. Phase 7 fixed GDB's ordinary hidden-breakpoint step-over `E16`, then
 verified ARM-state `MOV PC`, `LDMDB {..., PC}`, and `LDR PC` execution, clean
-detach, and reconnect. Controlled failure fixtures and longer stress runs
-now have deterministic host coverage but remain unrun on hardware. The larger
+detach, and reconnect. A focused Phase 8 also proved that unclaimed foreign
+state-lock contention leaves the first breakpoint callback retryable and that
+its redispatched callback publishes and replies successfully. Controlled
+failure fixtures and longer stress runs now have deterministic host coverage
+but remain unrun on hardware. The larger
 decoder matrix has pure host coverage; only the
 representative forms named in Phase 7 inherit that hardware result. Do not
 describe the entire thread-control work as fully promoted until every check
@@ -39,8 +42,10 @@ This roadmap increment has three deliberately separate evidence levels:
 - **Vita cross-built:** library-only, kernel-thread-control, and opt-in VFP
   configurations compile and package with the current VitaSDK. The new
   encoding tables are linked as data; dangerous forms are not executed.
-- **Hardware-proven:** only the Phase 1-7 results recorded below. This
-  increment has not contacted a Vita and adds no Phase 8 hardware claim.
+- **Hardware-proven:** the Phase 1-7 results recorded below plus the focused
+  Phase 8 first-breakpoint contention retry. Phase 8 did not exercise broader
+  stepping, register mutation, exclusive-sequence fixtures, abrupt disconnect,
+  or controlled renew/`EndStop` failure injection.
 
 Renewal failure is now published only when both the observed stop token and
 its monotonic generation still match. A delayed failure from a retired session
@@ -390,6 +395,38 @@ coverage but not a hardware fixture for every encoding. Arbitrary foreign-
 thread scheduler locking, controlled token-renew/end failures, injected memory
 faults, temporary-trap rollback, bounded exclusive-sequence stepping, and long
 stress runs remain separate gates.
+
+### Phase 8: first-breakpoint state-lock contention retry
+
+Passed in a single focused run on retail firmware 3.65. Commit `3e8e2acf`
+used VPK SHA-256
+`DFB923D01FCE5B580EE68182A2ABFC9EB2E4243C448CF87A038FCD83D4A0AA36`,
+ELF SHA-256
+`4A6C8EF908413A76A43372F78039BC4C2BEA561AD471664330BD32BACF7F31FC`,
+and the unchanged ABI `0x0001000e` kernel companion with SHA-256
+`D7553A52A458B38CAA9B0B8074028F6150AE1DB2DD223C3414E610F2B8C7F942`.
+Admission showed capabilities `0x8000091f`, 64 maximum threads, four fixture
+threads, a healthy stop session, VFP reads disabled, and zero software
+breakpoints.
+
+`qOffsets` returned `TextSeg=8105c000;DataSeg=81100000`. GDB inserted the only
+breakpoint at runtime `step_target` address `0x8105dab0` and continued.
+Retained callback generation 3 reached that address, acquired handoff, guard,
+session, and protocol ownership, then observed foreign state-lock contention.
+It found no predecessor, published no stop, and exited without setting sticky
+I/O failure. Generation 4 immediately re-entered at the same PC, acquired the
+state lock, matched the breakpoint, published `SIGTRAP`, completed kernel stop
+and stopped-operation admission, dispatched the queued status query, and sent
+the stop reply successfully. GDB received
+`*stopped,reason="breakpoint-hit"` at `step_target`.
+
+The gate then stopped by design. It did not run broader stepping, register
+mutation, exclusive-sequence fixtures, abrupt-disconnect recovery, or
+controlled renew/`EndStop` injection. After the title was killed, the exact
+original config and plugin were restored and reboot-verified, with one original
+entry, zero candidate entries, no running test title, and the RSP port closed.
+The structured record is
+[`hardware/gdb-first-breakpoint-contention-retry-3.65.json`](hardware/gdb-first-breakpoint-contention-retry-3.65.json).
 
 ## Deterministic foreign-worker step fixture
 

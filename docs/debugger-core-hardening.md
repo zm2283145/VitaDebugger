@@ -244,7 +244,13 @@ admission, but exited on the stale I/O failure before dispatching the buffered
 status query. The production-translation-unit host regression now reproduces
 those two callbacks and verifies that the unclaimed foreign-lock callback
 leaves the session retryable and that the second callback sends `T05`. This
-correction remains host-modeled until the same one-shot hardware gate passes.
+correction passed the same one-shot hardware gate on retail firmware 3.65:
+the first retained callback lost the foreign state-lock race without poisoning
+the session, the redispatched callback published `SIGTRAP`, completed kernel
+stop admission, dispatched the buffered status query, and sent the stop reply.
+This is evidence only for the focused first-breakpoint path; the broader
+stepping, register-mutation, disconnect, and controlled lease-failure matrix
+was not run.
 
 `monitor status` now retains the newest eight exception callback traces across
 client cleanup and reconnect. Each trace has a monotonic callback generation

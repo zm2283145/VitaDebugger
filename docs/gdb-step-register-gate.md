@@ -90,12 +90,14 @@ catching, or support for unmatched and otherwise unsafe exclusive sequences.
 
 ## Current roadmap increment
 
-The follow-on safety increment is host-modeled and Vita cross-built, but has no
-new hardware result. Host tests now cover trap partial writes, sync/read-back
+The follow-on safety increment is host-modeled and Vita cross-built. Its narrow
+foreign-lock contention correction has also passed the focused live-hardware
+gate described below. Host tests cover trap partial writes, sync/read-back
 failures, verification corruption, disconnect, competing ownership, exact
 original-byte retention, restoration retry, and stale retained target/module
-identity. Production still uses the unbound trap helper because a durable Vita
-target/module object provider has not been proven.
+identity; those broader additions remain unrun on hardware. Production still
+uses the unbound trap helper because a durable Vita target/module object
+provider has not been proven.
 
 The Vita fixture ELF now exports non-executed exact encoding tables for
 representative accepted ARM/Thumb branches, interworking, PC loads, and
@@ -211,7 +213,27 @@ recovery proved zero breakpoints and detached cleanly.
 The local correction keeps self-contention and predecessor-claimed exceptions
 fatal, but leaves an unclaimed foreign-lock callback retryable with its context
 unchanged. Its production-translation-unit regression reproduces both retained
-callbacks and requires the second one to dispatch `T05`. No new hardware result
-is claimed. The next hardware action, after independent review and explicit
-serialized approval, is the same first-breakpoint-only gate exactly once with
-fresh artifact hashes; broader stepping and register mutation remain blocked.
+callbacks and requires the second one to dispatch `T05`.
+
+The one-shot retest of commit `3e8e2acf` passed on retail firmware 3.65 with
+VPK
+`DFB923D01FCE5B580EE68182A2ABFC9EB2E4243C448CF87A038FCD83D4A0AA36`,
+ELF
+`4A6C8EF908413A76A43372F78039BC4C2BEA561AD471664330BD32BACF7F31FC`,
+and unchanged SKPRX
+`D7553A52A458B38CAA9B0B8074028F6150AE1DB2DD223C3414E610F2B8C7F942`.
+`qOffsets` reported `TextSeg=8105c000;DataSeg=81100000`; GDB inserted the
+single `step_target` breakpoint at `0x8105dab0`, continued, and received
+`*stopped,reason="breakpoint-hit"` at that address.
+
+Retained generation 3 reproduced foreign state-lock contention with no
+predecessor and exited without publication or sticky failure. Generation 4
+then acquired the state lock at the same PC, matched the breakpoint, published
+`SIGTRAP`, completed kernel stop and stopped-operation admission, dispatched
+the buffered status query, and sent the stop reply successfully. The structured
+result is
+[`hardware/gdb-first-breakpoint-contention-retry-3.65.json`](hardware/gdb-first-breakpoint-contention-retry-3.65.json).
+The run stopped at the first breakpoint. Broader stepping, register mutation,
+exclusive-sequence fixtures, abrupt-disconnect recovery, and controlled
+renew/`EndStop` injection were not run and remain blocked pending separate
+reviewed hardware gates.
