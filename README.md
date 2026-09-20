@@ -653,6 +653,12 @@ comparator. The detailed record is
   `x` markers with no other characters, so this is a runner validation defect,
   not evidence of target corruption. See
   [the retail record](docs/hardware/rsp-admission-confirmation-3.65.json).
+  The local follow-up now validates the exact 336-character legacy `g` shape:
+  core registers and CPSR must remain hexadecimal, while each byte in the
+  legacy FPA region may be either two hexadecimal nibbles or one complete
+  lowercase `xx` unavailable marker. Lone, mixed, misplaced, malformed, short,
+  and long forms remain rejected. The uncompleted matrix is still
+  hardware-unconfirmed.
 
 ## Documentation map
 

@@ -278,6 +278,17 @@ cases were not run and require a corrected runner plus separate hardware
 authorization. See
 [`rsp-admission-confirmation-3.65.json`](hardware/rsp-admission-confirmation-3.65.json).
 
+The local runner correction preserves that evidence as a fail-closed harness
+stop rather than relabeling it as a target failure. It requires the exact
+336-character legacy register-bank shape. The 16 core registers and CPSR are
+hexadecimal; each byte in the legacy FPA/FPS region is independently either a
+hexadecimal pair or the complete lowercase marker `xx`. A lone or misaligned
+`x`, a mixed `x`/hex pair, `xx` outside the unavailable region, invalid
+characters, and short, long, or odd-length replies all fail. Existing packet
+start, checksum syntax, checksum value, payload bound, and disconnect/reconnect
+sequencing remain unchanged. This corrected runner has local coverage but has
+not been rerun on hardware.
+
 Stop-token acquisition/recovery, thread-context snapshots, cache maintenance,
 and exception-slot replacement still execute inside the global state lock.
 Those calls protect coupled breakpoint/lease/handler invariants, and moving

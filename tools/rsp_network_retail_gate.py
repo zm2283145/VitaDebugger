@@ -24,6 +24,10 @@ class GateFailure(RuntimeError):
 
 MAX_RSP_PAYLOAD = 0x3FFFC
 MAX_CONSOLE_BYTES = 1024 * 1024
+CORE_REGISTER_BYTES = 16 * 4
+LEGACY_FPA_BYTES = (8 * 12) + 4
+CPSR_BYTES = 4
+LEGACY_G_REPLY_BYTES = CORE_REGISTER_BYTES + LEGACY_FPA_BYTES + CPSR_BYTES
 HEX_BYTES = frozenset(string.hexdigits.encode("ascii"))
 WINDOWS_FIONREAD = 0x4004667F
 
@@ -391,6 +395,27 @@ def require_hex_payload(
         raise GateFailure(f"{label}: response is not a bounded hex payload")
 
 
+def require_legacy_register_bank_payload(value: bytes, label: str) -> None:
+    expected_size = LEGACY_G_REPLY_BYTES * 2
+    if len(value) != expected_size:
+        raise GateFailure(
+            f"{label}: expected {expected_size} register characters, "
+            f"got {len(value)}"
+        )
+
+    unavailable_start = CORE_REGISTER_BYTES * 2
+    unavailable_end = unavailable_start + LEGACY_FPA_BYTES * 2
+    for offset in range(0, expected_size, 2):
+        pair = value[offset:offset + 2]
+        if pair[0] in HEX_BYTES and pair[1] in HEX_BYTES:
+            continue
+        if unavailable_start <= offset < unavailable_end and pair == b"xx":
+            continue
+        raise GateFailure(
+            f"{label}: invalid register byte at character {offset}"
+        )
+
+
 def expect_quiet(client: Rsp, seconds: float) -> None:
     client.set_timeout(seconds)
     try:
@@ -581,8 +606,10 @@ def run_matrix(args: argparse.Namespace, log: Transcript) -> dict[str, Any]:
             args.host, args.port, args.timeout, log, case)
         try:
             value, _ = client.request(command)
-            require_hex_payload(
-                value, case, minimum_bytes=4 if command == b"p0" else 34 * 4)
+            if command == b"g":
+                require_legacy_register_bank_payload(value, case)
+            else:
+                require_hex_payload(value, case, minimum_bytes=4)
             client.detach()
             return value
         except BaseException:
@@ -602,7 +629,7 @@ def run_matrix(args: argparse.Namespace, log: Transcript) -> dict[str, Any]:
     log.event("case_pass", case="disconnect-M")
 
     registers = reset_after_response("disconnect-g", b"g", None)
-    require_hex_payload(registers, "disconnect-g", minimum_bytes=34 * 4)
+    require_legacy_register_bank_payload(registers, "disconnect-g")
     verify_register_read("disconnect-g-verify", b"g")
     log.event("case_pass", case="disconnect-g")
 
@@ -615,8 +642,8 @@ def run_matrix(args: argparse.Namespace, log: Transcript) -> dict[str, Any]:
         args.host, args.port, args.timeout, log, "disconnect-G")
     try:
         current_registers, _ = current.request(b"g")
-        require_hex_payload(
-            current_registers, "disconnect-G current", minimum_bytes=34 * 4)
+        require_legacy_register_bank_payload(
+            current_registers, "disconnect-G current")
         response, _ = current.request(
             b"G" + current_registers, acknowledge_response=False)
         if response != b"OK":
