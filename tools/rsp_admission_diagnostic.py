@@ -51,7 +51,13 @@ def wait_debugger_ready(
             and current["listener"] >= 0
             and current["socket"] < 0
             and current["candidate"] < 0
+            and current["generation"] == 0
+            and current["owner"] == 0
+            and current["owner_epoch"] == 0
+            and current["connection_epoch"] == 0
+            and current["dropped_event_writes"] == 0
             and current["test_title_ready"]
+            and not current["target_stopped"]
             and not current["network_closing"]
         ):
             transcript.event("debugger_ready", snapshot=last_snapshot)
@@ -246,6 +252,11 @@ def main() -> int:
     parser.add_argument("--diagnostic-port", type=int, default=1235)
     parser.add_argument("--timeout", type=float, default=15.0)
     parser.add_argument("--ready-timeout", type=float, default=20.0)
+    parser.add_argument(
+        "--ready-only",
+        action="store_true",
+        help="verify pristine UDP readiness without opening TCP 1234",
+    )
     parser.add_argument("--transcript", required=True, type=Path)
     parser.add_argument("--summary", required=True, type=Path)
     args = parser.parse_args()
@@ -257,7 +268,20 @@ def main() -> int:
     transcript = Transcript(args.transcript)
     started = time.monotonic()
     try:
-        result = run(args, transcript)
+        if args.ready_only:
+            result = {
+                "format": "VITADEBUGGER-RSP-ADMISSION-READY-1",
+                "status": "PASS",
+                "tested_at": utc_now(),
+                "ready_snapshot": wait_debugger_ready(
+                    args.host,
+                    args.diagnostic_port,
+                    args.ready_timeout,
+                    transcript,
+                ),
+            }
+        else:
+            result = run(args, transcript)
         result["duration_seconds"] = time.monotonic() - started
         args.summary.write_text(
             json.dumps(result, indent=2, sort_keys=True) + "\n",

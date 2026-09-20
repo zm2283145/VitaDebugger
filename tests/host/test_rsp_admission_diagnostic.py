@@ -66,10 +66,12 @@ def snapshot(*, ready: bool = False, detached: bool = False) -> dict:
             "listener": 7 if ready or detached else -1,
             "socket": -1 if ready or detached else 9,
             "candidate": -1,
-            "owner": 0 if detached else 1,
-            "owner_epoch": 0 if detached else 1,
-            "connection_epoch": 1,
-            "target_stopped": not detached,
+            "generation": 0 if ready else 1,
+            "owner": 0 if ready or detached else 1,
+            "owner_epoch": 0 if ready or detached else 1,
+            "connection_epoch": 0 if ready else 1,
+            "dropped_event_writes": 0,
+            "target_stopped": not ready and not detached,
             "network_closing": False,
             "test_title_ready": ready,
         },
@@ -107,6 +109,27 @@ class AdmissionDiagnosticTests(unittest.TestCase):
             )
         self.assertTrue(result["current"]["test_title_ready"])
         self.assertEqual(query.call_count, 3)
+
+    def test_ready_rejects_snapshot_after_any_tcp_admission(self) -> None:
+        contaminated = snapshot(ready=True)
+        contaminated["current"]["connection_epoch"] = 1
+        responses = [contaminated, snapshot(ready=True)]
+        with (
+            mock.patch.object(
+                diagnostic.time, "monotonic",
+                side_effect=self.clock.monotonic,
+            ),
+            mock.patch.object(diagnostic.time, "sleep"),
+            mock.patch.object(
+                diagnostic, "query_snapshot",
+                side_effect=lambda *_args: responses.pop(0),
+            ) as query,
+        ):
+            result = diagnostic.wait_debugger_ready(
+                "10.1.1.217", 1235, 3.0, self.transcript
+            )
+        self.assertEqual(result["current"]["connection_epoch"], 0)
+        self.assertEqual(query.call_count, 2)
 
     def test_detach_retries_transient_misses_until_success(self) -> None:
         responses = [

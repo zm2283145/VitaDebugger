@@ -282,7 +282,10 @@ RSP request. Post-launch identity verification had opened TCP 1234 before the
 required UDP-ready marker, contaminating the admission sequence. That attempt
 is preserved as a procedural diagnostic failure rather than evidence about the
 target's second-admission behavior. Follow-up orchestration verifies installed
-identity without TCP contact until UDP readiness succeeds, and the UDP query
+identity without TCP contact until UDP readiness succeeds. The diagnostic
+CLI's `--ready-only` mode never opens TCP 1234 and requires a pristine epoch-0
+snapshot with no candidate, connected descriptor, generation, protocol owner,
+stopped target, network closing state, or dropped event writes. The UDP query
 transport records each timeout, transport error, and unexpected peer while
 retaining its bounded outer deadline.
 

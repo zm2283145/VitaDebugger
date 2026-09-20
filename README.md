@@ -683,8 +683,11 @@ comparator. The detailed record is
   post-launch identity check had already opened TCP 1234, violating the
   required UDP-ready-before-TCP ordering; the attempt is therefore a
   procedural diagnostic failure, not target evidence. Subsequent runs must
-  verify the installed eboot without probing TCP 1234, and UDP transport now
-  records each timeout, transport error, or unexpected peer. See
+  verify the installed eboot without probing TCP 1234. The diagnostic CLI's
+  `--ready-only` mode uses UDP exclusively and accepts only a pristine epoch-0
+  snapshot with no candidate, connection, owner, stopped state, or dropped
+  event writes. UDP transport records each timeout, transport error, or
+  unexpected peer. See
   [the attempt record](docs/hardware/rsp-second-admission-attempt-1-3.65.json).
   This
   instrumentation can prove or reject the suspected detach-to-immediate-
