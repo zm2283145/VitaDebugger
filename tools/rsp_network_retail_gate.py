@@ -99,10 +99,14 @@ class FailureTelemetryCapture:
         self.log = log
         self.result: dict[str, Any] | None = None
 
-    def capture(self, client: "Rsp", error: BaseException) -> None:
+    def _capture(
+        self,
+        case: str,
+        socket_open: bool,
+        error: BaseException,
+    ) -> None:
         if self.result is not None:
             return
-        socket_open = not client.closed and client.sock.fileno() >= 0
         try:
             snapshot = query_snapshot(
                 self.host, self.port, self.timeout, self.log)
@@ -120,7 +124,7 @@ class FailureTelemetryCapture:
                 "expected_epoch": self.expected_epoch,
                 "observed_epoch": epoch,
                 "socket_open_during_capture": socket_open,
-                "case": client.case,
+                "case": case,
                 "protocol_error": type(error).__name__,
                 "protocol_detail": str(error),
                 "snapshot": snapshot,
@@ -130,7 +134,7 @@ class FailureTelemetryCapture:
                 "status": "udp_unavailable",
                 "expected_epoch": self.expected_epoch,
                 "socket_open_during_capture": socket_open,
-                "case": client.case,
+                "case": case,
                 "telemetry_error": type(exc).__name__,
                 "telemetry_detail": str(exc),
             }
@@ -139,7 +143,7 @@ class FailureTelemetryCapture:
                 "status": "malformed_snapshot",
                 "expected_epoch": self.expected_epoch,
                 "socket_open_during_capture": socket_open,
-                "case": client.case,
+                "case": case,
                 "telemetry_error": type(exc).__name__,
                 "telemetry_detail": str(exc),
             }
@@ -148,11 +152,21 @@ class FailureTelemetryCapture:
                 "status": "telemetry_local_error",
                 "expected_epoch": self.expected_epoch,
                 "socket_open_during_capture": socket_open,
-                "case": client.case,
+                "case": case,
                 "telemetry_error": type(exc).__name__,
                 "telemetry_detail": str(exc),
             }
         self.log.event("failure_telemetry", **self.result)
+
+    def capture(self, client: "Rsp", error: BaseException) -> None:
+        self._capture(
+            client.case,
+            not client.closed and client.sock.fileno() >= 0,
+            error,
+        )
+
+    def capture_connect(self, case: str, error: BaseException) -> None:
+        self._capture(case, False, error)
 
 
 failure_telemetry: FailureTelemetryCapture | None = None
@@ -184,7 +198,11 @@ class Rsp:
             except OSError as exc:
                 last_error = exc
                 time.sleep(0.1)
-        raise GateFailure(f"{case}: could not connect within {timeout}s: {last_error}")
+        error = GateFailure(
+            f"{case}: could not connect within {timeout}s: {last_error}")
+        if failure_telemetry is not None:
+            failure_telemetry.capture_connect(case, error)
+        raise error
 
     def set_timeout(self, timeout: float) -> None:
         self.sock.settimeout(timeout)
@@ -775,8 +793,11 @@ def run_matrix(args: argparse.Namespace, log: Transcript) -> dict[str, Any]:
     first, _, _ = stopped_session(
         args.host, args.port, args.timeout, log, "second-owner-primary"
     )
-    second = Rsp(args.host, args.port, args.timeout, log, "second-owner-contender")
+    second: Rsp | None = None
     try:
+        second = Rsp(
+            args.host, args.port, args.timeout, log,
+            "second-owner-contender")
         second.send(frame(b"qSupported"))
         expect_quiet(second, 0.5)
         first.detach()
@@ -787,9 +808,11 @@ def run_matrix(args: argparse.Namespace, log: Transcript) -> dict[str, Any]:
             raise GateFailure("second owner did not acquire after primary detach")
         second.detach()
     except BaseException as exc:
-        capture_failure(second, exc)
+        if second is not None:
+            capture_failure(second, exc)
         first.close(reset=True)
-        second.close(reset=True)
+        if second is not None:
+            second.close(reset=True)
         raise
     log.event("case_pass", case="second-owner-exclusion")
     summary["cases"].append("second-owner-exclusion")
@@ -884,6 +907,59 @@ def run_matrix(args: argparse.Namespace, log: Transcript) -> dict[str, Any]:
     summary["shutdown_cycles"] = shutdown_cycles
     summary["cases"].append("bounded-reconnect-fault-console-soak")
     return summary
+
+
+def run_second_admission(
+    args: argparse.Namespace, log: Transcript
+) -> dict[str, Any]:
+    first, first_packet_size, first_offsets = stopped_session(
+        args.host, args.port, args.timeout, log,
+        "second-admission-primary",
+    )
+    try:
+        first.detach()
+    except BaseException:
+        first.close(reset=True)
+        raise
+
+    second, second_packet_size, second_offsets = stopped_session(
+        args.host, args.port, args.timeout, log,
+        "second-admission-secondary",
+    )
+    try:
+        if second_packet_size != first_packet_size:
+            raise GateFailure(
+                "PacketSize changed across immediate detach/reconnect")
+        if second_offsets != first_offsets:
+            raise GateFailure(
+                "qOffsets changed across immediate detach/reconnect")
+        second.detach()
+    except BaseException:
+        second.close(reset=True)
+        raise
+
+    snapshot = query_snapshot(
+        args.host, args.diagnostic_port, min(args.timeout, 3.0), log)
+    observed_epoch = snapshot["current"]["connection_epoch"]
+    if args.expected_epoch is not None and observed_epoch != args.expected_epoch:
+        raise GateFailure(
+            f"second admission epoch {observed_epoch} != "
+            f"{args.expected_epoch}")
+    if snapshot["current"]["dropped_event_writes"]:
+        raise GateFailure("second admission telemetry dropped an event write")
+    log.event(
+        "case_pass",
+        case="second-admission",
+        connection_epoch=observed_epoch,
+        packet_size=second_packet_size,
+        offsets=second_offsets,
+    )
+    return {
+        "cases": ["second-admission"],
+        "packet_size": second_packet_size,
+        "offsets": second_offsets,
+        "final_snapshot": snapshot,
+    }
 
 
 def run_rst_sentinel(args: argparse.Namespace, log: Transcript) -> dict[str, Any]:
@@ -1123,7 +1199,13 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "phase",
-        choices=("rst-sentinel", "matrix", "receive-shutdown", "send-shutdown"),
+        choices=(
+            "second-admission",
+            "rst-sentinel",
+            "matrix",
+            "receive-shutdown",
+            "send-shutdown",
+        ),
     )
     parser.add_argument("--host", required=True, type=numeric_ipv4)
     parser.add_argument("--port", type=int, default=1234)
@@ -1137,7 +1219,7 @@ def main() -> int:
     parser.add_argument("--idle-gap", type=float, default=0.5)
     parser.add_argument("--reset-gap", type=float, default=0.25)
     parser.add_argument("--shutdown-interval", type=int, default=10)
-    parser.add_argument("--shutdown-pause", type=float, default=1.0)
+    parser.add_argument("--shutdown-pause", type=float, default=2.0)
     parser.add_argument("--title-id", default="SLRS00001")
     parser.add_argument("--repo", required=True, type=Path)
     parser.add_argument("--elf", required=True, type=Path)
@@ -1185,7 +1267,9 @@ def main() -> int:
         log,
     )
     try:
-        if args.phase == "rst-sentinel":
+        if args.phase == "second-admission":
+            result = run_second_admission(args, log)
+        elif args.phase == "rst-sentinel":
             result = run_rst_sentinel(args, log)
         elif args.phase == "matrix":
             result = run_matrix(args, log)

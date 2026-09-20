@@ -265,7 +265,11 @@ stale exception or protocol ownership. The lifecycle runner now captures a
 configured expected epoch from inside the failing RSP request while its socket
 is still open. It records expected, stale, advanced, malformed, bounded UDP
 miss, dropped-event, and local telemetry failures separately from the original
-protocol error. Production-TU regressions cover immediate and delayed second
+protocol error. A dedicated `second-admission` phase performs only
+`qSupported`/`qOffsets`/detach followed immediately by replacement
+`qSupported`/`qOffsets`/detach; it cannot fall through into the disconnect or
+soak matrix. Connect failures also retrieve bounded telemetry without claiming
+an open RSP socket. Production-TU regressions cover immediate and delayed second
 admission, prior-epoch terminal events arriving after the next epoch begins,
 owner/generation normalization, stale-event suppression, writer contention,
 and nested exception rejection. The source trace makes a detach-to-immediate-

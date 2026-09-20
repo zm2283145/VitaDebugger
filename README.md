@@ -674,9 +674,13 @@ comparator. The detailed record is
   numeric IPv4 target and captures the expected epoch over UDP from inside the
   failing RSP request, before caller cleanup can close the connected socket.
   Expected, stale, advanced, malformed, unavailable, and locally failed
-  telemetry outcomes remain distinct. This instrumentation can prove or reject
-  the suspected detach-to-immediate-reconnect ownership race, but the existing
-  hardware evidence does not yet justify a production synchronization change.
+  telemetry outcomes remain distinct. A dedicated `second-admission` runner
+  phase performs exactly two `qSupported`/`qOffsets` sessions separated by a
+  clean detach and cannot continue into disconnect, shutdown, or soak cases.
+  Connect failures also trigger bounded telemetry retrieval. This
+  instrumentation can prove or reject the suspected detach-to-immediate-
+  reconnect ownership race, but the existing hardware evidence does not yet
+  justify a production synchronization change.
 
 ## Documentation map
 

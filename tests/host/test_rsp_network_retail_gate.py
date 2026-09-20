@@ -236,6 +236,77 @@ class FailureTelemetryTests(unittest.TestCase):
         captured_client = capture.calls[0][0]
         self.assertFalse(captured_client.closed)
 
+    def test_connect_failure_has_bounded_telemetry(self) -> None:
+        transcript = NullTranscript()
+        capture = gate.FailureTelemetryCapture(
+            "10.1.1.217", 1235, 1.0, 2, transcript)
+        with mock.patch.object(
+            gate,
+            "query_snapshot",
+            return_value={
+                "current": {
+                    "connection_epoch": 1,
+                    "dropped_event_writes": 0,
+                }
+            },
+        ):
+            capture.capture_connect(
+                "second-admission-secondary",
+                gate.GateFailure("connect deadline"),
+            )
+        self.assertEqual(capture.result["status"], "stale_epoch")
+        self.assertFalse(capture.result["socket_open_during_capture"])
+
+
+class SecondAdmissionPhaseTests(unittest.TestCase):
+    def tearDown(self) -> None:
+        gate.failure_telemetry = None
+
+    def test_phase_runs_only_two_detaching_sessions(self) -> None:
+        first = FakeClient([])
+        second = FakeClient([])
+        calls = []
+
+        def stopped(*_args, **_kwargs):
+            calls.append(_args[4])
+            if len(calls) == 1:
+                return first, 0x3FFFC, {
+                    "text_segment": 0x81000000,
+                    "data_segment": 0x81001000,
+                }
+            self.assertTrue(first.detached)
+            return second, 0x3FFFC, {
+                "text_segment": 0x81000000,
+                "data_segment": 0x81001000,
+            }
+
+        args = SimpleNamespace(
+            host="10.1.1.217",
+            port=1234,
+            diagnostic_port=1235,
+            timeout=1.0,
+            expected_epoch=2,
+        )
+        telemetry = {
+            "current": {
+                "connection_epoch": 2,
+                "dropped_event_writes": 0,
+            }
+        }
+        with (
+            mock.patch.object(gate, "stopped_session", side_effect=stopped),
+            mock.patch.object(
+                gate, "query_snapshot", return_value=telemetry),
+        ):
+            result = gate.run_second_admission(args, NullTranscript())
+        self.assertEqual(
+            calls,
+            ["second-admission-primary", "second-admission-secondary"],
+        )
+        self.assertTrue(first.detached)
+        self.assertTrue(second.detached)
+        self.assertEqual(result["cases"], ["second-admission"])
+
 
 class MatrixSequencingComplete(RuntimeError):
     pass
