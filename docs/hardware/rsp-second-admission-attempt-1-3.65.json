@@ -1,0 +1,53 @@
+{
+  "schema": 1,
+  "tested_at": "2026-09-20T22:18:21.1299199Z",
+  "firmware": "3.65",
+  "device_class": "retail-handheld",
+  "target_source_commit": "9c7907f007371e053a30374721bbaa64642dde2d",
+  "runner_source_commit": "49f9e25d5d7075052e4c478981a28dd76948ce95",
+  "title_id": "SLRS00001",
+  "outcome": "hard-stop-explicit-ready-unavailable",
+  "artifacts": {
+    "freeze_manifest_sha256": "62cf28897f4ab876190a73205f18694f38334df3fdd2158573ce12209e5927c6",
+    "vpk_sha256": "fd3baf82659dcfb53752372e25bbf480f87d0e8a96fc70f6802f1d572010bbc9",
+    "elf_sha256": "82207147efcf5a4fbcf925f93b75c03b38a0fb8d4d3761308633be5791b3ece4",
+    "installed_eboot_sha256": "026f7a67c51d0bd299519ae02335c046578f38e8d6c45f6a748bad451acb4720",
+    "admission_runner_sha256": "25c89f6d8195ae7625f892e7b9640380dd4e6a798892cfc1786ef670fc94924c",
+    "lifecycle_runner_sha256": "23838f3a83655c4b748481613269df7ee288efc2e0b59cf27ea9d96e5c47d1e8",
+    "snapshot_module_sha256": "272d1d293d7a23e7822371c7ba2218d04b2950bcaaf79b8445b891cb665a389b",
+    "build_identity_sha256": "34c8a6d9397da0aa1deba6598668f86179c2adcbee4f3686a400d34f030593e1",
+    "kubridge_source_commit": "417ddde9a744eba98d769382c1c1372b8e119139",
+    "kubridge_stub_sha256": "fe05a117421b375d77bdc5102d5753f5dcf300e33176222688e490f2d03f5796"
+  },
+  "deployment": {
+    "performed": true,
+    "job": "9bff6faf5edc523b485bc2f6f78d2830",
+    "result": "success",
+    "installed_identity": "pass"
+  },
+  "explicit_ready": {
+    "status": "fail-closed",
+    "timeout_seconds": 20,
+    "udp_responses": 0,
+    "qSupported_sent": false
+  },
+  "procedure_anomaly": {
+    "post_launch_tcp_1234_probe": true,
+    "effect": "The probe created an RSP candidate before the required independent UDP-ready marker.",
+    "classification": "procedural-diagnostic-failure"
+  },
+  "rsp_cases_run": [],
+  "final_state": {
+    "recovery_status": "clean",
+    "companion_destroy_response": "Apps destroyed.",
+    "livearea_wait_seconds": 3,
+    "rsp_port_1234_open": false,
+    "diagnostic_port_1235_responding": false,
+    "test_title_running": false,
+    "kernel_configuration_changed": false,
+    "rebooted": false,
+    "device_ownership_released": true
+  },
+  "sealed_evidence_manifest_sha256": "b23575bb1dda33ced2c874d0ecc60fe9c8fbb5aa953448bf65da4997fd8d8180",
+  "remaining_gate": "Repeat the isolated two-session prerequisite with no post-launch TCP contact before UDP explicit readiness."
+}

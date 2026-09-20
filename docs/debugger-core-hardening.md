@@ -276,6 +276,16 @@ and nested exception rejection. The source trace makes a detach-to-immediate-
 reconnect exception-ownership overlap plausible, but no production wait or
 admission change is made until retail telemetry proves that exact transition.
 
+The first ABI v2 retail attempt installed and launched the exact frozen target
+but received no UDP-ready snapshot within its 20-second deadline, so it sent no
+RSP request. Post-launch identity verification had opened TCP 1234 before the
+required UDP-ready marker, contaminating the admission sequence. That attempt
+is preserved as a procedural diagnostic failure rather than evidence about the
+target's second-admission behavior. Follow-up orchestration verifies installed
+identity without TCP contact until UDP readiness succeeds, and the UDP query
+transport records each timeout, transport error, and unexpected peer while
+retaining its bounded outer deadline.
+
 The corrected diagnostic passed this boundary on retail 3.65. The out-of-band
 ready snapshot showed listener 88, no candidate or connected socket, the test
 title ready, and no closing/stopped/owner state. The first request then produced

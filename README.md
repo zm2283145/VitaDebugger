@@ -677,7 +677,16 @@ comparator. The detailed record is
   telemetry outcomes remain distinct. A dedicated `second-admission` runner
   phase performs exactly two `qSupported`/`qOffsets` sessions separated by a
   clean detach and cannot continue into disconnect, shutdown, or soak cases.
-  Connect failures also trigger bounded telemetry retrieval. This
+  Connect failures also trigger bounded telemetry retrieval. The first ABI v2
+  retail attempt stopped before RSP negotiation when no UDP-ready snapshot
+  arrived within 20 seconds. Its installed target identity was exact, but the
+  post-launch identity check had already opened TCP 1234, violating the
+  required UDP-ready-before-TCP ordering; the attempt is therefore a
+  procedural diagnostic failure, not target evidence. Subsequent runs must
+  verify the installed eboot without probing TCP 1234, and UDP transport now
+  records each timeout, transport error, or unexpected peer. See
+  [the attempt record](docs/hardware/rsp-second-admission-attempt-1-3.65.json).
+  This
   instrumentation can prove or reject the suspected detach-to-immediate-
   reconnect ownership race, but the existing hardware evidence does not yet
   justify a production synchronization change.

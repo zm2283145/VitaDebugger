@@ -29,6 +29,14 @@ class NullTranscript:
         pass
 
 
+class RecordingTranscript:
+    def __init__(self) -> None:
+        self.events = []
+
+    def event(self, name, **fields) -> None:
+        self.events.append((name, fields))
+
+
 class BrokenTranscript:
     def event(self, *_args, **_kwargs) -> None:
         raise OSError("disk full")
@@ -194,6 +202,41 @@ class AdmissionDiagnosticTests(unittest.TestCase):
                     "10.1.1.217", 1235, 1.0, BrokenTranscript()
                 )
         client.sendto.assert_not_called()
+
+    def test_query_records_each_transient_udp_miss(self) -> None:
+        client = mock.MagicMock()
+        client.__enter__.return_value = client
+        client.recvfrom.side_effect = snapshot_transport.socket.timeout()
+        transcript = RecordingTranscript()
+        with (
+            mock.patch.object(
+                snapshot_transport.socket, "socket", return_value=client
+            ),
+            mock.patch.object(
+                snapshot_transport.time, "monotonic",
+                side_effect=[0.0, 0.0, 0.0, 1.1],
+            ),
+        ):
+            with self.assertRaises(snapshot_transport.SnapshotUnavailable):
+                snapshot_transport.query_snapshot(
+                    "10.1.1.217", 1235, 1.0, transcript
+                )
+        self.assertEqual(
+            transcript.events,
+            [
+                (
+                    "diagnostic_query",
+                    {
+                        "peer": "10.1.1.217:1235",
+                        "request": "UVDB-ADMISSION-1",
+                    },
+                ),
+                (
+                    "diagnostic_miss",
+                    {"peer": "10.1.1.217:1235", "reason": "timeout"},
+                ),
+            ],
+        )
 
     def test_numeric_ipv4_rejects_hostname(self) -> None:
         with self.assertRaises(argparse.ArgumentTypeError):

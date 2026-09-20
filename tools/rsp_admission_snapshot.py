@@ -160,12 +160,27 @@ def query_snapshot(
                 client.sendto(REQUEST, (host, port))
                 data, peer = client.recvfrom(SNAPSHOT_SIZE + 1)
             except socket.timeout:
+                transcript.event(
+                    "diagnostic_miss", peer=f"{host}:{port}",
+                    reason="timeout",
+                )
                 continue
             except OSError as exc:
                 last_error = exc
+                transcript.event(
+                    "diagnostic_miss", peer=f"{host}:{port}",
+                    reason="transport_error",
+                    error=type(exc).__name__,
+                    detail=str(exc),
+                )
                 time.sleep(0.05)
                 continue
             if peer[0] != host:
+                transcript.event(
+                    "diagnostic_miss",
+                    peer=f"{peer[0]}:{peer[1]}",
+                    reason="unexpected_peer",
+                )
                 continue
             snapshot = parse_snapshot(data)
             transcript.event(
