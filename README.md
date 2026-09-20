@@ -658,7 +658,13 @@ comparator. The detailed record is
   legacy FPA region may be either two hexadecimal nibbles or one complete
   lowercase `xx` unavailable marker. Lone, mixed, misplaced, malformed, short,
   and long forms remain rejected. The uncompleted matrix is still
-  hardware-unconfirmed.
+  hardware-unconfirmed. A bounded completion attempt reused the exact installed
+  target and first passed explicit readiness, `qSupported`, `qOffsets`, the
+  full admission ledger, and detach. The immediately following matrix baseline
+  connected and completely sent another valid `qSupported`, but received no
+  ACK or response for 15 seconds. It stopped before `disconnect-g`, so the
+  corrected parser was not exercised on hardware and no later case ran. See
+  [the completion retry record](docs/hardware/rsp-network-completion-retry-3.65.json).
 
 ## Documentation map
 

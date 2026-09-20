@@ -289,6 +289,20 @@ start, checksum syntax, checksum value, payload bound, and disconnect/reconnect
 sequencing remain unchanged. This corrected runner has local coverage but has
 not been rerun on hardware.
 
+A separately authorized bounded completion attempt preserved the exact
+`07e1395` target and changed only the host runner from `e080f27`. Clean
+preflight streamed the installed eboot and matched its frozen size and SHA-256,
+so no redeployment occurred. After launch, the explicit-ready diagnostic again
+passed `qSupported`, `qOffsets`, the complete ordered admission ledger, detach,
+target resume, and replacement-listener publication. The matrix's immediately
+following baseline connection then completed TCP and sent a valid
+`qSupported`, but received neither ACK nor response within 15 seconds. The run
+stopped before `disconnect-g`; therefore it neither confirms nor contradicts
+the corrected `xx` parser. No failure snapshot was retrieved before cleanup,
+so the second connection's candidate, promotion, and owner state are unknown
+and no precise production cause is claimed. See
+[`rsp-network-completion-retry-3.65.json`](hardware/rsp-network-completion-retry-3.65.json).
+
 Stop-token acquisition/recovery, thread-context snapshots, cache maintenance,
 and exception-slot replacement still execute inside the global state lock.
 Those calls protect coupled breakpoint/lease/handler invariants, and moving

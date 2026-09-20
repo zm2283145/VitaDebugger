@@ -1,0 +1,89 @@
+{
+  "schema": 1,
+  "tested_at": "2026-09-20T20:54:13.435573Z",
+  "firmware": "3.65",
+  "device_class": "retail-handheld",
+  "target_source_commit": "07e1395ac3a500e85c52878d2a0f6bd057626e8a",
+  "runner_source_commit": "e080f27079903e0e300916100eb9d302bf87a0a8",
+  "title_id": "SLRS00001",
+  "outcome": "hard-stop-at-matrix-baseline-qsupported-timeout",
+  "artifacts": {
+    "freeze_manifest_sha256": "48a78bb8fcf65e78809db5e817aa7ae8402206ecb833c490e577078dfbc7f0e4",
+    "vpk_sha256": "e7612caf2c401f1686ab1ed5b1a3118cd9e168cde69d1ae2a500153e33f34ce8",
+    "elf_sha256": "072b994b50d4fe9d54f4f8779623ea450ebc33566f0c0076b78f089e67dd1b6e",
+    "installed_eboot_sha256": "2ba97fe5ecdb49e46564d125c354127f5011a56033f8d1cf67e4c83c56b62f24",
+    "admission_runner_sha256": "9360ca79b2cfbf1886b558b6133f7796b324ebe99900ae5153a9e2583abaf0a3",
+    "lifecycle_runner_sha256": "0860a007828ba11c23e18843d1a44ad926e94f06af69e76bcfe2314c645dfca5",
+    "kubridge_source_commit": "417ddde9a744eba98d769382c1c1372b8e119139",
+    "kubridge_stub_sha256": "fe05a117421b375d77bdc5102d5753f5dcf300e33176222688e490f2d03f5796"
+  },
+  "deployment": {
+    "performed": false,
+    "reason": "The clean-preflight FTP stream matched the frozen installed eboot size and SHA-256 exactly.",
+    "launch": "Launched."
+  },
+  "admission_setup": {
+    "status": "pass",
+    "explicit_ready": true,
+    "packet_size": 262140,
+    "text_segment": "0x81074000",
+    "data_segment": "0x810c0000",
+    "candidate_descriptor": 121,
+    "connected_descriptor": 121,
+    "generation": 1,
+    "protocol_owner": 1073807663,
+    "first_packet_size": 49,
+    "qSupported": "pass",
+    "qOffsets": "pass",
+    "detach": "pass",
+    "replacement_listener": 122
+  },
+  "accepted_prior_evidence": {
+    "commit": "e8f96fd81ccc530491ae927a16fb9f0e2f9150a9",
+    "ack_reset_sentinel": "pass",
+    "no_ack_reset_sentinel": "pass",
+    "sentinels_repeated": false
+  },
+  "completion_matrix": {
+    "status": "fail-closed",
+    "phase": "invariant-baseline",
+    "tcp_connect": "pass",
+    "qSupported_frame_send": "complete",
+    "target_ack": "timeout",
+    "target_response": "not-received",
+    "timeout_seconds": 15,
+    "qOffsets_reached": false,
+    "disconnect_g_reached": false,
+    "corrected_parser_exercised": false
+  },
+  "not_run": [
+    "disconnect-g",
+    "disconnect-p",
+    "disconnect-G",
+    "disconnect-P",
+    "second-owner protocol exclusion",
+    "detach/reconnect",
+    "50-cycle reconnect/fault/console/shutdown soak",
+    "connected receive cancellation",
+    "connected partial-send cancellation",
+    "intentional connected HUP shutdown",
+    "exception/memory gates",
+    "thread-control gates",
+    "KuBridge gates",
+    "profiler gates",
+    "foreign-register gates"
+  ],
+  "final_state": {
+    "recovery_status": "clean",
+    "companion_destroy_response": "Apps destroyed.",
+    "livearea_wait_seconds": 3,
+    "rsp_port_1234_open": false,
+    "diagnostic_port_1235_open": false,
+    "test_title_running": false,
+    "kernel_configuration_changed": false,
+    "rebooted": false,
+    "device_ownership_released": true
+  },
+  "sealed_evidence_manifest_sha256": "41849142b246a0520ae4a8254657a062324b2cbe014090337e808f83b1c5669a",
+  "remaining_gate": "Diagnose the intermittent post-detach second-connection pre-negotiation stall locally before any separately authorized hardware retry."
+}
