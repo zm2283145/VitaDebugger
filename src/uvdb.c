@@ -263,6 +263,30 @@ static size_t uvdb_max_buffer = UVDB_DEFAULT_MAX_BUFFER;
 static unsigned short uvdb_port = UVDB_DEFAULT_PORT;
 static volatile enum uvdb_state uvdb_state = UVDB_STATE_IDLE;
 static volatile int uvdb_io_failed;
+#ifdef UVDB_RAW_RECV_DIAGNOSTIC
+enum uvdb_raw_recv_phase
+{
+    UVDB_RAW_RECV_PHASE_NONE = 0,
+    UVDB_RAW_RECV_PHASE_REQUEST = 1,
+    UVDB_RAW_RECV_PHASE_RESPONSE_ACK = 2,
+};
+
+struct uvdb_raw_recv_diagnostic
+{
+    int captured;
+    int32_t result;
+    int32_t descriptor;
+    uint32_t generation;
+    uint32_t network_closing;
+    uint32_t phase;
+    uint32_t packet_io_active;
+    uint32_t target_stopped;
+    uint32_t protocol_owned;
+};
+
+static struct uvdb_raw_recv_diagnostic uvdb_raw_recv_diagnostic;
+static volatile uint32_t uvdb_raw_recv_phase;
+#endif
 static struct uvdb_exception_handlers uvdb_handlers;
 static struct uvdb_exception_guard uvdb_exception_guard;
 static struct uvdb_protocol_gate uvdb_protocol_gate;
@@ -521,6 +545,10 @@ static void uvdb_active_socket_snapshot(int* descriptor,
 static int uvdb_begin_packet_io(int* descriptor, uint32_t* generation);
 static int uvdb_packet_io_cancelled(int descriptor, uint32_t generation);
 static int uvdb_raw_io_would_block(ssize_t result);
+#ifdef UVDB_RAW_RECV_DIAGNOSTIC
+static void uvdb_capture_raw_recv_diagnostic(
+    ssize_t result, int descriptor, uint32_t generation);
+#endif
 
 struct buffer
 {
@@ -609,6 +637,11 @@ static size_t buffer_poll(struct buffer* buf, char** pos)
     for(;;)
     {
         ans = sceNetSyscallRecvfrom((void*)args);
+#ifdef UVDB_RAW_RECV_DIAGNOSTIC
+        if(ans <= 0)
+            uvdb_capture_raw_recv_diagnostic(
+                ans, active_socket, active_generation);
+#endif
         if(!uvdb_raw_io_would_block(ans))
             break;
         if(uvdb_packet_io_cancelled(active_socket, active_generation))
@@ -838,6 +871,85 @@ static int uvdb_raw_io_would_block(ssize_t result)
 {
     return (uint32_t)result == (uint32_t)SCE_NET_ERROR_EAGAIN;
 }
+
+#ifdef UVDB_RAW_RECV_DIAGNOSTIC
+static void uvdb_capture_raw_recv_diagnostic(
+    ssize_t result, int descriptor, uint32_t generation)
+{
+    int expected = 0;
+    if(!__atomic_compare_exchange_n(
+           &uvdb_raw_recv_diagnostic.captured, &expected, -1, 0,
+           __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+        return;
+    uvdb_raw_recv_diagnostic.result = (int32_t)result;
+    uvdb_raw_recv_diagnostic.descriptor = descriptor;
+    uvdb_raw_recv_diagnostic.generation = generation;
+    uvdb_raw_recv_diagnostic.network_closing =
+        (uint32_t)__atomic_load_n(
+            &uvdb_network_closing, __ATOMIC_ACQUIRE);
+    uvdb_raw_recv_diagnostic.phase =
+        __atomic_load_n(&uvdb_raw_recv_phase, __ATOMIC_ACQUIRE);
+    uvdb_raw_recv_diagnostic.packet_io_active =
+        (uint32_t)__atomic_load_n(
+            &uvdb_packet_io_active, __ATOMIC_ACQUIRE);
+    uvdb_raw_recv_diagnostic.target_stopped =
+        (uint32_t)__atomic_load_n(
+            &uvdb_target_stopped, __ATOMIC_ACQUIRE);
+    uvdb_raw_recv_diagnostic.protocol_owned =
+        (uint32_t)!uvdb_protocol_gate_is_idle(&uvdb_protocol_gate);
+    /* Raw exception-side syscalls deliberately avoid the public wrapper's
+     * thread-local errno path. Calling sceNetErrnoLoc() here would make the
+     * diagnostic change the safety boundary it is measuring. */
+    __atomic_store_n(
+        &uvdb_raw_recv_diagnostic.captured, 1, __ATOMIC_RELEASE);
+}
+
+static void uvdb_write_raw_recv_hex32(uint32_t value)
+{
+    char digits[8];
+    for(size_t index = 0; index < sizeof(digits); ++index)
+        digits[index] = int2hex(
+            (value >> (28u - (uint32_t)index * 4u)) & 15u);
+    buffer_write(&out_buf, digits, sizeof(digits));
+}
+
+static void uvdb_write_raw_recv_diagnostic(void)
+{
+    if(__atomic_load_n(
+           &uvdb_raw_recv_diagnostic.captured, __ATOMIC_ACQUIRE) != 1)
+    {
+        buffer_write(&out_buf, "captured=0", sizeof("captured=0") - 1u);
+        return;
+    }
+#define FIELD(name, value) \
+    do \
+    { \
+        buffer_write(&out_buf, name "=", sizeof(name "=") - 1u); \
+        uvdb_write_raw_recv_hex32((uint32_t)(value)); \
+    } while(0)
+    FIELD("captured", 1);
+    buffer_write(&out_buf, ";", 1u);
+    FIELD("result", uvdb_raw_recv_diagnostic.result);
+    buffer_write(&out_buf, ";", 1u);
+    FIELD("descriptor", uvdb_raw_recv_diagnostic.descriptor);
+    buffer_write(&out_buf, ";", 1u);
+    FIELD("generation", uvdb_raw_recv_diagnostic.generation);
+    buffer_write(&out_buf, ";", 1u);
+    FIELD("closing", uvdb_raw_recv_diagnostic.network_closing);
+    buffer_write(&out_buf, ";", 1u);
+    FIELD("phase", uvdb_raw_recv_diagnostic.phase);
+    buffer_write(&out_buf, ";", 1u);
+    FIELD("packet_io", uvdb_raw_recv_diagnostic.packet_io_active);
+    buffer_write(&out_buf, ";", 1u);
+    FIELD("target_stopped", uvdb_raw_recv_diagnostic.target_stopped);
+    buffer_write(&out_buf, ";", 1u);
+    FIELD("protocol_owned", uvdb_raw_recv_diagnostic.protocol_owned);
+    buffer_write(
+        &out_buf, ";errno_available=00000000",
+        sizeof(";errno_available=00000000") - 1u);
+#undef FIELD
+}
+#endif
 
 /* Shutdown wakes a descriptor owner without transferring close ownership.
  * Holding the short socket lock through the syscall prevents a simultaneous
@@ -1488,8 +1600,25 @@ static size_t recv_packet(char** data)
         }
 
         char* unused = NULL;
+#ifdef UVDB_RAW_RECV_DIAGNOSTIC
+        __atomic_store_n(
+            &uvdb_raw_recv_phase, UVDB_RAW_RECV_PHASE_REQUEST,
+            __ATOMIC_RELEASE);
+#endif
         if(!buffer_poll(&in_buf, &unused) && uvdb_has_io_failure())
+        {
+#ifdef UVDB_RAW_RECV_DIAGNOSTIC
+            __atomic_store_n(
+                &uvdb_raw_recv_phase, UVDB_RAW_RECV_PHASE_NONE,
+                __ATOMIC_RELEASE);
+#endif
             return 0;
+        }
+#ifdef UVDB_RAW_RECV_DIAGNOSTIC
+        __atomic_store_n(
+            &uvdb_raw_recv_phase, UVDB_RAW_RECV_PHASE_NONE,
+            __ATOMIC_RELEASE);
+#endif
     }
 }
 
@@ -1555,8 +1684,25 @@ static int send_packet(void)
         if(in_buf.size)
             buffer_popleft(&in_buf, in_buf.size);
         char* unused = NULL;
+#ifdef UVDB_RAW_RECV_DIAGNOSTIC
+        __atomic_store_n(
+            &uvdb_raw_recv_phase, UVDB_RAW_RECV_PHASE_RESPONSE_ACK,
+            __ATOMIC_RELEASE);
+#endif
         if(!buffer_poll(&in_buf, &unused) && uvdb_has_io_failure())
+        {
+#ifdef UVDB_RAW_RECV_DIAGNOSTIC
+            __atomic_store_n(
+                &uvdb_raw_recv_phase, UVDB_RAW_RECV_PHASE_NONE,
+                __ATOMIC_RELEASE);
+#endif
             return -1;
+        }
+#ifdef UVDB_RAW_RECV_DIAGNOSTIC
+        __atomic_store_n(
+            &uvdb_raw_recv_phase, UVDB_RAW_RECV_PHASE_NONE,
+            __ATOMIC_RELEASE);
+#endif
     }
 }
 
@@ -3380,6 +3526,10 @@ static void uvdb_main_loop(
             enable_no_ack =
                 !uvdb_console_transport_no_ack(&uvdb_console_transport);
         }
+#ifdef UVDB_RAW_RECV_DIAGNOSTIC
+        else if(IS("qUvdbRawRecvDiagnostic"))
+            uvdb_write_raw_recv_diagnostic();
+#endif
         else if(STARTSWITH("qRcmd,"))
         {
             enum uvdb_monitor_command command = UVDB_MONITOR_COMMAND_NONE;

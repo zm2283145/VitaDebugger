@@ -158,6 +158,17 @@ anomaly rule. Final recovery was clean; Companion returned `Apps destroyed.`,
 the LiveArea wait completed, and port 1234 was closed. See
 [`rsp-network-reset-retry-2-3.65.json`](hardware/rsp-network-reset-retry-2-3.65.json).
 
+For the next diagnostic build only, `UVDB_RAW_RECV_DIAGNOSTIC=1` records the
+first nonpositive raw stopped-state receive without changing its
+classification. The write-once record includes the raw result, descriptor,
+socket generation, closing state, request-versus-response-ACK phase,
+packet-I/O lifetime, stopped state, and protocol ownership. The diagnostic
+packet `qUvdbRawRecvDiagnostic` retrieves that record after reconnect.
+Exception-side instrumentation deliberately does not call `sceNetErrnoLoc()`:
+the raw syscall path avoids public-wrapper thread-local errno state, and
+observing it there would change the boundary under test. The option is disabled
+by default and is not a supported protocol extension.
+
 Stop-token acquisition/recovery, thread-context snapshots, cache maintenance,
 and exception-slot replacement still execute inside the global state lock.
 Those calls protect coupled breakpoint/lease/handler invariants, and moving

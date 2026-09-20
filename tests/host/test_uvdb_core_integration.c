@@ -6,6 +6,7 @@
 #include <unistd.h>
 
 #define UVDB_HOST_INTEGRATION_TEST 1
+#define UVDB_RAW_RECV_DIAGNOSTIC 1
 #include "../../src/uvdb.c"
 
 enum {
@@ -18,6 +19,10 @@ static int failures;
 static unsigned char fake_receive[1024];
 static size_t fake_receive_size;
 static size_t fake_receive_offset;
+static unsigned char fake_delayed_receive[512];
+static size_t fake_delayed_receive_size;
+static size_t fake_delayed_receive_offset;
+static int fake_delayed_receive_ready;
 static unsigned char fake_transmit[2048];
 static size_t fake_transmit_size;
 static int fake_framed_send_while_borrowed;
@@ -98,6 +103,7 @@ static void reset_core(void)
     memset(input_storage, 0, sizeof(input_storage));
     memset(output_storage, 0, sizeof(output_storage));
     memset(fake_receive, 0, sizeof(fake_receive));
+    memset(fake_delayed_receive, 0, sizeof(fake_delayed_receive));
     memset(fake_transmit, 0, sizeof(fake_transmit));
     for(size_t i = 0; i < sizeof(fake_target_memory); ++i)
         fake_target_memory[i] = (unsigned char)i;
@@ -105,6 +111,9 @@ static void reset_core(void)
     fake_pipe_size = 0;
     fake_receive_size = 0;
     fake_receive_offset = 0;
+    fake_delayed_receive_size = 0;
+    fake_delayed_receive_offset = 0;
+    fake_delayed_receive_ready = 0;
     fake_transmit_size = 0;
     fake_framed_send_while_borrowed = 0;
     fake_delay_calls = 0;
@@ -174,6 +183,11 @@ static void reset_core(void)
     uvdb_lifecycle_lock_state = 0;
     uvdb_socket_lifecycle_lock_state = 0;
     uvdb_clear_io_failure();
+    memset(&uvdb_raw_recv_diagnostic, 0,
+           sizeof(uvdb_raw_recv_diagnostic));
+    __atomic_store_n(
+        &uvdb_raw_recv_phase, UVDB_RAW_RECV_PHASE_NONE,
+        __ATOMIC_RELEASE);
     __atomic_store_n(&uvdb_packet_io_active, 0, __ATOMIC_RELEASE);
     __atomic_store_n(&uvdb_accept_active, 0, __ATOMIC_RELEASE);
     __atomic_store_n(&uvdb_network_closing, 0, __ATOMIC_RELEASE);
@@ -267,6 +281,48 @@ static void append_rsp_payload(
     fake_receive_size += payload_size + 4u;
     if(append_ack)
         fake_receive[fake_receive_size++] = '+';
+}
+
+static void append_delayed_rsp_payload(
+    const char* payload,
+    size_t payload_size,
+    int append_ack)
+{
+    check(payload != NULL &&
+              payload_size + 4u + (size_t)append_ack <=
+                  sizeof(fake_delayed_receive) -
+                      fake_delayed_receive_size,
+          "delayed RSP fixture fits fake receive storage");
+    if(!payload ||
+       payload_size + 4u + (size_t)append_ack >
+           sizeof(fake_delayed_receive) - fake_delayed_receive_size)
+        return;
+    unsigned int checksum = 0;
+    size_t start = fake_delayed_receive_size;
+    fake_delayed_receive[start] = '$';
+    memcpy(fake_delayed_receive + start + 1u, payload, payload_size);
+    for(size_t i = 0; i < payload_size; ++i)
+        checksum += (unsigned char)payload[i];
+    static const char digits[] = "0123456789abcdef";
+    fake_delayed_receive[start + 1u + payload_size] = '#';
+    fake_delayed_receive[start + 2u + payload_size] =
+        digits[(checksum >> 4) & 0xfu];
+    fake_delayed_receive[start + 3u + payload_size] =
+        digits[checksum & 0xfu];
+    fake_delayed_receive_size += payload_size + 4u;
+    if(append_ack)
+        fake_delayed_receive[fake_delayed_receive_size++] = '+';
+}
+
+static int transmitted_contains(const char* needle)
+{
+    size_t needle_size = strlen(needle);
+    if(!needle_size || needle_size > fake_transmit_size)
+        return 0;
+    for(size_t i = 0; i + needle_size <= fake_transmit_size; ++i)
+        if(!memcmp(fake_transmit + i, needle, needle_size))
+            return 1;
+    return 0;
 }
 
 static int wait_for_atomic_value(const int* value, int expected)
@@ -836,6 +892,85 @@ static void test_stopped_rst_reopens_listener(void)
     }
 }
 
+static void test_staggered_request_after_empty_poll(void)
+{
+    reset_core();
+    uvdb_socket = -1;
+    uvdb_state = UVDB_STATE_IDLE;
+    __atomic_store_n(&uvdb_target_stopped, 0, __ATOMIC_RELEASE);
+    queue_rsp_payload("qSupported", strlen("qSupported"), 1);
+    append_delayed_rsp_payload("qOffsets", strlen("qOffsets"), 1);
+    append_delayed_rsp_payload(
+        "qUvdbRawRecvDiagnostic",
+        strlen("qUvdbRawRecvDiagnostic"), 1);
+    append_delayed_rsp_payload("D", 1u, 1);
+    fake_accept_calls = 1;
+    fake_require_nonblocking_receive = 1;
+
+    const uintptr_t resume = UINT32_C(0x81005678);
+    const uint64_t no_trap = (uint64_t)resume << 32 | resume;
+    check(real_uvdb_enter(resume) != no_trap &&
+              uvdb_socket == FAKE_SOCKET,
+          "staggered request admits the stopped debugger");
+
+    struct fake_exception_thread operation = {
+        .context = {
+            .r0 = (uint32_t)resume,
+            .pc = (uint32_t)uvdb_trap_address(),
+            .SPSR = UINT32_C(0x60000010),
+            .exceptionType =
+                KU_KERNEL_EXCEPTION_TYPE_UNDEFINED_INSTRUCTION,
+        },
+    };
+    pthread_t stopped_thread;
+    check(pthread_create(
+              &stopped_thread, NULL,
+              run_fake_exception_handler, &operation) == 0,
+          "start staggered stopped packet wait");
+    check(wait_for_atomic_nonzero(
+              &fake_receive_would_block_count) == 0 &&
+              uvdb_socket == FAKE_SOCKET &&
+              !fake_connected_socket_closed &&
+              __atomic_load_n(&uvdb_packet_io_active,
+                              __ATOMIC_ACQUIRE) == 1 &&
+              __atomic_load_n(&uvdb_target_stopped,
+                              __ATOMIC_ACQUIRE) == 1 &&
+              !uvdb_protocol_gate_is_idle(&uvdb_protocol_gate),
+          "encoded EAGAIN preserves the live stopped connection");
+    check(__atomic_load_n(
+              &uvdb_raw_recv_diagnostic.captured,
+              __ATOMIC_ACQUIRE) == 1 &&
+              uvdb_raw_recv_diagnostic.result ==
+                  (int32_t)SCE_NET_ERROR_EAGAIN &&
+              uvdb_raw_recv_diagnostic.phase ==
+                  UVDB_RAW_RECV_PHASE_REQUEST &&
+              uvdb_raw_recv_diagnostic.descriptor == FAKE_SOCKET &&
+              uvdb_raw_recv_diagnostic.generation ==
+                  uvdb_socket_generation &&
+              !uvdb_raw_recv_diagnostic.network_closing &&
+              uvdb_raw_recv_diagnostic.packet_io_active &&
+              uvdb_raw_recv_diagnostic.target_stopped &&
+              uvdb_raw_recv_diagnostic.protocol_owned,
+          "diagnostic captures the first empty request poll");
+
+    __atomic_store_n(
+        &fake_delayed_receive_ready, 1, __ATOMIC_RELEASE);
+    check(pthread_join(stopped_thread, NULL) == 0,
+          "join staggered request session");
+    check(uvdb_socket < 0 &&
+              uvdb_state == UVDB_STATE_IDLE &&
+              !__atomic_load_n(&uvdb_target_stopped,
+                               __ATOMIC_ACQUIRE) &&
+              uvdb_protocol_gate_is_idle(&uvdb_protocol_gate) &&
+              !fake_nonblocking_receive_violation,
+          "delayed qOffsets and detach preserve lifecycle ownership");
+    check(transmitted_contains("captured=00000001") &&
+              transmitted_contains("result=fffffff5") &&
+              transmitted_contains("phase=00000001") &&
+              transmitted_contains("errno_available=00000000"),
+          "diagnostic query reports the captured empty poll");
+}
+
 struct fake_packet_io_thread {
     int send;
     int result;
@@ -1111,6 +1246,7 @@ int main(void)
     test_candidate_socket_cleanup();
     test_production_frame_boundaries_and_escapes();
     test_disconnect_command_matrix();
+    test_staggered_request_after_empty_poll();
     test_stopped_rst_reopens_listener();
     test_connected_io_cancellation_and_exclusion();
     test_connected_hup_during_shutdown();
@@ -1251,9 +1387,20 @@ ssize_t sceNetSyscallRecvfrom(void* arguments)
     }
     else if((int)args[0] == FAKE_SOCKET)
     {
-        source = fake_receive;
-        offset = &fake_receive_offset;
-        source_size = fake_receive_size;
+        if(fake_receive_offset < fake_receive_size ||
+           !__atomic_load_n(
+               &fake_delayed_receive_ready, __ATOMIC_ACQUIRE))
+        {
+            source = fake_receive;
+            offset = &fake_receive_offset;
+            source_size = fake_receive_size;
+        }
+        else
+        {
+            source = fake_delayed_receive;
+            offset = &fake_delayed_receive_offset;
+            source_size = fake_delayed_receive_size;
+        }
     }
     else
         return -1;
