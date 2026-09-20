@@ -59,6 +59,7 @@ static int fake_release_receive;
 static int fake_require_nonblocking_receive;
 static int fake_nonblocking_receive_violation;
 static int fake_receive_would_block_count;
+static ssize_t fake_receive_would_block_result;
 static int fake_peer_reset;
 static int fake_block_send;
 static int fake_send_blocked;
@@ -143,6 +144,7 @@ static void reset_core(void)
     fake_require_nonblocking_receive = 0;
     fake_nonblocking_receive_violation = 0;
     fake_receive_would_block_count = 0;
+    fake_receive_would_block_result = SCE_NET_ERROR_EAGAIN;
     fake_peer_reset = 0;
     fake_block_send = 0;
     fake_send_blocked = 0;
@@ -892,7 +894,8 @@ static void test_stopped_rst_reopens_listener(void)
     }
 }
 
-static void test_staggered_request_after_empty_poll(void)
+static void run_staggered_request_after_empty_poll(
+    ssize_t would_block_result, const char* label)
 {
     reset_core();
     uvdb_socket = -1;
@@ -906,12 +909,13 @@ static void test_staggered_request_after_empty_poll(void)
     append_delayed_rsp_payload("D", 1u, 1);
     fake_accept_calls = 1;
     fake_require_nonblocking_receive = 1;
+    fake_receive_would_block_result = would_block_result;
 
     const uintptr_t resume = UINT32_C(0x81005678);
     const uint64_t no_trap = (uint64_t)resume << 32 | resume;
     check(real_uvdb_enter(resume) != no_trap &&
               uvdb_socket == FAKE_SOCKET,
-          "staggered request admits the stopped debugger");
+          label);
 
     struct fake_exception_thread operation = {
         .context = {
@@ -926,7 +930,7 @@ static void test_staggered_request_after_empty_poll(void)
     check(pthread_create(
               &stopped_thread, NULL,
               run_fake_exception_handler, &operation) == 0,
-          "start staggered stopped packet wait");
+          label);
     check(wait_for_atomic_nonzero(
               &fake_receive_would_block_count) == 0 &&
               uvdb_socket == FAKE_SOCKET &&
@@ -936,12 +940,12 @@ static void test_staggered_request_after_empty_poll(void)
               __atomic_load_n(&uvdb_target_stopped,
                               __ATOMIC_ACQUIRE) == 1 &&
               !uvdb_protocol_gate_is_idle(&uvdb_protocol_gate),
-          "encoded EAGAIN preserves the live stopped connection");
+          label);
     check(__atomic_load_n(
               &uvdb_raw_recv_diagnostic.captured,
               __ATOMIC_ACQUIRE) == 1 &&
               uvdb_raw_recv_diagnostic.result ==
-                  (int32_t)SCE_NET_ERROR_EAGAIN &&
+                  (int32_t)would_block_result &&
               uvdb_raw_recv_diagnostic.phase ==
                   UVDB_RAW_RECV_PHASE_REQUEST &&
               uvdb_raw_recv_diagnostic.descriptor == FAKE_SOCKET &&
@@ -951,24 +955,53 @@ static void test_staggered_request_after_empty_poll(void)
               uvdb_raw_recv_diagnostic.packet_io_active &&
               uvdb_raw_recv_diagnostic.target_stopped &&
               uvdb_raw_recv_diagnostic.protocol_owned,
-          "diagnostic captures the first empty request poll");
+          label);
 
     __atomic_store_n(
         &fake_delayed_receive_ready, 1, __ATOMIC_RELEASE);
     check(pthread_join(stopped_thread, NULL) == 0,
-          "join staggered request session");
+          label);
     check(uvdb_socket < 0 &&
               uvdb_state == UVDB_STATE_IDLE &&
               !__atomic_load_n(&uvdb_target_stopped,
                                __ATOMIC_ACQUIRE) &&
               uvdb_protocol_gate_is_idle(&uvdb_protocol_gate) &&
               !fake_nonblocking_receive_violation,
-          "delayed qOffsets and detach preserve lifecycle ownership");
+          label);
+    char expected_result[32];
+    snprintf(
+        expected_result, sizeof(expected_result),
+        "result=%08x", (uint32_t)would_block_result);
     check(transmitted_contains("captured=00000001") &&
-              transmitted_contains("result=fffffff5") &&
+              transmitted_contains(expected_result) &&
               transmitted_contains("phase=00000001") &&
               transmitted_contains("errno_available=00000000"),
-          "diagnostic query reports the captured empty poll");
+          label);
+}
+
+static void test_staggered_request_after_empty_poll(void)
+{
+    run_staggered_request_after_empty_poll(
+        SCE_NET_ERROR_EAGAIN,
+        "encoded EAGAIN preserves delayed qOffsets and ownership");
+    run_staggered_request_after_empty_poll(
+        -(ssize_t)SCE_NET_EAGAIN,
+        "raw -EAGAIN preserves delayed qOffsets and ownership");
+}
+
+static void test_raw_would_block_classification(void)
+{
+    check(uvdb_raw_io_would_block(SCE_NET_ERROR_EAGAIN),
+          "encoded EAGAIN remains retryable");
+    check(uvdb_raw_io_would_block(-(ssize_t)SCE_NET_EAGAIN),
+          "raw negative EAGAIN is retryable");
+    check(uvdb_raw_io_would_block(-(ssize_t)SCE_NET_EWOULDBLOCK),
+          "raw negative EWOULDBLOCK is retryable");
+    check(!uvdb_raw_io_would_block(-1),
+          "generic raw -1 remains fatal");
+    check(!uvdb_raw_io_would_block(
+              -(ssize_t)(SCE_NET_EAGAIN + 1)),
+          "unrelated raw negative remains fatal");
 }
 
 struct fake_packet_io_thread {
@@ -1246,6 +1279,7 @@ int main(void)
     test_candidate_socket_cleanup();
     test_production_frame_boundaries_and_escapes();
     test_disconnect_command_matrix();
+    test_raw_would_block_classification();
     test_staggered_request_after_empty_poll();
     test_stopped_rst_reopens_listener();
     test_connected_io_cancellation_and_exclusion();
@@ -1421,7 +1455,7 @@ ssize_t sceNetSyscallRecvfrom(void* arguments)
             __atomic_add_fetch(
                 &fake_receive_would_block_count, 1,
                 __ATOMIC_RELAXED);
-            return SCE_NET_ERROR_EAGAIN;
+            return fake_receive_would_block_result;
         }
         return -1;
     }

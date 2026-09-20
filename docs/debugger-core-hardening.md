@@ -179,9 +179,14 @@ encoded value `0x80410123`. This proves the close was normal empty-poll
 misclassification, not `qOffsets` handling or a client framing error. A
 precise production fix can accept exactly `-SCE_NET_EAGAIN` in addition to the
 encoded constant without treating generic negative results as retryable. The
-diagnostic did not change that classification, and the stopped-RST and larger
-lifecycle matrix remain pending until a corrected build is separately
-authorized. See
+local follow-up now accepts exactly the encoded `SCE_NET_ERROR_EAGAIN`, raw
+`-SCE_NET_EAGAIN`, and raw `-SCE_NET_EWOULDBLOCK` forms. The Vita constants for
+the two raw errno names are both 35; generic `-1` and every unrelated negative
+result remain fatal. Production-TU regressions force both accepted forms
+through an empty poll followed by delayed `qOffsets`, and retain the 100-cycle
+reset/read-error cleanup and listener-reopen coverage. The corrected
+classification remains hardware-pending; the stopped-RST and larger lifecycle
+matrix require separate authorization. See
 [`rsp-raw-recv-diagnostic-3.65.json`](hardware/rsp-raw-recv-diagnostic-3.65.json).
 
 Stop-token acquisition/recovery, thread-context snapshots, cache maintenance,

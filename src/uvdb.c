@@ -869,7 +869,9 @@ static int uvdb_packet_io_cancelled(int descriptor, uint32_t generation)
 
 static int uvdb_raw_io_would_block(ssize_t result)
 {
-    return (uint32_t)result == (uint32_t)SCE_NET_ERROR_EAGAIN;
+    return (uint32_t)result == (uint32_t)SCE_NET_ERROR_EAGAIN ||
+           result == -(ssize_t)SCE_NET_EAGAIN ||
+           result == -(ssize_t)SCE_NET_EWOULDBLOCK;
 }
 
 #ifdef UVDB_RAW_RECV_DIAGNOSTIC
