@@ -517,6 +517,25 @@ static void test_exception_lock_contention_handoff(void)
         exception_handler;
     uvdb_handlers.previous[KU_KERNEL_EXCEPTION_TYPE_DATA_ABORT] =
         (uvdb_exception_handler_token)(uintptr_t)fake_predecessor;
+    uvdb_lock_owner = uvdb_lock_owner_token(FAKE_OTHER_THREAD);
+    exception_handler(&context);
+    check(fake_predecessor_calls == 1 &&
+              !memcmp(&context, &original_context, sizeof(context)) &&
+              uvdb_state == UVDB_STATE_ERROR &&
+              uvdb_has_io_failure(),
+          "foreign lock contention stays fatal when predecessor claims context");
+    check(uvdb_protocol_gate_is_idle(&uvdb_protocol_gate) &&
+              uvdb_exception_guard_is_idle(&uvdb_exception_guard) &&
+              uvdb_lock_owner == uvdb_lock_owner_token(FAKE_OTHER_THREAD),
+          "predecessor-owned contention preserves the foreign lock owner");
+    uvdb_lock_owner = 0;
+
+    reset_core();
+    __atomic_store_n(&uvdb_target_stopped, 0, __ATOMIC_RELEASE);
+    uvdb_handlers.self = (uvdb_exception_handler_token)(uintptr_t)
+        exception_handler;
+    uvdb_handlers.previous[KU_KERNEL_EXCEPTION_TYPE_DATA_ABORT] =
+        (uvdb_exception_handler_token)(uintptr_t)fake_predecessor;
     const uint32_t other_owner = uvdb_protocol_owner_for_thread(
         FAKE_OTHER_THREAD);
     check(uvdb_protocol_gate_try_acquire(
@@ -1883,6 +1902,105 @@ static void test_resume_handoff_accepts_immediate_breakpoint(void)
           "later reconnect diagnostics retain the prior breakpoint callback trace");
 }
 
+static void test_foreign_lock_contention_retries_breakpoint(void)
+{
+    const unsigned char original[sizeof(fake_target_code)] =
+        {0x11u, 0x22u, 0x33u, 0x44u};
+
+    reset_core();
+    memcpy(fake_target_code, original, sizeof(original));
+    check(breakpoint_insert_internal(
+              (uintptr_t)FAKE_CODE_ADDRESS,
+              sizeof(fake_target_code), 0) == 0,
+          "foreign-lock retry fixture arms a persistent breakpoint");
+    uvdb_claim_stop_controller();
+    check(uvdb_kernel_end_stop() == 0,
+          "foreign-lock retry fixture resumes the fake process");
+    uvdb_release_stop_controller();
+    __atomic_store_n(&uvdb_target_stopped, 0, __ATOMIC_RELEASE);
+
+    fake_thread = FAKE_THREAD;
+    uvdb_lock();
+    fake_thread = FAKE_OTHER_THREAD;
+    queue_receive("$?#3f+");
+    KuKernelExceptionContext context = {
+        .pc = FAKE_CODE_ADDRESS,
+        .SPSR = UINT32_C(0x60000010),
+        .exceptionType = KU_KERNEL_EXCEPTION_TYPE_UNDEFINED_INSTRUCTION,
+    };
+    const KuKernelExceptionContext original_context = context;
+    exception_handler(&context);
+
+    const struct uvdb_monitor_stop_trace* contention_trace =
+        &uvdb_stop_traces[0];
+    check(!memcmp(&context, &original_context, sizeof(context)) &&
+              fake_predecessor_calls == 0 &&
+              !uvdb_has_io_failure() &&
+              uvdb_state == UVDB_STATE_CONNECTED &&
+              fake_receive_offset == 0u &&
+              !__atomic_load_n(&uvdb_target_stopped, __ATOMIC_ACQUIRE),
+          "unclaimed foreign-lock contention preserves session and queued input");
+    check(contention_trace->generation == 1u &&
+              contention_trace->lock_result == UVDB_TRY_LOCK_BUSY &&
+              contention_trace->predecessor_reason ==
+                  UVDB_MONITOR_STOP_TRACE_PREDECESSOR_STATE_LOCK_CONTENTION &&
+              contention_trace->predecessor_invoked == 0 &&
+              contention_trace->publish_seq == 0u &&
+              contention_trace->exit_seq >
+                  contention_trace->predecessor_seq,
+          "first callback records foreign-lock deferral without publication");
+    check(uvdb_protocol_gate_is_idle(&uvdb_protocol_gate) &&
+              uvdb_exception_guard_is_idle(&uvdb_exception_guard) &&
+              uvdb_lock_owner == uvdb_lock_owner_token(FAKE_THREAD),
+          "foreign-lock deferral releases only callback-owned gates");
+
+    fake_thread = FAKE_THREAD;
+    uvdb_unlock();
+    fake_thread = FAKE_OTHER_THREAD;
+    exception_handler(&context);
+
+    struct uvdb_rsp_frame frame = {0};
+    size_t frame_offset =
+        fake_transmit_size && fake_transmit[0] == '+' ? 1u : 0u;
+    check(fake_transmit_size > frame_offset &&
+              uvdb_rsp_scan_frame(
+                  fake_transmit + frame_offset,
+                  fake_transmit_size - frame_offset,
+                  sizeof(fake_transmit), &frame) ==
+                  UVDB_RSP_FRAME_COMPLETE &&
+              frame.payload_size == strlen("T05thread:45;") &&
+              !memcmp(fake_transmit + frame_offset +
+                          frame.payload_offset,
+                      "T05thread:45;", frame.payload_size),
+          "second callback dispatches the queued stop reply");
+    const struct uvdb_monitor_stop_trace* retry_trace =
+        &uvdb_stop_traces[1];
+    check(retry_trace->generation == 2u &&
+              retry_trace->lock_result == UVDB_TRY_LOCK_ACQUIRED &&
+              retry_trace->publish_seq > retry_trace->lock_seq &&
+              retry_trace->classified_pc == FAKE_CODE_ADDRESS &&
+              retry_trace->signal == SIGTRAP &&
+              retry_trace->breakpoint_match == 1 &&
+              retry_trace->stop_begin_result == 0 &&
+              retry_trace->stopped_operation_result == 0 &&
+              retry_trace->status_query_seq >
+                  retry_trace->packet_ready_seq &&
+              retry_trace->reply_attempt_seq >
+                  retry_trace->status_query_seq &&
+              retry_trace->reply_result == 0 &&
+              retry_trace->exit_seq >
+                  retry_trace->reply_result_seq,
+          "second callback publishes and replies after foreign lock release");
+    check(memcmp(fake_target_code, original, sizeof(original)) == 0 &&
+              breakpoint_active_count() == 0 &&
+              uvdb_exception_guard_is_idle(&uvdb_exception_guard) &&
+              uvdb_protocol_gate_is_idle(&uvdb_protocol_gate) &&
+              !__atomic_load_n(&uvdb_lock_owner, __ATOMIC_ACQUIRE) &&
+              !__atomic_load_n(&uvdb_resume_handoff_owner,
+                               __ATOMIC_ACQUIRE),
+          "retry cleanup restores bytes and releases all callback ownership");
+}
+
 static void test_kernel_stop_failure_stress(void)
 {
     reset_core();
@@ -2101,6 +2219,7 @@ int main(void)
     test_detach_resume_publishes_handoff();
     test_fileio_resume_publishes_handoff();
     test_resume_handoff_accepts_immediate_breakpoint();
+    test_foreign_lock_contention_retries_breakpoint();
     test_kernel_stop_failure_stress();
     test_stale_lease_generation_and_disconnect_cleanup();
 #endif

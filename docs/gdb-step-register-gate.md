@@ -185,3 +185,33 @@ Stop after this focused diagnostic regardless of result. Do not run broader
 stepping or renew/`EndStop` injection until the retained trace proves which
 stage the application UDF reached and a separately reviewed fix passes this
 same first-stop gate.
+
+The retained-trace run of commit `65729f77` used VPK
+`F433236522EEA1EB2BD3FFF544AB1C3E62EA52996AC18CDB789D630837762738`,
+ELF
+`D8330CB637D8EF269B2FF59EC75B592D9B49AD08C0E992DFCA0912DEB1CFB709`,
+and the unchanged SKPRX
+`D7553A52A458B38CAA9B0B8074028F6150AE1DB2DD223C3414E610F2B8C7F942`.
+The baseline again passed with ABI `0x0001000e`, capabilities `0x8000091f`,
+64 maximum threads, four fixture threads, a healthy stop session, and zero
+software breakpoints. `qOffsets` reported `TextSeg=81070000` and the runtime
+`step_target` breakpoint was `0x81071ab0`.
+
+The single authorized continue timed out, but the retained records isolated
+the defect. Callback generation 5 reached the exact breakpoint PC, acquired
+handoff, guard, session, and protocol ownership, then lost the state-lock race
+and took predecessor reason 5 with no predecessor invoked. Its fatal fallback
+set the connection's sticky I/O failure. Generation 6 immediately re-entered
+at the same PC, acquired the state lock, matched the breakpoint, published
+`SIGTRAP`, completed kernel stop and stopped-operation admission, entered the
+protocol loop, and found the buffered packet. The sticky failure then made it
+exit before status-query dispatch or any stop-reply attempt. Abandoned-client
+recovery proved zero breakpoints and detached cleanly.
+
+The local correction keeps self-contention and predecessor-claimed exceptions
+fatal, but leaves an unclaimed foreign-lock callback retryable with its context
+unchanged. Its production-translation-unit regression reproduces both retained
+callbacks and requires the second one to dispatch `T05`. No new hardware result
+is claimed. The next hardware action, after independent review and explicit
+serialized approval, is the same first-breakpoint-only gate exactly once with
+fresh artifact hashes; broader stepping and register mutation remain blocked.

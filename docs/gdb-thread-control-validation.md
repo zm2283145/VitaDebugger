@@ -152,7 +152,12 @@ integration target exercises the real lease lifecycle for 2,048 deterministic
 cycles, including renew/`EndStop` injection and cleanup. Breakpoint-patch tests
 cover partial writes, verification corruption, disconnect, competing ownership,
 exact original-byte retention, stale target/module identity, and restoration
-retry. These are host tests. Phase 7 additionally exercises
+retry. The production core integration also reproduces a foreign state-lock
+owner rejecting the first breakpoint callback without a predecessor, then
+requires the unchanged-fault callback to acquire ownership, publish `SIGTRAP`,
+consume the queued status request, send `T05`, restore bytes, and release every
+owner without inheriting a sticky failure. Self-contention and
+predecessor-claimed contention remain fatal. These are host tests. Phase 7 additionally exercises
 successful target-memory reads, temporary-trap insertion, and retained-token
 integration live; the expanded injected rollback and identity matrix remains
 unrun on hardware. Also cross-build library-only, kernel-thread-control, and

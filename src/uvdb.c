@@ -5057,7 +5057,7 @@ static int uvdb_exception_session_claimable(void)
         !__atomic_load_n(&uvdb_shutdown_pending, __ATOMIC_SEQ_CST);
 }
 
-static void uvdb_handle_unclaimed_exception(
+static int uvdb_handle_unclaimed_exception(
     KuKernelExceptionContext* ctx,
     const struct uvdb_stop_trace_handle* trace_handle,
     enum uvdb_monitor_stop_trace_predecessor_reason reason)
@@ -5090,6 +5090,7 @@ static void uvdb_handle_unclaimed_exception(
             ctx->SPSR &= ~UINT32_C(32);
 #endif
     }
+    return invoked;
 }
 
 /* Fail an exception before global debugger-state ownership is available.
@@ -5112,6 +5113,37 @@ static void uvdb_fail_exception_without_state_lock(
         (void)uvdb_protocol_gate_release(
             &uvdb_protocol_gate, protocol_owner);
     uvdb_handle_unclaimed_exception(ctx, trace_handle, reason);
+    (void)uvdb_exception_guard_leave(
+        &uvdb_exception_guard, exception_type, guard_result);
+    uvdb_stop_trace_finish(trace_handle);
+}
+
+/* A foreign thread can briefly own uvdb_lock after a resume handoff has
+ * completed. Preserve predecessor priority, but when no predecessor claims
+ * the unchanged context, leave the connection healthy so the same fault can
+ * be dispatched again after that owner releases the lock. Self-contention and
+ * predecessor-owned exceptions retain the fatal path. */
+static void uvdb_defer_exception_for_foreign_lock(
+    KuKernelExceptionContext* ctx,
+    uint32_t exception_type,
+    int guard_result,
+    uint32_t protocol_owner,
+    const struct uvdb_stop_trace_handle* trace_handle)
+{
+    (void)uvdb_protocol_gate_release(
+        &uvdb_protocol_gate, protocol_owner);
+    int invoked = uvdb_handle_unclaimed_exception(
+        ctx, trace_handle,
+        UVDB_MONITOR_STOP_TRACE_PREDECESSOR_STATE_LOCK_CONTENTION);
+    int retryable = !invoked;
+#ifdef UVDB_EXPERIMENTAL_NESTED_FAULT_EXIT
+    retryable = 0;
+#endif
+    if(!retryable)
+    {
+        uvdb_note_io_failure();
+        __atomic_store_n(&uvdb_state, UVDB_STATE_ERROR, __ATOMIC_RELEASE);
+    }
     (void)uvdb_exception_guard_leave(
         &uvdb_exception_guard, exception_type, guard_result);
     uvdb_stop_trace_finish(trace_handle);
@@ -5226,8 +5258,9 @@ static void exception_handler(KuKernelExceptionContext* ctx)
      * may have interrupted this exact thread inside a uvdb_lock critical
      * section, in which case waiting would self-deadlock permanently. It is
      * also unsafe to inspect breakpoint or controller state before ownership
-     * is established. Fail closed and give the captured predecessor its one
-     * guarded opportunity to handle the original context. */
+     * is established. Preserve fatal handling for self-contention. For a
+     * foreign owner, offer the predecessor first; if none exists, returning
+     * the unchanged context safely retries the fault after ownership moves. */
     int lock_result = uvdb_try_lock_for_thread(exception_thread);
     uvdb_stop_trace_set_i32(
         &trace, &trace.trace->lock_result, lock_result);
@@ -5235,10 +5268,15 @@ static void exception_handler(KuKernelExceptionContext* ctx)
         &trace, &trace.trace->lock_seq);
     if(lock_result != UVDB_TRY_LOCK_ACQUIRED)
     {
-        uvdb_fail_exception_without_state_lock(
-            ctx, exception_type, guard_result, protocol_owner, 1,
-            &trace,
-            UVDB_MONITOR_STOP_TRACE_PREDECESSOR_STATE_LOCK_CONTENTION);
+        if(lock_result == UVDB_TRY_LOCK_BUSY)
+            uvdb_defer_exception_for_foreign_lock(
+                ctx, exception_type, guard_result, protocol_owner,
+                &trace);
+        else
+            uvdb_fail_exception_without_state_lock(
+                ctx, exception_type, guard_result, protocol_owner, 1,
+                &trace,
+                UVDB_MONITOR_STOP_TRACE_PREDECESSOR_STATE_LOCK_CONTENTION);
         return;
     }
 

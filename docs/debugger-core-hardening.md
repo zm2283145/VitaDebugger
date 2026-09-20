@@ -212,13 +212,15 @@ The global state lock now publishes the normalized owning thread ID rather than
 a Boolean. After claiming the protocol gate, a primary exception makes exactly
 one nonblocking owner-aware lock attempt before it inspects breakpoint or
 controller state or edits the exception context. `SELF` (the fault interrupted
-its own critical section) and `BUSY` both fail closed: protocol ownership is
-released, the original context is offered once to the captured predecessor,
-and the guard lifetime is retired. This removes the former permanent self-spin.
-Foreign-thread contention is intentionally conservative and can reject an
-otherwise genuine application fault; bounded retry is not enabled without a
-hardware proof that every foreign critical section is exception-safe and has a
-strict upper bound.
+its own critical section) remains fatal: protocol ownership is released, the
+original context is offered once to the captured predecessor, and the session
+records an I/O failure without spinning. `BUSY` also preserves that predecessor
+policy. If the predecessor claims the context, the session remains fail-closed.
+If no predecessor exists, the handler releases only its protocol/guard
+ownership and returns the unchanged context without poisoning the connection;
+the processor can then redispatch the same fault after the foreign lock owner
+releases it. This is not a timed lock wait and does not inspect breakpoint,
+controller, memory, or register state without owning the lock.
 Unlock is owner-checked and cannot clear a different thread's published lock.
 
 One bounded exception is the process-resume handoff. `EndStop` can make an
@@ -233,9 +235,16 @@ fail immediately. The integrated fake-kernel test deterministically interleaves
 a UDF callback into this window and verifies stop reporting, no predecessor
 handoff, exact breakpoint restoration on disconnect, and zero leaked gate or
 stop ownership. Two retail attempts nevertheless failed to report the first
-`step_target` breakpoint, including one with this handoff present. The handoff
-is therefore only host-modeled; it is not a sufficient hardware root-cause
-fix.
+`step_target` breakpoint, including one with this handoff present. A subsequent
+retained-trace run proved why: the application callback arrived after the
+handoff cleared but lost a new race with a foreign `uvdb_lock` owner. That
+first callback poisoned the transport; the immediately redispatched callback
+then acquired every owner, matched the breakpoint, and completed kernel stop
+admission, but exited on the stale I/O failure before dispatching the buffered
+status query. The production-translation-unit host regression now reproduces
+those two callbacks and verifies that the unclaimed foreign-lock callback
+leaves the session retryable and that the second callback sends `T05`. This
+correction remains host-modeled until the same one-shot hardware gate passes.
 
 `monitor status` now retains the newest eight exception callback traces across
 client cleanup and reconnect. Each trace has a monotonic callback generation
@@ -341,6 +350,10 @@ The focused host suite covers:
   the real exception handler returns without spinning, leaves the context and
   stopped state untouched, releases only ownership it acquired, and chains
   the predecessor exactly once;
+- foreign global-lock contention followed by an unchanged-fault redispatch,
+  proving the first callback does not poison an unclaimed session, a claimed
+  predecessor remains fatal, and the second callback publishes the breakpoint,
+  dispatches the queued status request, restores bytes, and releases ownership;
 - stop/start exception-tail interleaving, bounded restart timeout, immediate
   next-primary admission, socket-cancel-before-join ordering, stopped-state
   normalization only after patch obligations clear, and suppression of a
