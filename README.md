@@ -577,7 +577,7 @@ to another firmware or configuration.
 | ASLR and build identity | [Five-session record](docs/hardware/gdb-aslr-build-identity-3.65.json) | Installed main/user-module identity, mismatch rejection, relaunch symbol refresh, and source breakpoints passed |
 | GDB monitor/console | [Monitor record](docs/hardware/gdb-monitor-console-display-3.65.json) | Fixed read-only commands, state preservation, detach/reconnect, console statistics, and display metadata passed |
 | GDB client admission | [Admission record](docs/hardware/debugger-client-admission-retail-3.65.json) | Silent, HTTP, partial, and bad-checksum probes did not consume the listener; GDB Ctrl-C, detach/reconnect, and pending-candidate shutdown passed |
-| GDB RSP reset retry | [Stopped deployment record](docs/hardware/rsp-network-reset-retry-3.65.json) | The exact nonblocking-I/O candidate was frozen, but the retry stopped before package staging when VitaDevDeploy did not publish a fresh challenge; no RSP case was run |
+| GDB RSP reset retry | [First attempt](docs/hardware/rsp-network-reset-retry-3.65.json), [second attempt](docs/hardware/rsp-network-reset-retry-2-3.65.json) | The second exact-candidate attempt deployed and matched installed identity, but the ACK sentinel peer closed after `qOffsets`, before reset injection; the no-ack sentinel and remaining matrix did not run |
 | User-mode profiler | [13-check record](docs/hardware/profiler-name-dictionary-3.65.json) | Event order, zones, counters, snapshots, bounded pressure, encoding, names, and drop accounting passed without the kernel plugin |
 | Profiler TCP | [Transport record](docs/hardware/profiler-tcp-stream-retail-3.65.md) | Named capture, clean EOF, cancellation, forced disconnect, and recovery relaunch passed |
 | PMU mutation boundary | [Per-core record](docs/hardware/profiler-pmu-session-gate-3.65.md) | Fixed lane-5 software-increment transaction and exact snapshot restoration passed on application cores 0-2 |
@@ -614,9 +614,11 @@ comparator. The detailed record is
   wake after `SO_LINGER` RST; packet I/O now polls nonblocking with exact socket-
   generation cancellation. A retry from exact commit `f6bacc8` stopped before
   package staging because VitaDevDeploy did not publish a fresh challenge; no
-  RSP case ran, and cleanup returned to LiveArea with port 1234 closed. The
-  hardware retry and long-duration-equivalent cancellation/soak matrix
-  therefore remain pending.
+  RSP case ran. A second authorized attempt deployed the same frozen artifact
+  and matched its installed eboot, but the ACK sentinel peer closed immediately
+  after `qOffsets`, before fixture access or reset injection. Both attempts
+  cleaned up to LiveArea with port 1234 closed. The stopped-RST validation and
+  long-duration-equivalent cancellation/soak matrix therefore remain pending.
 
 ## Documentation map
 

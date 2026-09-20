@@ -1,0 +1,62 @@
+{
+  "schema": 1,
+  "tested_at": "2026-09-20T06:45:01.4941633Z",
+  "firmware": "3.65",
+  "device_class": "retail-handheld",
+  "source_commit": "f6bacc89635c706ad4bb6a725c2152751cc85485",
+  "title_id": "SLRS00001",
+  "outcome": "hard-stop-during-ack-sentinel",
+  "artifacts": {
+    "vpk_sha256": "87dd16541c4424dd3e3c23b95691e28f73306820088c787c1d97bf11cbf26f97",
+    "elf_sha256": "9d7521545cb541ce9f99d71961441efe452b0a163863ee8c6c90d33d3a38dee4",
+    "installed_eboot_sha256": "2ee3f10da4b6ae437475fcd01a486a42afc2e0dcada8ae8d115fcd105b089f92",
+    "kubridge_stub_sha256": "141e458f82166a8b8c04ae01c4533346cf11ceb6df8f940d002895420ac2ac01"
+  },
+  "deployment": {
+    "transport": "ftp",
+    "action": "install_launch",
+    "job": "e399bdfd4801042d19eec43a69f73222",
+    "manifest_sha256": "4e0ec28b146b158d4597833c9fd1a08c3fc18913880205dd0d3df88d05b96f0e",
+    "result_stage": "complete",
+    "result_code": 0,
+    "launch": "Launched.",
+    "installed_identity": "match"
+  },
+  "ack_sentinel": {
+    "status": "fail",
+    "duration_seconds": 0.0763225999835413,
+    "qSupported": "qXfer:features:read+;qXfer:libraries:read+;vContSupported+;QStartNoAckMode+;PacketSize=3fffc",
+    "last_request": "qOffsets",
+    "failure": "peer closed",
+    "fixture_preflight_reached": false,
+    "rst_injected": false,
+    "listener_reopen_tested": false
+  },
+  "not_run": [
+    "no-ack-stopped-wait-rst-sentinel",
+    "disconnect-after-m",
+    "disconnect-after-M",
+    "disconnect-after-g",
+    "disconnect-after-p",
+    "disconnect-after-G",
+    "disconnect-after-P",
+    "connected-receive-cancellation",
+    "connected-send-partial-send-cancellation",
+    "second-owner-protocol-exclusion",
+    "intentional-connected-HUP",
+    "detach-reconnect",
+    "50-cycle-reconnect-fault-console-shutdown-soak"
+  ],
+  "final_state": {
+    "recovery_status": "clean",
+    "companion_destroy_response": "Apps destroyed.",
+    "livearea_wait_seconds": 3,
+    "rsp_port_1234_open": false,
+    "test_title_running": false,
+    "kernel_configuration_changed": false,
+    "rebooted": false,
+    "device_ownership_released": true
+  },
+  "sealed_evidence_manifest_sha256": "a0c1ae2a0aa41fcd0b9851ede42f09d8dd3bbb65a04290ce8a25cebd16a739c3",
+  "remaining_gate": "Diagnose the pre-reset qOffsets close locally, then rerun both stopped-wait RST sentinels before the remaining matrix."
+}

@@ -146,6 +146,18 @@ Rerun the stopped RST, connected cancellation, owner exclusion,
 command-specific disconnect, and bounded soak matrix before claiming retail
 closure.
 
+A second authorized attempt reused the exact frozen `f6bacc8` artifacts after
+the user reported that the earlier challenge timeout coincided with another
+application installation. Signed deployment completed, launched `SLRS00001`,
+and the installed eboot matched the frozen identity. In the ACK sentinel,
+`qSupported` returned the expected feature list and `PacketSize=3fffc`, but the
+peer closed immediately after the client sent `qOffsets`. The harness had not
+resolved or accessed the writable fixture and had not injected RST. The no-ack
+sentinel and every downstream case were therefore skipped under the first-
+anomaly rule. Final recovery was clean; Companion returned `Apps destroyed.`,
+the LiveArea wait completed, and port 1234 was closed. See
+[`rsp-network-reset-retry-2-3.65.json`](hardware/rsp-network-reset-retry-2-3.65.json).
+
 Stop-token acquisition/recovery, thread-context snapshots, cache maintenance,
 and exception-slot replacement still execute inside the global state lock.
 Those calls protect coupled breakpoint/lease/handler invariants, and moving
@@ -304,8 +316,9 @@ The focused host suite covers:
    disconnects during `m`, `M`, `g`, `p`, `G`, and `P`. Resolve writable
    fixture addresses against the ELF PT_LOAD segment corresponding to live
    `DataSeg`, read the exact bytes first, and use an idempotent `M` payload.
-   The `f6bacc8` retry did not reach this gate because the signed-deployment
-   agent failed to publish a fresh challenge.
+   Neither `f6bacc8` retry reached fixture access: the first stopped at
+   deployment challenge acquisition, and the second peer-closed after
+   `qOffsets` in the ACK sentinel.
 2. Client admission, candidate cancellation, Ctrl-C, detach, and reconnect have
    passed on Vita. Host injection now covers connected receive/send
    cancellation, whole-protocol exclusion, an intentional connected HUP, and
