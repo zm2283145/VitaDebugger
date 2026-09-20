@@ -60,6 +60,10 @@ ifeq ($(UVDB_ADMISSION_DIAGNOSTIC),1)
 override CFLAGS += -DUVDB_ADMISSION_DIAGNOSTIC
 endif
 
+ifeq ($(UVDB_STARTUP_DIAGNOSTIC),1)
+override CFLAGS += -DUVDB_STARTUP_DIAGNOSTIC
+endif
+
 ifeq ($(UVDB_MONITOR_DISPLAY),1)
 override CFLAGS += -DUVDB_MONITOR_DISPLAY
 endif
@@ -140,9 +144,9 @@ HOST_CC_RUN ?= $(HOST_CC)
 HOST_PYTHON ?= python3
 endif
 
-.PHONY: host-tests host-test-rsp host-test-rsp-hardening host-test-uvdb-core-integration host-test-uvdb-core-integration-kernel host-test-memory-transaction host-test-protocol-gate host-test-exception-guard host-test-exception-handlers host-test-rsp-console host-test-register-bank host-test-thread-control host-test-monitor host-test-breakpoint-patch host-test-exclusive-step host-test-vfp-policy host-test-kernel-thread-mutation host-test-kernel-thread-mutation-provider host-test-kernel-pmu-session host-test-kernel-pmu-backend host-test-kernel-pmu-profiler-bridge host-test-kernel-pmu-profiler-real-events-disabled host-test-kernel-pmu-profiler-real-events host-test-kernel-pmu-profiler-safe-rearm host-test-pmu-failure-matrix host-test-pmu-profiler-gate-record host-test-pmu-lifecycle-gate-record host-test-pmu-thread-exit-gate-record host-test-pmu-session-probe-record host-test-thread-setter-resolver-record host-test-console-queue host-test-console-transport host-test-debugnet-lifecycle host-test-symbols host-test-vfp-lifecycle host-test-aslr-lifecycle host-test-live-gates host-test-target-xml host-test-admission-diagnostic host-test-rsp-network-retail-runner host-test-dipsw-probe-record host-test-dipsw-set-restore-record host-test-dipsw-dbgvcr-record host-test-profiler host-test-attach aslr-fixture
+.PHONY: host-tests host-test-rsp host-test-rsp-hardening host-test-uvdb-core-integration host-test-uvdb-core-integration-kernel host-test-memory-transaction host-test-protocol-gate host-test-exception-guard host-test-exception-handlers host-test-rsp-console host-test-register-bank host-test-thread-control host-test-monitor host-test-breakpoint-patch host-test-exclusive-step host-test-vfp-policy host-test-kernel-thread-mutation host-test-kernel-thread-mutation-provider host-test-kernel-pmu-session host-test-kernel-pmu-backend host-test-kernel-pmu-profiler-bridge host-test-kernel-pmu-profiler-real-events-disabled host-test-kernel-pmu-profiler-real-events host-test-kernel-pmu-profiler-safe-rearm host-test-pmu-failure-matrix host-test-pmu-profiler-gate-record host-test-pmu-lifecycle-gate-record host-test-pmu-thread-exit-gate-record host-test-pmu-session-probe-record host-test-thread-setter-resolver-record host-test-console-queue host-test-console-transport host-test-debugnet-lifecycle host-test-symbols host-test-vfp-lifecycle host-test-aslr-lifecycle host-test-live-gates host-test-target-xml host-test-admission-diagnostic host-test-rsp-startup-diagnostic host-test-rsp-network-retail-runner host-test-dipsw-probe-record host-test-dipsw-set-restore-record host-test-dipsw-dbgvcr-record host-test-profiler host-test-attach aslr-fixture
 
-host-tests: host-test-rsp host-test-rsp-hardening host-test-uvdb-core-integration host-test-uvdb-core-integration-kernel host-test-memory-transaction host-test-protocol-gate host-test-exception-guard host-test-exception-handlers host-test-rsp-console host-test-register-bank host-test-thread-control host-test-monitor host-test-breakpoint-patch host-test-exclusive-step host-test-vfp-policy host-test-kernel-thread-mutation host-test-kernel-thread-mutation-provider host-test-kernel-pmu-session host-test-kernel-pmu-backend host-test-kernel-pmu-profiler-bridge host-test-kernel-pmu-profiler-real-events-disabled host-test-kernel-pmu-profiler-real-events host-test-kernel-pmu-profiler-safe-rearm host-test-pmu-failure-matrix host-test-pmu-profiler-gate-record host-test-pmu-lifecycle-gate-record host-test-pmu-thread-exit-gate-record host-test-pmu-session-probe-record host-test-thread-setter-resolver-record host-test-console-queue host-test-console-transport host-test-debugnet-lifecycle host-test-symbols host-test-vfp-lifecycle host-test-aslr-lifecycle host-test-live-gates host-test-target-xml host-test-admission-diagnostic host-test-rsp-network-retail-runner host-test-dipsw-probe-record host-test-dipsw-set-restore-record host-test-dipsw-dbgvcr-record host-test-profiler host-test-attach
+host-tests: host-test-rsp host-test-rsp-hardening host-test-uvdb-core-integration host-test-uvdb-core-integration-kernel host-test-memory-transaction host-test-protocol-gate host-test-exception-guard host-test-exception-handlers host-test-rsp-console host-test-register-bank host-test-thread-control host-test-monitor host-test-breakpoint-patch host-test-exclusive-step host-test-vfp-policy host-test-kernel-thread-mutation host-test-kernel-thread-mutation-provider host-test-kernel-pmu-session host-test-kernel-pmu-backend host-test-kernel-pmu-profiler-bridge host-test-kernel-pmu-profiler-real-events-disabled host-test-kernel-pmu-profiler-real-events host-test-kernel-pmu-profiler-safe-rearm host-test-pmu-failure-matrix host-test-pmu-profiler-gate-record host-test-pmu-lifecycle-gate-record host-test-pmu-thread-exit-gate-record host-test-pmu-session-probe-record host-test-thread-setter-resolver-record host-test-console-queue host-test-console-transport host-test-debugnet-lifecycle host-test-symbols host-test-vfp-lifecycle host-test-aslr-lifecycle host-test-live-gates host-test-target-xml host-test-admission-diagnostic host-test-rsp-startup-diagnostic host-test-rsp-network-retail-runner host-test-dipsw-probe-record host-test-dipsw-set-restore-record host-test-dipsw-dbgvcr-record host-test-profiler host-test-attach
 
 host-test-rsp: test-rsp$(HOST_EXEEXT)
 	./test-rsp$(HOST_EXEEXT)
@@ -267,6 +271,9 @@ host-test-target-xml:
 
 host-test-admission-diagnostic:
 	$(HOST_PYTHON) -m unittest tests.host.test_rsp_admission_diagnostic
+
+host-test-rsp-startup-diagnostic:
+	$(HOST_PYTHON) -m unittest tests.host.test_rsp_startup_diagnostic
 
 host-test-rsp-network-retail-runner:
 	$(HOST_PYTHON) -m unittest tests.host.test_rsp_network_retail_gate

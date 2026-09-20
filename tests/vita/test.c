@@ -2,10 +2,15 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <unistd.h>
+#include <fcntl.h>
 #include <pthread.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <psp2/kernel/modulemgr.h>
+#ifdef UVDB_STARTUP_DIAGNOSTIC
+#include <psp2/kernel/threadmgr/thread.h>
+#endif
 #include "debugScreen.h"
 #include "uvdb.h"
 #ifdef UVDB_GDB_CONSOLE_TEST
@@ -16,6 +21,160 @@
 #endif
 #ifdef UVDB_GDB_ASLR_FIXTURE
 #include "tests/aslr_fixture/control.h"
+#endif
+
+#ifdef UVDB_STARTUP_DIAGNOSTIC
+#define UVDB_STARTUP_DIAGNOSTIC_PATH \
+    "ux0:/data/vitadebugger-rsp-startup.bin"
+#define UVDB_STARTUP_DIAGNOSTIC_MAGIC UINT32_C(0x55565344)
+#define UVDB_STARTUP_DIAGNOSTIC_VERSION UINT32_C(2)
+#define UVDB_STARTUP_DIAGNOSTIC_FAILED UINT32_C(1)
+#define UVDB_STARTUP_BUILD_ADMISSION UINT32_C(1)
+#define UVDB_STARTUP_BUILD_CONSOLE UINT32_C(2)
+#define UVDB_STARTUP_BUILD_KERNEL UINT32_C(4)
+
+enum uvdb_startup_diagnostic_stage
+{
+    UVDB_STARTUP_STAGE_PROCESS_ENTRY = 1,
+    UVDB_STARTUP_STAGE_ROUTE_READY,
+    UVDB_STARTUP_STAGE_DISPLAY_READY,
+    UVDB_STARTUP_STAGE_KERNEL_GATE,
+    UVDB_STARTUP_STAGE_ASLR_GATE,
+    UVDB_STARTUP_STAGE_MODULE_ENUM,
+    UVDB_STARTUP_STAGE_THREAD_FIXTURE,
+    UVDB_STARTUP_STAGE_VFP_FIXTURE,
+    UVDB_STARTUP_STAGE_ADMISSION_UDP_BEGIN,
+    UVDB_STARTUP_STAGE_ADMISSION_UDP_READY,
+    UVDB_STARTUP_STAGE_SERVER_BEGIN,
+    UVDB_STARTUP_STAGE_SERVER_READY,
+    UVDB_STARTUP_STAGE_STDIO_READY,
+    UVDB_STARTUP_STAGE_TEST_READY,
+    UVDB_STARTUP_STAGE_MAIN_LOOP,
+};
+
+struct uvdb_startup_diagnostic_record
+{
+    uint32_t magic;
+    uint32_t version;
+    uint32_t size;
+    uint32_t sequence;
+    uint32_t stage;
+    uint32_t result;
+    uint32_t stage_flags;
+    uint32_t build_flags;
+    uint32_t checksum;
+    uint32_t run_id_low;
+    uint32_t run_id_high;
+    uint32_t failed_stage_mask;
+    uint32_t reserved[4];
+};
+
+_Static_assert(
+    sizeof(struct uvdb_startup_diagnostic_record) == 64u,
+    "startup diagnostic record ABI changed");
+
+static int startup_diagnostic_descriptor = -1;
+static uint32_t startup_diagnostic_sequence;
+static uint64_t startup_diagnostic_run_id;
+static uint32_t startup_diagnostic_failed_stage_mask;
+
+static uint32_t startup_diagnostic_checksum(
+    const struct uvdb_startup_diagnostic_record* record)
+{
+    const unsigned char* bytes = (const unsigned char*)record;
+    uint32_t hash = UINT32_C(2166136261);
+    for(size_t index = 0; index < sizeof(*record); ++index)
+    {
+        unsigned char value =
+            index >= offsetof(struct uvdb_startup_diagnostic_record, checksum) &&
+            index < offsetof(struct uvdb_startup_diagnostic_record, checksum) +
+                        sizeof(record->checksum)
+                ? 0
+                : bytes[index];
+        hash = (hash ^ value) * UINT32_C(16777619);
+    }
+    return hash;
+}
+
+static uint32_t startup_diagnostic_build_flags(void)
+{
+    uint32_t flags = 0;
+#ifdef UVDB_ADMISSION_DIAGNOSTIC
+    flags |= UVDB_STARTUP_BUILD_ADMISSION;
+#endif
+#ifdef UVDB_GDB_CONSOLE_TEST
+    flags |= UVDB_STARTUP_BUILD_CONSOLE;
+#endif
+#ifdef UVDB_KERNEL_THREAD_CONTROL
+    flags |= UVDB_STARTUP_BUILD_KERNEL;
+#endif
+    return flags;
+}
+
+static void startup_diagnostic_mark(
+    enum uvdb_startup_diagnostic_stage stage, int result,
+    uint32_t stage_flags)
+{
+    if(startup_diagnostic_descriptor < 0)
+        return;
+    struct uvdb_startup_diagnostic_record record = {
+        .magic = UVDB_STARTUP_DIAGNOSTIC_MAGIC,
+        .version = UVDB_STARTUP_DIAGNOSTIC_VERSION,
+        .size = sizeof(record),
+        .sequence = ++startup_diagnostic_sequence,
+        .stage = (uint32_t)stage,
+        .result = (stage_flags & UVDB_STARTUP_DIAGNOSTIC_FAILED)
+                      ? (uint32_t)result
+                      : 0u,
+        .stage_flags = stage_flags,
+        .build_flags = startup_diagnostic_build_flags(),
+    };
+    if(stage_flags & UVDB_STARTUP_DIAGNOSTIC_FAILED)
+        startup_diagnostic_failed_stage_mask |=
+            UINT32_C(1) << (uint32_t)stage;
+    record.run_id_low = (uint32_t)startup_diagnostic_run_id;
+    record.run_id_high = (uint32_t)(startup_diagnostic_run_id >> 32);
+    record.failed_stage_mask = startup_diagnostic_failed_stage_mask;
+    record.checksum = startup_diagnostic_checksum(&record);
+    off_t offset = (off_t)(
+        (record.sequence & 1u) * sizeof(record));
+    if(lseek(startup_diagnostic_descriptor, offset, SEEK_SET) != offset ||
+       write(startup_diagnostic_descriptor, &record, sizeof(record)) !=
+           (ssize_t)sizeof(record) ||
+       fsync(startup_diagnostic_descriptor) < 0)
+    {
+        close(startup_diagnostic_descriptor);
+        startup_diagnostic_descriptor = -1;
+    }
+}
+
+static void startup_diagnostic_start(void)
+{
+    startup_diagnostic_sequence = 0;
+    startup_diagnostic_run_id = (uint64_t)sceKernelGetSystemTimeWide();
+    if(startup_diagnostic_run_id == 0)
+        startup_diagnostic_run_id = 1;
+    startup_diagnostic_failed_stage_mask = 0;
+    startup_diagnostic_descriptor = open(
+        UVDB_STARTUP_DIAGNOSTIC_PATH,
+        O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    if(startup_diagnostic_descriptor < 0)
+        return;
+    unsigned char empty[2 * sizeof(
+        struct uvdb_startup_diagnostic_record)] = {0};
+    if(write(startup_diagnostic_descriptor, empty, sizeof(empty)) !=
+           (ssize_t)sizeof(empty) ||
+       fsync(startup_diagnostic_descriptor) < 0)
+    {
+        close(startup_diagnostic_descriptor);
+        startup_diagnostic_descriptor = -1;
+        return;
+    }
+    startup_diagnostic_mark(UVDB_STARTUP_STAGE_PROCESS_ENTRY, 0, 0);
+}
+#else
+#define startup_diagnostic_start() ((void)0)
+#define startup_diagnostic_mark(stage, result, flags) ((void)0)
 #endif
 
 #if defined(UVDB_GDB_VFP_FIXTURE) && !defined(UVDB_KERNEL_VFP_READS)
@@ -281,17 +440,27 @@ uint32_t uvdb_aslr_main_breakpoint(uint32_t sequence)
 
 int main(void)
 {
+    startup_diagnostic_start();
     int sock = socket(AF_INET, SOCK_DGRAM, 0);
+    int route_result = sock;
     struct sockaddr_in sin = {
         .sin_family = AF_INET,
         .sin_addr = {.s_addr = htonl(0x08080808)},
         .sin_port = htons(53),
     };
-    connect(sock, (void*)&sin, sizeof(sin));
-    socklen_t l = sizeof(sin);
-    getsockname(sock, (void*)&sin, &l);
-    close(sock);
+    if(sock >= 0)
+    {
+        route_result = connect(sock, (void*)&sin, sizeof(sin));
+        socklen_t l = sizeof(sin);
+        if(route_result == 0)
+            route_result = getsockname(sock, (void*)&sin, &l);
+        close(sock);
+    }
+    startup_diagnostic_mark(
+        UVDB_STARTUP_STAGE_ROUTE_READY, route_result,
+        route_result < 0 ? UVDB_STARTUP_DIAGNOSTIC_FAILED : 0);
     psvDebugScreenInit();
+    startup_diagnostic_mark(UVDB_STARTUP_STAGE_DISPLAY_READY, 0, 0);
 #ifdef UVDB_KERNEL_THREAD_CONTROL
     struct vd_kernel_status kernel_status = {0};
     int kernel_status_result = vdKernelGetStatus(&kernel_status);
@@ -307,6 +476,9 @@ int main(void)
         kernel_gate_pass ? "PASS" : "FAIL", kernel_status_result,
         kernel_status.abi_version, kernel_status.capabilities,
         kernel_status.max_threads);
+    startup_diagnostic_mark(
+        UVDB_STARTUP_STAGE_KERNEL_GATE, kernel_status_result,
+        kernel_gate_pass ? 0 : UVDB_STARTUP_DIAGNOSTIC_FAILED);
     if(!kernel_gate_pass)
     {
         psvDebugScreenPrintf(
@@ -350,12 +522,19 @@ int main(void)
         "ASLR SUPRX fixture: %s module=%08X start=%08X ready=%08X\n",
         aslr_gate_pass ? "PASS" : "FAIL", aslr_module,
         aslr_start_status, aslr_ready);
+    startup_diagnostic_mark(
+        UVDB_STARTUP_STAGE_ASLR_GATE,
+        aslr_gate_pass ? 0 : aslr_start_status,
+        aslr_gate_pass ? 0 : UVDB_STARTUP_DIAGNOSTIC_FAILED);
     if(!aslr_gate_pass)
         hold_failed_gate();
 #endif
     SceUID modules[128];
     SceSize module_count = sizeof(modules) / sizeof(modules[0]);
     int module_result = sceKernelGetModuleList(0xff, modules, &module_count);
+    startup_diagnostic_mark(
+        UVDB_STARTUP_STAGE_MODULE_ENUM, module_result,
+        module_result >= 0 ? 0 : UVDB_STARTUP_DIAGNOSTIC_FAILED);
     psvDebugScreenPrintf("modules: result=%08X count=%u\n",
                          module_result, (unsigned int)module_count);
     SceSize displayed_modules = module_count < 3 ? module_count : 3;
@@ -406,6 +585,10 @@ int main(void)
         "Thread fixture: %s main=%d create=%d,%d ready=%u\n",
         worker_gate_pass ? "PASS" : "FAIL", main_thread_result,
         worker_result_0, worker_result_1, worker_state);
+    startup_diagnostic_mark(
+        UVDB_STARTUP_STAGE_THREAD_FIXTURE,
+        worker_gate_pass ? 0 : -1,
+        worker_gate_pass ? 0 : UVDB_STARTUP_DIAGNOSTIC_FAILED);
     if(!worker_gate_pass)
         hold_failed_gate();
     psvDebugScreenPrintf(
@@ -435,18 +618,37 @@ int main(void)
         vfp_fixture_result == 0 && vfp_fixture_state == 1
             ? "ready"
             : "FAILED");
+    startup_diagnostic_mark(
+        UVDB_STARTUP_STAGE_VFP_FIXTURE,
+        vfp_fixture_result == 0 && vfp_fixture_state == 1 ? 0 : -1,
+        vfp_fixture_result == 0 && vfp_fixture_state == 1
+            ? 0
+            : UVDB_STARTUP_DIAGNOSTIC_FAILED);
 #endif
 #ifdef UVDB_ADMISSION_DIAGNOSTIC
+    startup_diagnostic_mark(
+        UVDB_STARTUP_STAGE_ADMISSION_UDP_BEGIN, 0, 0);
     int admission_diagnostic_result = admission_diagnostic_start();
     psvDebugScreenPrintf(
         "Admission diagnostic UDP %u: %s (%d)\n",
         UVDB_ADMISSION_DIAGNOSTIC_PORT,
         admission_diagnostic_result == 0 ? "READY" : "FAILED",
         admission_diagnostic_result);
+    startup_diagnostic_mark(
+        UVDB_STARTUP_STAGE_ADMISSION_UDP_READY,
+        admission_diagnostic_result,
+        admission_diagnostic_result == 0
+            ? 0
+            : UVDB_STARTUP_DIAGNOSTIC_FAILED);
     if(admission_diagnostic_result < 0)
         hold_failed_gate();
 #endif
-    if(uvdb_start_server() < 0)
+    startup_diagnostic_mark(UVDB_STARTUP_STAGE_SERVER_BEGIN, 0, 0);
+    int server_result = uvdb_start_server();
+    startup_diagnostic_mark(
+        UVDB_STARTUP_STAGE_SERVER_READY, server_result,
+        server_result == 0 ? 0 : UVDB_STARTUP_DIAGNOSTIC_FAILED);
+    if(server_result < 0)
     {
         psvDebugScreenPrintf("Failed to start persistent debugger server.\n");
         return 1;
@@ -458,12 +660,19 @@ int main(void)
     psvDebugScreenPrintf("GDB stdout/stderr bridge: %s (%d)\n",
                          stdio_result == 0 ? "READY" : "FAILED",
                          stdio_result);
+    startup_diagnostic_mark(
+        UVDB_STARTUP_STAGE_STDIO_READY, stdio_result,
+        stdio_result == 0 ? 0 : UVDB_STARTUP_DIAGNOSTIC_FAILED);
 #endif
 #ifdef UVDB_ADMISSION_DIAGNOSTIC
     uvdb_admission_diagnostic_mark_test_ready();
 #endif
+    startup_diagnostic_mark(UVDB_STARTUP_STAGE_TEST_READY, 0, 0);
     for(int i = 0;; i++)
     {
+        if(i == 0)
+            startup_diagnostic_mark(
+                UVDB_STARTUP_STAGE_MAIN_LOOP, 0, 0);
 #ifdef UVDB_ADMISSION_DIAGNOSTIC
         admission_diagnostic_poll();
 #endif
