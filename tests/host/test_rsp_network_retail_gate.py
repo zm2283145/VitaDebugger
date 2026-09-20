@@ -359,6 +359,7 @@ class DisconnectGSequenceTests(unittest.TestCase):
             }
 
         args = SimpleNamespace(
+            phase="matrix",
             repo=ROOT,
             host="127.0.0.1",
             port=1234,
@@ -392,6 +393,58 @@ class DisconnectGSequenceTests(unittest.TestCase):
         self.assertEqual(
             passed, ["disconnect-m", "disconnect-M", "disconnect-g"]
         )
+
+    def test_matrix_from_g_skips_accepted_memory_cases(self) -> None:
+        clients = iter(
+            [
+                FakeClient([(b"g", OBSERVED_SHAPE)]),
+                FakeClient([(b"g", OBSERVED_SHAPE)]),
+            ]
+        )
+
+        def stopped(*_args, **_kwargs):
+            try:
+                client = next(clients)
+            except StopIteration as exc:
+                raise MatrixSequencingComplete from exc
+            return client, gate.MAX_RSP_PAYLOAD, {
+                "text_segment": 0x81000000,
+                "data_segment": 0x81001000,
+            }
+
+        args = SimpleNamespace(
+            phase="matrix-from-g",
+            repo=ROOT,
+            host="127.0.0.1",
+            port=1234,
+            command_port=1338,
+            timeout=1.0,
+            elf=ROOT / "unused.elf",
+            nm=ROOT / "unused-nm",
+            cycles=50,
+            run_seconds=0.01,
+            shutdown_interval=10,
+            shutdown_pause=3.0,
+            launch_delay=3.0,
+            title_id="SLRS00001",
+        )
+        transcript = NullTranscript()
+        with (
+            mock.patch.object(gate, "stopped_session", side_effect=stopped),
+            mock.patch.object(
+                gate, "writable_fixture_address"
+            ) as writable_fixture,
+        ):
+            with self.assertRaises(MatrixSequencingComplete):
+                gate.run_matrix(args, transcript)
+
+        writable_fixture.assert_not_called()
+        passed = [
+            fields["case"]
+            for event, fields in transcript.events
+            if event == "case_pass"
+        ]
+        self.assertEqual(passed, ["disconnect-g"])
 
 
 if __name__ == "__main__":

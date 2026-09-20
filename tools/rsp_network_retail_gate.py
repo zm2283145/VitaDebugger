@@ -662,23 +662,27 @@ def run_matrix(args: argparse.Namespace, log: Transcript) -> dict[str, Any]:
     summary: dict[str, Any] = {"cases": [], "console_bytes": 0}
     companion = VitaCompanionClient(
         args.host, args.command_port, args.timeout)
-
-    seed, _, offsets = stopped_session(
-        args.host, args.port, args.timeout, log, "invariant-baseline"
-    )
-    memory_address, fixture = writable_fixture_address(
-        args.repo, args.elf, args.nm, offsets, args.timeout
-    )
-    memory_command = f"m{memory_address:x},4".encode("ascii")
-    memory_value, _ = seed.request(memory_command)
-    if memory_value != b"00000000":
-        seed.close(reset=True)
-        raise GateFailure("stable trigger_fault fixture is not zero")
-    seed.detach()
-    summary["memory_address"] = f"0x{memory_address:08x}"
-    summary["text_segment"] = f"0x{offsets['text_segment']:08x}"
-    summary["data_segment"] = f"0x{offsets['data_segment']:08x}"
-    summary["fixture"] = fixture
+    resume_from_g = args.phase == "matrix-from-g"
+    memory_command: bytes | None = None
+    if resume_from_g:
+        summary["accepted_prior_cases"] = ["disconnect-m", "disconnect-M"]
+    else:
+        seed, _, offsets = stopped_session(
+            args.host, args.port, args.timeout, log, "invariant-baseline"
+        )
+        memory_address, fixture = writable_fixture_address(
+            args.repo, args.elf, args.nm, offsets, args.timeout
+        )
+        memory_command = f"m{memory_address:x},4".encode("ascii")
+        memory_value, _ = seed.request(memory_command)
+        if memory_value != b"00000000":
+            seed.close(reset=True)
+            raise GateFailure("stable trigger_fault fixture is not zero")
+        seed.detach()
+        summary["memory_address"] = f"0x{memory_address:08x}"
+        summary["text_segment"] = f"0x{offsets['text_segment']:08x}"
+        summary["data_segment"] = f"0x{offsets['data_segment']:08x}"
+        summary["fixture"] = fixture
 
     def reset_after_response(
         case: str, command: bytes, expected: bytes | None
@@ -698,6 +702,8 @@ def run_matrix(args: argparse.Namespace, log: Transcript) -> dict[str, Any]:
             raise
 
     def verify_memory_zero(case: str) -> None:
+        if memory_command is None:
+            raise GateFailure(f"{case}: memory prerequisite was not initialized")
         client, _, _ = stopped_session(
             args.host, args.port, args.timeout, log, case)
         try:
@@ -725,17 +731,19 @@ def run_matrix(args: argparse.Namespace, log: Transcript) -> dict[str, Any]:
             client.close(reset=True)
             raise
 
-    memory_read = reset_after_response(
-        "disconnect-m", memory_command, b"00000000")
-    require_hex_bytes(memory_read, 4, "disconnect-m")
-    verify_memory_zero("disconnect-m-verify")
-    log.event("case_pass", case="disconnect-m")
+    if not resume_from_g:
+        assert memory_command is not None
+        memory_read = reset_after_response(
+            "disconnect-m", memory_command, b"00000000")
+        require_hex_bytes(memory_read, 4, "disconnect-m")
+        verify_memory_zero("disconnect-m-verify")
+        log.event("case_pass", case="disconnect-m")
 
-    write_command = (
-        f"M{memory_address:x},4:00000000".encode("ascii"))
-    reset_after_response("disconnect-M", write_command, b"OK")
-    verify_memory_zero("disconnect-M-verify")
-    log.event("case_pass", case="disconnect-M")
+        write_command = (
+            f"M{memory_address:x},4:00000000".encode("ascii"))
+        reset_after_response("disconnect-M", write_command, b"OK")
+        verify_memory_zero("disconnect-M-verify")
+        log.event("case_pass", case="disconnect-M")
 
     registers = reset_after_response("disconnect-g", b"g", None)
     require_legacy_register_bank_payload(registers, "disconnect-g")
@@ -779,16 +787,10 @@ def run_matrix(args: argparse.Namespace, log: Transcript) -> dict[str, Any]:
         raise
     verify_register_read("disconnect-P-verify", b"p0")
     log.event("case_pass", case="disconnect-P")
+    if not resume_from_g:
+        summary["cases"].extend(["disconnect-m", "disconnect-M"])
     summary["cases"].extend(
-        [
-            "disconnect-m",
-            "disconnect-M",
-            "disconnect-g",
-            "disconnect-p",
-            "disconnect-G",
-            "disconnect-P",
-        ]
-    )
+        ["disconnect-g", "disconnect-p", "disconnect-G", "disconnect-P"])
 
     first, _, _ = stopped_session(
         args.host, args.port, args.timeout, log, "second-owner-primary"
@@ -1203,6 +1205,7 @@ def main() -> int:
             "second-admission",
             "rst-sentinel",
             "matrix",
+            "matrix-from-g",
             "receive-shutdown",
             "send-shutdown",
         ),
@@ -1246,7 +1249,7 @@ def main() -> int:
         value = getattr(args, name)
         if not math.isfinite(value) or value <= 0 or value > 30.0:
             parser.error(f"--{name.replace('_', '-')} must be within (0, 30]")
-    if args.phase == "matrix" and args.cycles != 50:
+    if args.phase in ("matrix", "matrix-from-g") and args.cycles != 50:
         parser.error("the authorized matrix requires exactly --cycles 50")
     if args.shutdown_pause < 2.0:
         parser.error("--shutdown-pause must be at least 2 seconds")
@@ -1271,7 +1274,7 @@ def main() -> int:
             result = run_second_admission(args, log)
         elif args.phase == "rst-sentinel":
             result = run_rst_sentinel(args, log)
-        elif args.phase == "matrix":
+        elif args.phase in ("matrix", "matrix-from-g"):
             result = run_matrix(args, log)
         elif args.phase == "receive-shutdown":
             result = run_shutdown_case(args, log)
