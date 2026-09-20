@@ -182,6 +182,65 @@ int main(void)
               sizeof(scratch)) == UVDB_MEMORY_TRANSACTION_INVALID,
           "aliased input and rollback scratch rejected");
 
+    reset_kernel(&kernel);
+    struct uvdb_memory_transaction transaction;
+    uvdb_memory_transaction_init(
+        &transaction, scratch, sizeof(scratch));
+    memcpy(original, kernel.memory + 64, sizeof(original));
+    check(uvdb_memory_transaction_prepare(
+              &transaction, &fake_io, &kernel, 64,
+              sizeof(input)) == UVDB_MEMORY_TRANSACTION_OK &&
+          uvdb_memory_transaction_is_pending(&transaction) &&
+          transaction.state == UVDB_MEMORY_TRANSACTION_PREPARED,
+          "durable transaction publishes rollback before mutation");
+    check(uvdb_memory_transaction_apply(
+              &transaction, &fake_io, &kernel, input,
+              sizeof(input)) == UVDB_MEMORY_TRANSACTION_OK &&
+          transaction.state == UVDB_MEMORY_TRANSACTION_APPLIED &&
+          memcmp(kernel.memory + 64, input, sizeof(input)) == 0,
+          "verified write remains rollback-capable until commit");
+    check(uvdb_memory_transaction_restore(
+              &transaction, &fake_io, &kernel) ==
+              UVDB_MEMORY_TRANSACTION_WRITE_FAILED_RESTORED &&
+          !uvdb_memory_transaction_is_pending(&transaction) &&
+          memcmp(kernel.memory + 64, original, sizeof(original)) == 0,
+          "caller can roll back a verified but uncommitted write");
+
+    reset_kernel(&kernel);
+    uvdb_memory_transaction_init(
+        &transaction, scratch, sizeof(scratch));
+    check(uvdb_memory_transaction_prepare(
+              &transaction, &fake_io, &kernel, 64,
+              sizeof(input)) == UVDB_MEMORY_TRANSACTION_OK &&
+          uvdb_memory_transaction_apply(
+              &transaction, &fake_io, &kernel, input,
+              sizeof(input)) == UVDB_MEMORY_TRANSACTION_OK &&
+          uvdb_memory_transaction_commit(&transaction) ==
+              UVDB_MEMORY_TRANSACTION_OK &&
+          !uvdb_memory_transaction_is_pending(&transaction),
+          "explicit commit retires durable rollback bytes");
+
+    reset_kernel(&kernel);
+    uvdb_memory_transaction_init(
+        &transaction, scratch, sizeof(scratch));
+    memcpy(original, kernel.memory + 64, sizeof(original));
+    check(uvdb_memory_transaction_prepare(
+              &transaction, &fake_io, &kernel, 64,
+              sizeof(input)) == UVDB_MEMORY_TRANSACTION_OK,
+          "prepare retryable rollback fixture");
+    kernel.write_limit = 8;
+    check(uvdb_memory_transaction_apply(
+              &transaction, &fake_io, &kernel, input,
+              sizeof(input)) == UVDB_MEMORY_TRANSACTION_RESTORE_PENDING &&
+          uvdb_memory_transaction_is_pending(&transaction),
+          "failed apply retains durable rollback after failed restore");
+    kernel.write_limit = SIZE_MAX;
+    check(uvdb_memory_transaction_restore(
+              &transaction, &fake_io, &kernel) ==
+              UVDB_MEMORY_TRANSACTION_WRITE_FAILED_RESTORED &&
+          memcmp(kernel.memory + 64, original, sizeof(original)) == 0,
+          "later retry restores retained original bytes");
+
     if(failures)
         return 1;
     puts("PASS: fake-kernel memory mutation rollback");

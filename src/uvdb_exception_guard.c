@@ -53,23 +53,37 @@ int uvdb_exception_guard_enter(
     return UVDB_EXCEPTION_GUARD_NESTED;
 }
 
-int uvdb_exception_guard_begin_chain(struct uvdb_exception_guard* guard)
+int uvdb_exception_guard_begin_chain(
+    struct uvdb_exception_guard* guard,
+    uint32_t exception_type)
 {
-    if(!guard)
+    if(!guard || exception_type >= UVDB_EXCEPTION_GUARD_TYPE_COUNT)
         return -1;
-    uint32_t expected = 0;
-    if(!__atomic_compare_exchange_n(&guard->chaining, &expected, 1u, 0,
-                                     __ATOMIC_ACQ_REL,
-                                     __ATOMIC_ACQUIRE))
-        return 0;
+    const uint32_t bit = UINT32_C(1) << exception_type;
+    uint32_t mask = __atomic_load_n(
+        &guard->chaining_mask, __ATOMIC_ACQUIRE);
+    for(;;)
+    {
+        if(mask & bit)
+            return 0;
+        if(__atomic_compare_exchange_n(
+               &guard->chaining_mask, &mask, mask | bit, 0,
+               __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+            break;
+    }
     __atomic_add_fetch(&guard->chained_entries, 1u, __ATOMIC_RELAXED);
     return 1;
 }
 
-void uvdb_exception_guard_end_chain(struct uvdb_exception_guard* guard)
+void uvdb_exception_guard_end_chain(
+    struct uvdb_exception_guard* guard,
+    uint32_t exception_type)
 {
-    if(guard)
-        __atomic_store_n(&guard->chaining, 0u, __ATOMIC_RELEASE);
+    if(guard && exception_type < UVDB_EXCEPTION_GUARD_TYPE_COUNT)
+        (void)__atomic_and_fetch(
+            &guard->chaining_mask,
+            ~(UINT32_C(1) << exception_type),
+            __ATOMIC_RELEASE);
 }
 
 void uvdb_exception_guard_note_unhandled(
@@ -100,7 +114,7 @@ int uvdb_exception_guard_leave(
             return -1;
     }
 
-    /* Do not clear `chaining` here. A simultaneous nested handler may still
+    /* Do not clear `chaining_mask` here. A simultaneous nested handler may still
      * be executing its predecessor after the primary handler has returned. */
     uint32_t before = __atomic_fetch_sub(&guard->lifecycle, 1u,
                                          __ATOMIC_RELEASE);
@@ -141,7 +155,7 @@ int uvdb_exception_guard_is_idle(const struct uvdb_exception_guard* guard)
                                                 __ATOMIC_ACQUIRE);
     return !(lifecycle & UVDB_EXCEPTION_GUARD_ACTIVE_MASK) &&
            !__atomic_load_n(&guard->owner, __ATOMIC_ACQUIRE) &&
-           !__atomic_load_n(&guard->chaining, __ATOMIC_ACQUIRE);
+           !__atomic_load_n(&guard->chaining_mask, __ATOMIC_ACQUIRE);
 }
 
 int uvdb_exception_guard_get_stats(

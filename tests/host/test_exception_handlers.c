@@ -14,6 +14,8 @@ struct fake_kernel {
     int fail_release_call;
     int dispatch_replace_call;
     int dispatch_observed;
+    int fence_calls;
+    int fail_fence;
 };
 
 static int failures;
@@ -69,6 +71,19 @@ static int fake_release(void* opaque, uint32_t type)
 static const struct uvdb_exception_handler_backend backend = {
     .replace = fake_replace,
     .release = fake_release,
+};
+
+static int fake_fence(void* opaque)
+{
+    struct fake_kernel* kernel = opaque;
+    kernel->fence_calls++;
+    return kernel->fail_fence ? -1 : 0;
+}
+
+static const struct uvdb_exception_handler_backend fenced_backend = {
+    .replace = fake_replace,
+    .release = fake_release,
+    .fence = fake_fence,
 };
 
 static void seed(struct fake_kernel* kernel)
@@ -200,6 +215,29 @@ int main(void)
               &handlers, &backend, &kernel) == 0 &&
           kernel.slots[0] == 0,
           "orphan self predecessor releases to default on teardown");
+
+    check(uvdb_exception_handlers_fence(
+              &handlers, &backend, &kernel) < 0 &&
+          handlers.ever_published_mask != 0,
+          "missing callback fence fails closed without erasing generation");
+    kernel.fail_fence = 1;
+    check(uvdb_exception_handlers_fence(
+              &handlers, &fenced_backend, &kernel) < 0 &&
+          handlers.ever_published_mask != 0 && kernel.fence_calls == 1,
+          "failed callback fence retains predecessor lifetime state");
+    kernel.fail_fence = 0;
+    check(uvdb_exception_handlers_fence(
+              &handlers, &fenced_backend, &kernel) == 0 &&
+          handlers.ever_published_mask != 0 &&
+          handlers.fence_complete == 1 && kernel.fence_calls == 2,
+          "successful kernel fence retains state for callback drain");
+    check(uvdb_exception_handlers_reset_after_fence(
+              &handlers) == 0 &&
+          handlers.ever_published_mask == 0 &&
+          handlers.self == 0,
+          "post-fence callback drain authorizes registry reset");
+    check(uvdb_exception_handlers_init(&handlers, self) == 0,
+          "new handler generation is allowed only after successful fence");
 
     if(failures)
         return 1;

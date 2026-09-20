@@ -26,8 +26,8 @@ struct uvdb_fileio_transition {
 
 /* Convert a parsed File-I/O reply into an explicit target-state transition.
  * An interrupt can yield T02 only when the caller owns a real saved context
- * and coherent all-stop. The legacy unstopped syscall path instead severs the
- * protocol; reporting a fake stop with zero registers would be unsafe. */
+ * and coherent all-stop. An unstopped/library-only path instead severs the
+ * protocol; reporting a stop while peer threads run would be unsafe. */
 int uvdb_fileio_transition_decide(
     const struct uvdb_rsp_fileio_result* result,
     enum uvdb_fileio_context context,

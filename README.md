@@ -141,8 +141,9 @@ For a service that accepts clean reconnects and Ctrl-C while the application is
 running, call `uvdb_start_server()` instead. Stop it with
 `uvdb_stop_server()` during orderly teardown, or call terminal
 `uvdb_shutdown()` from normal application code. Do not call shutdown from an
-exception handler, and do not unload the linked debugger image after terminal
-shutdown.
+exception handler. `uvdb_prepare_unload()` remains fail-closed with current
+KuBridge releases because they provide no callback-dispatch lifetime fence;
+do not unload the linked debugger image after terminal shutdown.
 
 The listener does not treat a bare TCP connection as a debugger session. It
 keeps the target running until the peer supplies a complete checksum-valid RSP

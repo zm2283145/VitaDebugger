@@ -88,6 +88,31 @@ int uvdb_exception_handlers_install(
     return 0;
 }
 
+int uvdb_exception_handlers_fence(
+    struct uvdb_exception_handlers* handlers,
+    const struct uvdb_exception_handler_backend* backend,
+    void* context)
+{
+    if(!handlers || handlers->installed_mask ||
+       !handlers->ever_published_mask || !backend || !backend->fence)
+        return -1;
+    if(backend->fence(context) < 0)
+        return -1;
+    __atomic_store_n(&handlers->fence_complete, 1u, __ATOMIC_RELEASE);
+    return 0;
+}
+
+int uvdb_exception_handlers_reset_after_fence(
+    struct uvdb_exception_handlers* handlers)
+{
+    if(!handlers || handlers->installed_mask ||
+       !handlers->ever_published_mask ||
+       !__atomic_load_n(&handlers->fence_complete, __ATOMIC_ACQUIRE))
+        return -1;
+    memset(handlers, 0, sizeof(*handlers));
+    return 0;
+}
+
 uvdb_exception_handler_token uvdb_exception_handlers_previous(
     const struct uvdb_exception_handlers* handlers,
     uint32_t exception_type)
