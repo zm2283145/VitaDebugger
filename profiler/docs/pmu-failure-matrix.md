@@ -22,6 +22,11 @@ replaces, the register-level backend/session suites:
 
 The cross-layer fixture adds the missing assertion that a TCP failure while a
 real-event lease is live cannot silently strand, forget, or re-arm PMU state.
+The independently default-off
+[`VDCP00013` cleanup gate](../../kernel/pmu-profiler-cleanup-gate/README.md)
+turns the remaining acceptance rows into five serialized packages with
+checksummed baseline/restored/final snapshots. These packages remain
+hardware-pending.
 
 ## Coverage and promotion status
 
@@ -30,7 +35,7 @@ real-event lease is live cannot silently strand, forget, or re-arm PMU state.
 | Peer disconnect during a live lease | Cross-layer fixture injects a disconnected-send error, verifies bounded socket shutdown/close, then performs authenticated PMU close | Socket failure remains visible; PMU stays owned until close; close restores the complete snapshot; only then may a later real event open | Required |
 | Send deadline expires | Cross-layer fixture injects repeated would-block plus a finite wait; existing TCP tests cover partial-send and late-success variants | Sink reports `SEND_TIMEOUT`, closes its socket, and the PMU lease is still recoverable by exact close or owner-exit cleanup | Required |
 | Other send error | Cross-layer fixture injects a non-disconnect I/O error | Native error is retained, socket is closed, and PMU cleanup follows the same fail-closed path | Required |
-| Owner process exits without close | Cross-layer fixture leaves the PMU lease active, proves the process gone through the retained identity provider, and invokes the watchdog | Watchdog restores exactly, releases the retained identity once, retires the old handle, and only then re-arms | Required |
+| Owner process exits without close | Cross-layer fixture and process-event transport tests prove the callback only releases the retained identity once and records terminal proof; watchdog-only restoration survives failure/retry without querying a torn-down UID; lock-contention deferral restores but quarantines | Process callback remains bounded, watchdog restores exactly, the old handle is retired, and re-arm occurs only after exact reference release; uncertain late release never re-arms | Required |
 | Controller thread exits while process remains | Cross-layer fixture proves the captured thread gone while the process remains | Same result as process exit; process survival must not keep an exited controller's lease live | Required |
 | Competing owner/process/thread | Session, bridge, and cross-layer fixtures attempt concurrent open plus foreign read/close | Open returns busy; foreign read/close returns owner error; no PMU callback or live-owner state mutation is performed for the intruder | Required |
 | Registers match but independent restore evidence is pending | Cross-layer fixture restores the fake PMU bytes while retaining backend recovery/restore flags | A new Open services one bounded recovery pass, returns `RESTORE_REQUIRED`, leaves the transport `CLEANUP_REQUIRED`, and cannot advertise or grant re-arm | Host passed; retain as a hardware fault-injection stop condition |
@@ -81,6 +86,8 @@ failure mode. Do not add these modes to a normal application or companion.
 Preserve the fixed application core 0, physical lane 5, reviewed event
 allowlist, bounded lease, boot-loaded plugin, physical attendance, and
 known-good recovery path from `pmu-hardware-gate.md`.
+The normative remaining-gate procedure and binary schema are in the
+[`VDCP00013` runbook](../../kernel/pmu-profiler-cleanup-gate/README.md).
 
 Every attempted hardware row needs two durable, checksummed journal phases:
 

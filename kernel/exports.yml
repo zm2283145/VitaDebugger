@@ -33,3 +33,4 @@ vitadebug_kernel:
         - vdKernelPmuProfilerOpen: 0x76A3D015
         - vdKernelPmuProfilerRead: 0x76A3D016
         - vdKernelPmuProfilerClose: 0x76A3D017
+        - vdKernelPmuProfilerGetStatus: 0x76A3D018

@@ -24,6 +24,13 @@ extern "C" {
 #define VD_PMU_PROFILER_SAFE_REARM_COMPILED 0
 #endif
 
+#if defined(VD_KERNEL_ENABLE_EXPERIMENTAL_PMU_PROFILER_PROCESS_EVENTS) && \
+    ((VD_KERNEL_ENABLE_EXPERIMENTAL_PMU_PROFILER_PROCESS_EVENTS + 0) == 1)
+#define VD_PMU_PROFILER_PROCESS_EVENTS_COMPILED 1
+#else
+#define VD_PMU_PROFILER_PROCESS_EVENTS_COMPILED 0
+#endif
+
 enum vd_pmu_profiler_transport_state {
     VD_PMU_PROFILER_TRANSPORT_IDLE = 0,
     VD_PMU_PROFILER_TRANSPORT_ACTIVE = 1,
@@ -77,6 +84,12 @@ struct vd_pmu_profiler_owner_backend {
     int (*release)(void* context, int32_t owner_pid,
                    int32_t owner_thread,
                    const struct vd_pmu_profiler_owner_identity* identity);
+    /* Process-event-only release while the exact process is still inside its
+     * callback. It must use a bounded UID lookup to verify the retained object
+     * before balancing the temporary and retained references, without waiting. */
+    int (*release_terminal)(
+        void* context, int32_t owner_pid, int32_t owner_thread,
+        const struct vd_pmu_profiler_owner_identity* identity);
 };
 
 /* One global instance is used by the kernel companion.  Its caller must
@@ -101,6 +114,10 @@ struct vd_pmu_profiler_transport {
      * temporary liveness-query reference whose release was uncertain. */
     uint32_t owner_identity_release_uncertain;
     uint32_t rearm_count;
+    uint32_t process_normal_exit_cleanup_count;
+    uint32_t process_kill_cleanup_count;
+    uint32_t owner_process_terminal_kind;
+    uint32_t owner_terminal_reference_released;
     int32_t last_result;
     struct vd_pmu_profiler_owner_identity owner_identity;
     struct vd_pmu_profiler_owner_backend owner_backend;
@@ -122,6 +139,10 @@ int vdPmuProfilerTransportSetOwnerBackend(
 int vdPmuProfilerTransportGetInfo(
     const struct vd_pmu_profiler_transport* transport,
     struct vd_kernel_pmu_profiler_info* info);
+
+int vdPmuProfilerTransportGetStatus(
+    const struct vd_pmu_profiler_transport* transport,
+    struct vd_kernel_pmu_profiler_status* status);
 
 int vdPmuProfilerTransportOpen(
     struct vd_pmu_profiler_transport* transport,
@@ -150,6 +171,20 @@ int vdPmuProfilerTransportClose(
  * retry. */
 int vdPmuProfilerTransportWatchdog(
     struct vd_pmu_profiler_transport* transport);
+
+/* Called only from the kernel's process exit/kill event callback while the
+ * global PMU lock is held. It records terminal proof and releases the retained
+ * reference before teardown, but never dispatches PMU work or waits. */
+int vdPmuProfilerTransportOwnerProcessExit(
+    struct vd_pmu_profiler_transport* transport,
+    int32_t owner_pid, uint32_t terminal_kind);
+
+/* Used when the callback could not acquire the PMU lock. Exact PMU cleanup is
+ * still attempted, but retained-reference release is no longer assumed safe,
+ * so this path permanently quarantines re-arm. */
+int vdPmuProfilerTransportOwnerProcessExitDeferred(
+    struct vd_pmu_profiler_transport* transport,
+    int32_t owner_pid);
 
 /* Called before module unload.  It never forgets a failed restoration.  Once
  * a real-event attempt has occurred it returns REBOOT_REQUIRED even after a

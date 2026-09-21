@@ -1706,6 +1706,18 @@ int vdPmuBackendMakeSessionBackend(
     return vdPmuBackendReady() ? 0 : VD_PMU_BACKEND_ERROR_DISABLED;
 }
 
+int vdPmuBackendSnapshotIdle(
+    uint32_t core_id,
+    struct vd_pmu_snapshot* snapshot)
+{
+    if(!snapshot || core_id >= VD_PMU_BACKEND_APP_CORE_COUNT)
+        return VD_PMU_BACKEND_ERROR_INVALID;
+    if(!vdPmuBackendReady() || vdPmuBackendRecoveryPending() ||
+       vdPmuBackendHasRestoreObligation())
+        return VD_PMU_BACKEND_ERROR_BUSY;
+    return callback_snapshot(&g_pmu, core_id, snapshot);
+}
+
 int vdPmuBackendRunSelfTest(
     uint32_t core_id,
     struct vd_pmu_backend_test_result* result)

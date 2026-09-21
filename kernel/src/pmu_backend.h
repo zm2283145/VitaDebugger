@@ -102,6 +102,12 @@ int vdPmuBackendRecover(void);
 int vdPmuBackendMakeSessionBackend(
     struct vd_pmu_session_backend* backend);
 
+/* Capture the same exact fixed-core scope used by session acquisition without
+ * configuring a counter. Refuses non-idle or recovery-pending state. */
+int vdPmuBackendSnapshotIdle(
+    uint32_t core_id,
+    struct vd_pmu_snapshot* snapshot);
+
 /* Run the isolated event-0/PMSWINC hardware gate on one application core.
  * This operation never leaves the counter configured after success. */
 int vdPmuBackendRunSelfTest(
