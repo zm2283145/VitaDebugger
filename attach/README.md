@@ -6,10 +6,11 @@ VitaDebugger to a Vita application that was not linked with `libuvdb.a`.
 It does **not** attach to a process today. It does not load a module, suspend a
 process, write memory, or start GDB. It now contains an allocation-free C broker
 core, an authentication-only protocol-v2 listener/lifecycle implementation,
-and a persistent key-store implementation. The Vita store remains fail-closed
-until hardware proves private-path confidentiality and an independent rollback
-floor. This fixes the identity and authentication boundary before any
-privileged loader operation is added:
+and a persistent key-store implementation. Retail 3.65 authentication remains
+hard-blocked because no approved Vita backend provides an isolated
+non-exportable key, trusted handle-bound persistence, and an independent
+durable monotonic floor. This fixes the identity and authentication boundary
+before any privileged loader operation is added:
 
 - a strict versioned wire format;
 - an exact-title discovery request with no host-selected PID;
