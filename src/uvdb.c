@@ -32,6 +32,7 @@
 #include "uvdb_protocol_gate.h"
 #include "uvdb_registers.h"
 #include "uvdb_rsp.h"
+#include "uvdb_safety_gate.h"
 #include "uvdb_rsp_frame.h"
 #include "uvdb_vfp_policy.h"
 #include "stdio_redirect.h"
@@ -2081,6 +2082,14 @@ static struct uvdb_memory_write_state uvdb_memory_write_state = {
     .storage_uid = -1,
 };
 
+#ifdef UVDB_HARDWARE_SAFETY_GATE
+volatile uint32_t uvdb_safety_gate_copy_address;
+volatile uint32_t uvdb_safety_gate_copy_size;
+volatile uint32_t uvdb_safety_gate_copy_call_count;
+volatile uint32_t uvdb_safety_gate_copy_fail_first;
+volatile uint32_t uvdb_safety_gate_copy_fail_count;
+#endif
+
 static int uvdb_ranges_overlap(
     uintptr_t first,
     size_t first_size,
@@ -2129,6 +2138,26 @@ static size_t breakpoint_patch_write(
         size_t chunk = size - copied;
         if(chunk > 64u)
             chunk = 64u;
+#ifdef UVDB_HARDWARE_SAFETY_GATE
+        uint32_t gate_address = __atomic_load_n(
+            &uvdb_safety_gate_copy_address, __ATOMIC_ACQUIRE);
+        uint32_t gate_size = __atomic_load_n(
+            &uvdb_safety_gate_copy_size, __ATOMIC_ACQUIRE);
+        if(gate_address && gate_size &&
+           uvdb_ranges_overlap(
+               address + copied, chunk, gate_address, gate_size))
+        {
+            uint32_t call = __atomic_add_fetch(
+                &uvdb_safety_gate_copy_call_count, 1,
+                __ATOMIC_ACQ_REL);
+            uint32_t first = __atomic_load_n(
+                &uvdb_safety_gate_copy_fail_first, __ATOMIC_ACQUIRE);
+            uint32_t count = __atomic_load_n(
+                &uvdb_safety_gate_copy_fail_count, __ATOMIC_ACQUIRE);
+            if(first && call >= first && call - first < count)
+                break;
+        }
+#endif
         if(kuKernelCpuUnrestrictedMemcpy(
                (void*)(address + copied), source + copied, chunk) < 0)
             break;
@@ -4441,6 +4470,44 @@ static void uvdb_nested_fault_exit(void)
 }
 #endif
 
+#ifdef UVDB_HARDWARE_SAFETY_GATE
+volatile uint32_t uvdb_safety_gate_nested_request;
+volatile uint32_t uvdb_safety_gate_nested_completed;
+volatile uint32_t uvdb_safety_gate_nested_recovery_pc;
+volatile uint32_t uvdb_safety_gate_nested_in_flight;
+
+static __attribute__((noinline)) void uvdb_safety_gate_inject_nested_fault(void)
+{
+    uint32_t request = __atomic_exchange_n(
+        &uvdb_safety_gate_nested_request,
+        UVDB_SAFETY_GATE_EXCEPTION_NONE,
+        __ATOMIC_ACQ_REL);
+    if(request < UVDB_SAFETY_GATE_EXCEPTION_DATA_ABORT ||
+       request > UVDB_SAFETY_GATE_EXCEPTION_UNDEFINED_INSTRUCTION)
+        return;
+
+    uvdb_safety_gate_nested_recovery_pc =
+        (uint32_t)(uintptr_t)&&nested_fault_recovered;
+    __atomic_store_n(
+        &uvdb_safety_gate_nested_in_flight, request, __ATOMIC_RELEASE);
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+    if(request == UVDB_SAFETY_GATE_EXCEPTION_DATA_ABORT)
+        *(volatile uint32_t*)(uintptr_t)0 = UINT32_C(0x53474644);
+    else if(request == UVDB_SAFETY_GATE_EXCEPTION_PREFETCH_ABORT)
+        ((void (*)(void))(uintptr_t)0)();
+    else
+        __asm__ volatile("udf #1");
+
+nested_fault_recovered:
+    __atomic_store_n(
+        &uvdb_safety_gate_nested_recovery_pc, 0, __ATOMIC_RELEASE);
+    __atomic_store_n(
+        &uvdb_safety_gate_nested_in_flight, 0, __ATOMIC_RELEASE);
+    __atomic_store_n(
+        &uvdb_safety_gate_nested_completed, request, __ATOMIC_RELEASE);
+}
+#endif
+
 static int uvdb_chain_previous_exception_handler(
     KuKernelExceptionContext* ctx)
 {
@@ -4478,8 +4545,12 @@ static void uvdb_handle_unclaimed_exception(
     {
         uvdb_exception_guard_note_unhandled(&uvdb_exception_guard);
 #ifdef UVDB_EXPERIMENTAL_NESTED_FAULT_EXIT
-        ctx->pc = (uint32_t)(uintptr_t)uvdb_nested_fault_exit;
-        ctx->SPSR &= ~UINT32_C(32);
+        uint32_t entry = (uint32_t)(uintptr_t)uvdb_nested_fault_exit;
+        ctx->pc = entry & ~UINT32_C(1);
+        if(entry & 1u)
+            ctx->SPSR |= UINT32_C(32);
+        else
+            ctx->SPSR &= ~UINT32_C(32);
 #endif
     }
 }
@@ -4544,6 +4615,10 @@ static void exception_handler(KuKernelExceptionContext* ctx)
             &uvdb_exception_guard, exception_type, guard_result);
         return;
     }
+
+#ifdef UVDB_HARDWARE_SAFETY_GATE
+    uvdb_safety_gate_inject_nested_fault();
+#endif
 
     SceUID exception_thread = sceKernelGetThreadId();
     /* A detached, closing, or not-yet-connected debugger has no protocol
