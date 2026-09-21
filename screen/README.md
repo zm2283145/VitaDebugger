@@ -222,6 +222,55 @@ resident module and is default-off unless its exact offline configuration is
 present. See the [endpoint VPK guide](docs/companion-endpoint-vpk.md) for the
 fixed config format, safe build, package identity, and known limitations.
 
+### Current companion status
+
+The source-owned companion endpoint is implemented and host-verified. It is a
+normal user-mode title (`VDSCRN001`, `vitadebug_companion_gate`) with no
+resident module. It binds authenticated control to fixed TCP 18198 and sends
+the source application's registered framebuffer stream to fixed TCP 18197.
+Its exact 128-byte offline config is default-off, requires distinct nonzero
+control/screen secrets, exact enabled capabilities and consents, and either
+loopback or an explicitly consented private-LAN host/bind pair. Invalid,
+missing, oversized, or inconsistent config starts no network service.
+
+The implemented surfaces are bounded STATUS, authenticated cooperative
+application-local input, deterministic separately consented record/replay,
+the source title's own framebuffer stream, and a synthetic read-only debug
+root. There is no SceShell injection, global input hook, arbitrary
+process/system control, launch/reboot support, protected mount access,
+filesystem mutation, or VitaCompanion reuse. VitaCompanion ports 1337/1338,
+agent-bridge 1348, and VitaDebugger ports 18194-18196 remain forbidden.
+
+The first authorized Stage 1 run installed an earlier reviewed package and
+VitaCompanion reported `Launched.`, but neither companion socket remained
+observable and no authenticated STATUS or frame was obtained. The run stopped
+without retry and its evidence was sealed. Host diagnosis found that startup
+did not initialize/wait for NetCtl and accepted an immediate zero `SO_ERROR`
+without first waiting for nonblocking-connect writability. Implementation
+commit `5b1fc108bf9789583186913bcd4b65344142de7e` fixes both defects: it waits up
+to ten seconds for the exact configured interface address, completes screen
+connect through SceNet epoll plus `SO_ERROR`, and preserves exact cleanup
+ownership. See the
+[host-only Stage 1 diagnosis](docs/companion-stage1-host-diagnosis.md).
+
+That corrected commit passed all host C/Python tests, Vita
+`-Wall -Wextra -Werror` compile/archive/link checks, safe fSELF creation, and
+offline VPK inspection. The frozen corrected VPK is 73,849 bytes with SHA-256
+`c09057bbcc6fe71f3780f96d79282ad1059f2e70ce1b6cd53ecdf470597157df`;
+it contains only `eboot.bin` and `sce_sys/param.sfo` identifying
+`VDSCRN001`, `VitaDebug Companion Gate`, version `01.00`.
+
+This is not a hardware-success claim. Hardware contact remains on user hold.
+After that hold is explicitly lifted, the next serialized companion-only step
+is to rerun Stage 1 with the corrected frozen artifact: authenticate STATUS,
+verify a short static source-owned screen stream, then prove clean stop and
+closed/neutral ownership. Input and record/replay require separate later
+approval. PMU and RunClocks are outside companion scope. Vita suspend and
+intentional Wi-Fi/network disruption are forbidden; incidental connectivity
+loss aborts the session rather than testing reconnection. The
+[hardware runbook](docs/companion-hardware-runbook.md) records the remaining
+gates but does not authorize device contact.
+
 Host build/run override:
 
 ```powershell

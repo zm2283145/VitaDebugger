@@ -102,7 +102,10 @@ error fails closed without selecting another interface or port.
 
 Known limitations before hardware qualification:
 
-- no hardware or install behavior has been exercised;
+- the corrected build has not been exercised on hardware; an earlier package
+  was installed in a stopped Stage 1 run, whose launch anomaly and host-only
+  correction are documented in
+  [the Stage 1 diagnosis](companion-stage1-host-diagnosis.md);
 - Vita suspend and Wi-Fi/network disruption are intentionally outside this
   qualification because the device has independent reconnection issues;
 - no confidentiality is provided beyond use of an authorized trusted LAN;
