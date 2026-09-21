@@ -339,15 +339,15 @@ next bounded discriminator must record the effective bound endpoint, the
 route-selected local address, and whether an on-device self-datagram reaches
 the same socket.
 
-That discriminator produced a precise result. `getsockname` reported a
-successful wildcard bind to port 1235, the route-selected address was the
-expected `10.1.1.217`, but a peer-verified datagram sent on-device to
-`10.1.1.217:1235` timed out with `-116`. No host UDP or TCP gate ran after that
-anomaly. The admission bind address was the only relevant Vita
-`sockaddr_in` without its required `sin_len`; bind and `getsockname` success
-were therefore insufficient delivery checks. The supported minimal fixture
-fix sets that field on the UDP bind address and makes self-probe failure fatal
-to the host startup gate. It does not change production RSP behavior.
+That discriminator reported a successful wildcard bind to port 1235 and the
+expected route-selected address `10.1.1.217`, but its self-datagram timed out
+with `-116`. Review found that result inconclusive: the sender was unconnected
+when `getsockname` captured its source, so strict peer matching could reject a
+successfully delivered packet whose source was `10.1.1.217` instead of the
+reported wildcard address. The corrected diagnostic connects the sender before
+capturing its source endpoint, preserves the admission bind as the control, and
+waits for poll telemetry before a self-probe failure determines the host
+verdict. No production RSP or bind fix is yet supported.
 
 The corrected diagnostic passed this boundary on retail 3.65. The out-of-band
 ready snapshot showed listener 88, no candidate or connected socket, the test

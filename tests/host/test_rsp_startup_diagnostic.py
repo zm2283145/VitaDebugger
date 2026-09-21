@@ -29,9 +29,13 @@ def record(
     endpoint_result: int = 0,
     self_probe_result: int = 0,
 ) -> bytes:
-    if stage >= 10 and not stage_flags & (
-        diagnostic.OBS_SELF_PROBE_RECEIVED
-        | diagnostic.OBS_SELF_PROBE_FAILED
+    if (
+        stage >= 10
+        and not stage_flags & diagnostic.FAILED
+        and not stage_flags & (
+            diagnostic.OBS_SELF_PROBE_RECEIVED
+            | diagnostic.OBS_SELF_PROBE_FAILED
+        )
     ):
         stage_flags |= diagnostic.OBS_SELF_PROBE_RECEIVED
     if failed_stage_mask is None:
@@ -136,14 +140,12 @@ class StartupDiagnosticTests(unittest.TestCase):
                 stage_flags=diagnostic.FAILED,
                 build_flags=4,
                 details=(-35, 35, 200),
-                self_probe_result=-110,
             )
         )
         self.assertTrue(parsed["failed"])
         self.assertEqual(parsed["result"], -35)
         self.assertTrue(parsed["kernel_mode"])
         self.assertEqual(parsed["details_signed"], [-35, 35, 200])
-        self.assertEqual(parsed["self_probe_result"], -110)
 
     def test_decodes_persistent_self_probe_observations(self) -> None:
         flags = (
@@ -154,6 +156,7 @@ class StartupDiagnosticTests(unittest.TestCase):
         self.assertTrue(parsed["poll_entered"])
         self.assertTrue(parsed["self_probe_received"])
         self.assertFalse(parsed["self_probe_failed"])
+        self.assertFalse(parsed["diagnostic_failed"])
 
     def test_rejects_invalid_endpoint_and_self_probe_fields(self) -> None:
         received = diagnostic.OBS_SELF_PROBE_RECEIVED
@@ -177,6 +180,25 @@ class StartupDiagnosticTests(unittest.TestCase):
             )
         )
         self.assertEqual(parsed["endpoint_result"], -9)
+        self.assertTrue(parsed["diagnostic_failed"])
+
+        failed_probe = diagnostic.parse_record(
+            record(
+                20, 20, stage_flags=diagnostic.OBS_SELF_PROBE_FAILED,
+                self_probe_result=-116,
+            )
+        )
+        self.assertTrue(failed_probe["diagnostic_failed"])
+
+    def test_preserves_fatal_stage_ten_before_endpoint_telemetry(self) -> None:
+        parsed = diagnostic.parse_record(
+            record(
+                10, 10, result=-1, stage_flags=diagnostic.FAILED,
+                bound_address=0, bound_port=0,
+            )
+        )
+        self.assertTrue(parsed["failed"])
+        self.assertEqual(parsed["result"], -1)
 
     def test_accepts_zero_result_failure_and_retains_prior_failure(self) -> None:
         current_failure = diagnostic.parse_record(

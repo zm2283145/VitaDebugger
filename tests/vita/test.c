@@ -332,20 +332,33 @@ static int admission_diagnostic_start(void)
             .sin_port = htons(UVDB_ADMISSION_DIAGNOSTIC_PORT),
         };
         errno = 0;
-        ssize_t sent = sendto(
-            probe, request, sizeof(request) - 1u, 0,
-            (void*)&target, sizeof(target));
+        int probe_connect_result =
+            connect(probe, (void*)&target, sizeof(target));
         probe_result =
-            sent < 0 ? (errno ? -errno : -1) :
-            sent != (ssize_t)(sizeof(request) - 1u) ? -EIO :
-                                                          -ETIMEDOUT;
+            probe_connect_result < 0 ? (errno ? -errno : -1) :
+                                       -ETIMEDOUT;
         struct sockaddr_in probe_source = {0};
         socklen_t probe_source_size = sizeof(probe_source);
+        int probe_source_result = -1;
+        if(probe_connect_result == 0)
+        {
+            errno = 0;
+            probe_source_result =
+                getsockname(probe, (void*)&probe_source,
+                            &probe_source_size);
+            if(probe_source_result < 0)
+                probe_result = errno ? -errno : -1;
+        }
         errno = 0;
-        int probe_source_result =
-            getsockname(probe, (void*)&probe_source, &probe_source_size);
-        if(probe_source_result < 0)
-            probe_result = errno ? -errno : -1;
+        ssize_t sent =
+            probe_source_result == 0
+                ? send(probe, request, sizeof(request) - 1u, 0)
+                : -1;
+        if(probe_source_result == 0)
+            probe_result =
+                sent < 0 ? (errno ? -errno : -1) :
+                sent != (ssize_t)(sizeof(request) - 1u) ? -EIO :
+                                                              -ETIMEDOUT;
         for(int wait = 0; sent == (ssize_t)(sizeof(request) - 1u) &&
                              probe_source_result == 0 &&
                              wait < 100; ++wait)

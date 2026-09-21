@@ -135,17 +135,23 @@ def parse_record(data: bytes) -> dict[str, Any]:
     )
     if bound_port > 0xFFFF:
         raise StartupDiagnosticFailure("startup bound port is invalid")
-    if stage >= 10:
+    received = bool(stage_flags & OBS_SELF_PROBE_RECEIVED)
+    failed_probe = bool(stage_flags & OBS_SELF_PROBE_FAILED)
+    if received and failed_probe:
+        raise StartupDiagnosticFailure("startup self-probe flags are invalid")
+    if received and signed_self_probe != 0:
+        raise StartupDiagnosticFailure("startup self-probe result is inconsistent")
+    if failed_probe and signed_self_probe == 0:
+        raise StartupDiagnosticFailure("startup self-probe result is inconsistent")
+    if not received and not failed_probe and signed_self_probe != 0:
+        raise StartupDiagnosticFailure("startup self-probe result lacks status")
+    if stage >= 10 and not stage_flags & FAILED:
         if signed_endpoint == 0 and bound_port == 0:
             raise StartupDiagnosticFailure("startup bound endpoint is missing")
         if signed_endpoint != 0 and (bound_address != 0 or bound_port != 0):
             raise StartupDiagnosticFailure("startup bound endpoint is inconsistent")
-        received = bool(stage_flags & OBS_SELF_PROBE_RECEIVED)
-        failed_probe = bool(stage_flags & OBS_SELF_PROBE_FAILED)
         if received == failed_probe:
             raise StartupDiagnosticFailure("startup self-probe flags are invalid")
-        if received != (signed_self_probe == 0):
-            raise StartupDiagnosticFailure("startup self-probe result is inconsistent")
     if signed_result != 0 and not stage_flags & FAILED:
         raise StartupDiagnosticFailure("startup record failure result is inconsistent")
     if stage_flags & FAILED and not failed_stage_mask & (1 << stage):
@@ -173,6 +179,11 @@ def parse_record(data: bytes) -> dict[str, Any]:
             if failed_stage_mask & (1 << candidate)
         ],
         "any_failed": failed_stage_mask != 0,
+        "diagnostic_failed": (
+            failed_stage_mask != 0
+            or failed_probe
+            or signed_endpoint != 0
+        ),
         "details": list(details),
         "details_signed": [
             value if value < 0x80000000 else value - 0x100000000
@@ -371,7 +382,7 @@ def main() -> int:
             "format": "VITADEBUGGER-RSP-STARTUP-DIAGNOSTIC-1",
             "status": (
                 "FAIL"
-                if snapshot["selected"]["any_failed"]
+                if snapshot["selected"]["diagnostic_failed"]
                 or snapshot.get("deadline_expired")
                 else "PASS"
             ),

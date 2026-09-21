@@ -706,9 +706,11 @@ comparator. The detailed record is
   40 valid host datagrams reached parsing and no response was attempted.
   The next diagnostic proved the route-selected address was `10.1.1.217` and
   the effective bind was `0.0.0.0:1235`, but a peer-verified on-device
-  datagram to `10.1.1.217:1235` timed out. This supports the precise
-  diagnostic-fixture fix of setting Vita's required `sockaddr_in.sin_len` on
-  the admission bind; production RSP behavior is unchanged. See
+  datagram to `10.1.1.217:1235` timed out. Review found that self-probe
+  inconclusive because its unconnected sender could report a wildcard source
+  that rejects the delivered packet during peer validation. The follow-up
+  connects the sender before capturing its source and preserves the bind
+  baseline; no production RSP fix is yet supported. See
   [the confirmation record](docs/hardware/rsp-second-admission-confirmation-3.65.json)
   [the startup diagnostic record](docs/hardware/rsp-startup-diagnostic-3.65.json),
   [the poll diagnostic record](docs/hardware/rsp-poll-diagnostic-3.65.json),
