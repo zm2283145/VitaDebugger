@@ -32,6 +32,8 @@ _Static_assert(offsetof(struct vp_sampler, initialized) ==
                "legacy sampler field offsets changed");
 _Static_assert(sizeof(struct vp_sampler_status) == sizeof(uint32_t) * 5u,
                "legacy sampler status layout changed");
+_Static_assert(VP_SAMPLE_CAP_ALL == ((UINT32_C(1) << 7) - 1u),
+               "legacy sampler capability mask changed");
 
 #define CHECK(condition, message)                                           \
     do {                                                                    \
@@ -76,10 +78,19 @@ static void test_legacy_abi_layout_and_canaries(void)
     struct vp_sample sample;
     const struct vp_sample_provider provider = {
         VP_SAMPLE_PROVIDER_ABI_VERSION,
-        VP_SAMPLE_CAP_CURRENT_THREAD_PC,
+        VP_SAMPLE_CAP_CURRENT_THREAD_PC |
+            VP_SAMPLE_CAP_FOREIGN_THREAD_PC |
+            VP_SAMPLE_CAP_STABLE_IDENTITY |
+            VP_SAMPLE_CAP_FOREIGN_CONTEXT_CONFIDENCE,
         legacy_begin, NULL, legacy_end, NULL};
     const struct vp_sampler_config config = {
         &frame, 1u, 1u, VP_SAMPLE_CAP_CURRENT_THREAD_PC, 0u};
+    const struct vp_sampler_config foreign_config = {
+        &frame, 1u, 1u,
+        VP_SAMPLE_CAP_FOREIGN_THREAD_PC |
+            VP_SAMPLE_CAP_STABLE_IDENTITY |
+            VP_SAMPLE_CAP_FOREIGN_CONTEXT_CONFIDENCE,
+        0u};
     uint8_t canary[16];
     memset(&sampler, 0, sizeof(sampler));
     memset(&status, 0, sizeof(status));
@@ -97,6 +108,10 @@ static void test_legacy_abi_layout_and_canaries(void)
                   VP_RESULT_OK &&
               vp_sampler_deinit(&sampler.value) == VP_RESULT_OK,
           "legacy ABI entry points remain functional");
+    CHECK(vp_sampler_init(
+              &sampler.value, &provider, &foreign_config) ==
+              VP_ERROR_UNSUPPORTED,
+          "legacy provider may advertise foreign support but cannot request it");
     CHECK(memcmp(sampler.before, canary, sizeof(canary)) == 0 &&
               memcmp(sampler.after, canary, sizeof(canary)) == 0 &&
               memcmp(status.before, canary, sizeof(canary)) == 0 &&

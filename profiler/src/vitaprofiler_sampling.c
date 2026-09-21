@@ -17,7 +17,8 @@ static int vp_capabilities_valid(uint32_t capabilities,
                                  uint32_t provider_abi)
 {
     uint32_t foreign;
-    if (capabilities == 0u || (capabilities & ~VP_SAMPLE_CAP_ALL) != 0u)
+    if (capabilities == 0u ||
+        (capabilities & ~VP_SAMPLE_CAP_ALL_V2) != 0u)
         return 0;
     if ((capabilities & (VP_SAMPLE_CAP_CURRENT_THREAD_PC |
                          VP_SAMPLE_CAP_FOREIGN_THREAD_PC)) == 0u)
@@ -48,6 +49,34 @@ static int vp_capabilities_valid(uint32_t capabilities,
             (capabilities & VP_SAMPLE_CAP_FAULT_CONTAINED_READ) == 0u)
             return 0;
     }
+    return 1;
+}
+
+static int vp_legacy_capabilities_valid(uint32_t capabilities)
+{
+    if (capabilities == 0u ||
+        (capabilities & ~VP_SAMPLE_CAP_ALL) != 0u)
+        return 0;
+    if ((capabilities & (VP_SAMPLE_CAP_CURRENT_THREAD_PC |
+                         VP_SAMPLE_CAP_FOREIGN_THREAD_PC)) == 0u)
+        return 0;
+    if ((capabilities & VP_SAMPLE_CAP_CURRENT_THREAD_STACK) != 0u &&
+        (capabilities & VP_SAMPLE_CAP_CURRENT_THREAD_PC) == 0u)
+        return 0;
+    if ((capabilities & VP_SAMPLE_CAP_FOREIGN_THREAD_STACK) != 0u &&
+        (capabilities & VP_SAMPLE_CAP_FOREIGN_THREAD_PC) == 0u)
+        return 0;
+    if ((capabilities & (VP_SAMPLE_CAP_CURRENT_THREAD_STACK |
+                         VP_SAMPLE_CAP_FOREIGN_THREAD_STACK)) != 0u &&
+        (capabilities & VP_SAMPLE_CAP_BOUNDED_STACK_READ) == 0u)
+        return 0;
+    if ((capabilities & (VP_SAMPLE_CAP_FOREIGN_THREAD_PC |
+                         VP_SAMPLE_CAP_FOREIGN_THREAD_STACK)) != 0u &&
+        (capabilities & (VP_SAMPLE_CAP_STABLE_IDENTITY |
+                         VP_SAMPLE_CAP_FOREIGN_CONTEXT_CONFIDENCE)) !=
+            (VP_SAMPLE_CAP_STABLE_IDENTITY |
+             VP_SAMPLE_CAP_FOREIGN_CONTEXT_CONFIDENCE))
+        return 0;
     return 1;
 }
 
@@ -311,16 +340,12 @@ int vp_sampler_init(struct vp_sampler* sampler,
                    : VP_ERROR_BUSY;
     if (provider->abi_version != VP_SAMPLE_PROVIDER_ABI_VERSION)
         return VP_ERROR_UNSUPPORTED;
-    if (!vp_capabilities_valid(provider->capabilities,
-                               provider->abi_version) ||
+    if (!vp_legacy_capabilities_valid(provider->capabilities) ||
         provider->begin_sample == NULL || provider->end_sample == NULL ||
         ((provider->capabilities &
           (VP_SAMPLE_CAP_CURRENT_THREAD_STACK |
            VP_SAMPLE_CAP_FOREIGN_THREAD_STACK)) != 0u &&
-         provider->next_frame == NULL) ||
-        (provider->capabilities &
-         (VP_SAMPLE_CAP_FOREIGN_THREAD_PC |
-          VP_SAMPLE_CAP_FOREIGN_THREAD_STACK)) != 0u)
+         provider->next_frame == NULL))
         return VP_ERROR_INVALID_ARGUMENT;
     if (config->frames == NULL || config->frame_capacity == 0u ||
         config->frame_capacity > VP_SAMPLE_MAX_FRAMES ||
@@ -328,10 +353,13 @@ int vp_sampler_init(struct vp_sampler* sampler,
         config->max_depth > VP_SAMPLE_MAX_FRAMES ||
         config->frame_capacity < config->max_depth ||
         config->required_capabilities == 0u ||
-        !vp_capabilities_valid(config->required_capabilities,
-                               provider->abi_version) ||
+        !vp_legacy_capabilities_valid(config->required_capabilities) ||
         config->reserved != 0u)
         return VP_ERROR_INVALID_ARGUMENT;
+    if ((config->required_capabilities &
+         (VP_SAMPLE_CAP_FOREIGN_THREAD_PC |
+          VP_SAMPLE_CAP_FOREIGN_THREAD_STACK)) != 0u)
+        return VP_ERROR_UNSUPPORTED;
     if ((config->required_capabilities & ~provider->capabilities) != 0u)
         return VP_ERROR_UNSUPPORTED;
     memset(sampler, 0, sizeof(*sampler));

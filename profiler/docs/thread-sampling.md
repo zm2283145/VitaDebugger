@@ -48,6 +48,11 @@ unchanged. The stronger contract uses the explicitly versioned
 `vp_sample_provider_v2`, `vp_sampler_config_v2`, `vp_sampler_v2`, and
 `vp_sampler_status_v2` structures with the corresponding `*_v2()` entry
 points; v2 extensions are never read from or written through v1 storage.
+`VP_SAMPLE_CAP_ALL` retains the original v1 mask, while
+`VP_SAMPLE_CAP_ALL_V2` includes the new proof capabilities. A v1 provider may
+continue advertising its legacy foreign bits when a caller requests only
+current-thread sampling; requesting foreign sampling through v1 remains
+disabled.
 A foreign provider must use ABI v2 and advertise
 `STABLE_IDENTITY`, `EXIT_AWARE_IDENTITY`,
 `FOREIGN_CONTEXT_CONFIDENCE`, `BOUNDED_CALLBACKS`, and

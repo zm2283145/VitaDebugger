@@ -27,7 +27,9 @@ extern "C" {
      VP_SAMPLE_CAP_FOREIGN_THREAD_PC |                                     \
      VP_SAMPLE_CAP_FOREIGN_THREAD_STACK |                                  \
      VP_SAMPLE_CAP_STABLE_IDENTITY | VP_SAMPLE_CAP_BOUNDED_STACK_READ |     \
-     VP_SAMPLE_CAP_FOREIGN_CONTEXT_CONFIDENCE |                            \
+     VP_SAMPLE_CAP_FOREIGN_CONTEXT_CONFIDENCE)
+#define VP_SAMPLE_CAP_ALL_V2                                                \
+    (VP_SAMPLE_CAP_ALL |                                                    \
      VP_SAMPLE_CAP_EXIT_AWARE_IDENTITY |                                   \
      VP_SAMPLE_CAP_FAULT_CONTAINED_READ | VP_SAMPLE_CAP_BOUNDED_CALLBACKS |\
      VP_SAMPLE_CAP_RELEASE_ROLLBACK)
