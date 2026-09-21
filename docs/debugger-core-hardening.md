@@ -56,6 +56,16 @@ per-syscall active flag additionally pins the exact pointer passed to the
 network call. Results are accepted only if descriptor, generation, and
 non-closing state still match after reacquiring the debugger lock.
 
+A successful TCP `accept` is only a candidate, not a debugger generation.
+The service leaves the target running and waits for one complete,
+checksum-valid, nonempty RSP frame with a fixed two-second bound. It uses
+`MSG_PEEK`, so an admitted GDB client's first packet remains queued for the
+normal receiver and acknowledgement path. Silent health checks, port scans,
+HTTP probes, malformed frames, and peers which disconnect before that proof
+are closed while the listening socket remains available for the next client.
+Shutdown publishes and cancels the candidate descriptor just like connected
+I/O, so admission cannot add a new unbounded wait.
+
 A completed request also owns an explicit payload-borrow lifetime. Ordinary
 replies discard the request and release that lifetime before `send_packet()`
 can wait for a response ACK and compact or refill the shared receive buffer.
@@ -68,12 +78,16 @@ Server stop first closes the protocol gate and publishes `network_closing`,
 preventing a new owner or network operation from appearing after the
 quiescence check, then uses socket shutdown/abort to wake the current
 operation. A bounded five-second deadline waits for accept/send/receive and the
-complete protocol owner. It then waits for the exception guard to become idle;
-start repeats that guard fence before reopening the protocol gate. This closes
-the tail window in which an old callback had released the protocol owner but
-had not yet left the guard, so an immediate reconnect's first trap remains a
+complete protocol owner. Service and lease thread joins now use the same
+five-second bound instead of Vita's infinite `WaitThreadEnd` mode. A timeout
+retains the live thread handle and all referenced objects so a later stop can
+retry safely. Stop then waits for the exception guard to become idle; start
+repeats that guard fence before reopening the protocol gate. This closes the
+tail window in which an old callback had released the protocol owner but had
+not yet left the guard, so an immediate reconnect's first trap remains a
 primary exception. Failure retains referenced objects, so an unexpected
-firmware-level stuck syscall cannot become an infinite wait or use-after-free.
+firmware-level stuck syscall or worker cannot become an infinite wait or
+use-after-free.
 
 An expected socket HUP after `server_stop` no longer enters a synthetic trap:
 both the server recovery branch and `real_uvdb_enter()` check the stop request

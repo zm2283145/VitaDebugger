@@ -107,16 +107,21 @@ int uvdb_get_last_fault(struct uvdb_fault_info* info);
 
 // Start an opt-in debugger service thread. The service keeps accepting clean
 // reconnects and converts GDB's Ctrl-C byte into a debugger stop while the
-// application is running. Networking must already be initialized.
+// application is running. A TCP peer is not promoted and does not stop the
+// target until it sends one complete checksum-valid RSP frame; silent and
+// non-RSP probes are closed after a bounded admission window. Networking must
+// already be initialized.
 // Kernel-integrated builds first require the exact companion ABI, thread-control
 // capabilities, and inventory size. Returns 0 on success (including when already
 // running), or -1 on failure.
 int uvdb_start_server(void);
 
 // Stop and delete the debugger service thread. Any active GDB connection is
-// closed. Returns 0 on success (including when already stopped), or -1 when
-// called from an internal service thread, helper teardown fails, or a pending
-// software-breakpoint restoration must remain protected for a later retry.
+// closed. Thread joins use a fixed timeout and retain their handles for a later
+// retry rather than waiting forever. Returns 0 on success (including when
+// already stopped), or -1 when called from an internal service thread, helper
+// teardown fails, or a pending software-breakpoint restoration must remain
+// protected for a later retry.
 int uvdb_stop_server(void);
 
 // Terminally stop the service thread, restore debugger-owned handler slots,

@@ -69,6 +69,9 @@ static void uvdb_refresh_rsp_vfp_capability(void)
 #define UVDB_DEFAULT_MAX_BUFFER (256 * 1024)
 #define UVDB_MIN_BUFFER 4096
 #define UVDB_MAX_BUFFER (16 * 1024 * 1024)
+#define UVDB_THREAD_JOIN_TIMEOUT_US 5000000
+#define UVDB_GDB_ADMISSION_POLLS 2000
+#define UVDB_GDB_ADMISSION_PEEK 1024
 
 #ifdef UVDB_HOST_INTEGRATION_TEST
 typedef uintptr_t uvdb_net_syscall_arg;
@@ -251,6 +254,7 @@ int uvdb_unregister_thread(void)
 }
 
 static int uvdb_socket = -1;
+static int uvdb_candidate_socket = -1;
 static int uvdb_listen_socket = -1;
 static uint32_t uvdb_socket_generation;
 static struct uvdb_console_transport uvdb_console_transport;
@@ -753,6 +757,23 @@ static int uvdb_publish_socket(int* socket, int descriptor)
     return result;
 }
 
+static int uvdb_promote_candidate_socket(int descriptor)
+{
+    int result = -1;
+    uvdb_socket_lifecycle_lock();
+    if(uvdb_candidate_socket == descriptor && uvdb_socket < 0)
+    {
+        uvdb_candidate_socket = -1;
+        uvdb_socket = descriptor;
+        uvdb_socket_generation++;
+        if(!uvdb_socket_generation)
+            uvdb_socket_generation++;
+        result = 0;
+    }
+    uvdb_socket_lifecycle_unlock();
+    return result;
+}
+
 static void uvdb_active_socket_snapshot(int* descriptor,
                                         uint32_t* generation)
 {
@@ -826,6 +847,104 @@ static int uvdb_abort_socket(int* socket)
     if(*socket >= 0)
         result = sceNetSyscallSocketAbort(*socket, 0);
     uvdb_socket_lifecycle_unlock();
+    return result;
+}
+
+/*
+ * A TCP connect is not a debugger session. Port scanners and health checks
+ * commonly connect and either send no bytes or send another protocol. Keep
+ * the target running and the listening socket reusable until the peer has
+ * supplied one complete checksum-valid RSP frame. MSG_PEEK leaves that frame
+ * queued for the normal stopped-side receiver.
+ */
+static int uvdb_wait_for_gdb_admission(int socket)
+{
+    int epoll = sceNetEpollCreate("uvdb gdb admission", 0);
+    if(epoll < 0)
+        return -1;
+
+    SceNetEpollEvent watch;
+    memset(&watch, 0, sizeof(watch));
+    watch.events = SCE_NET_EPOLLIN | SCE_NET_EPOLLERR |
+                   SCE_NET_EPOLLHUP;
+    watch.data.fd = socket;
+    if(sceNetEpollControl(epoll, SCE_NET_EPOLL_CTL_ADD, socket,
+                          &watch) < 0)
+    {
+        sceNetEpollDestroy(epoll);
+        return -1;
+    }
+
+    int result = 0;
+    for(unsigned int poll = 0; poll < UVDB_GDB_ADMISSION_POLLS; ++poll)
+    {
+        if(__atomic_load_n(&uvdb_server_stop, __ATOMIC_ACQUIRE))
+        {
+            result = -1;
+            break;
+        }
+
+        SceNetEpollEvent ready;
+        memset(&ready, 0, sizeof(ready));
+        int count = sceNetEpollWait(epoll, &ready, 1, 0);
+        if(count < 0)
+        {
+            result = -1;
+            break;
+        }
+        if(!count)
+        {
+            sceKernelDelayThread(1000);
+            continue;
+        }
+        if(ready.events & (SCE_NET_EPOLLERR | SCE_NET_EPOLLHUP))
+            break;
+        if(!(ready.events & SCE_NET_EPOLLIN))
+        {
+            sceKernelDelayThread(1000);
+            continue;
+        }
+
+        unsigned char input[UVDB_GDB_ADMISSION_PEEK];
+        uvdb_net_syscall_arg arguments[6] = {
+            (uvdb_net_syscall_arg)socket,
+            (uvdb_net_syscall_arg)input,
+            sizeof(input),
+            MSG_PEEK,
+            0,
+            0,
+        };
+        int received = sceNetSyscallRecvfrom((void*)arguments);
+        if(received <= 0)
+            break;
+
+        size_t offset = 0;
+        while(offset < (size_t)received &&
+              (input[offset] == '+' || input[offset] == '-'))
+            ++offset;
+        if(offset == (size_t)received)
+        {
+            sceKernelDelayThread(1000);
+            continue;
+        }
+
+        struct uvdb_rsp_frame frame;
+        int frame_result = uvdb_rsp_scan_frame(
+            input + offset, (size_t)received - offset,
+            sizeof(input) - 3u, &frame);
+        if(frame_result == UVDB_RSP_FRAME_COMPLETE &&
+           frame.payload_size != 0)
+        {
+            result = 1;
+            break;
+        }
+        if(frame_result == UVDB_RSP_FRAME_DISCARD ||
+           received == (int)sizeof(input))
+            break;
+        sceKernelDelayThread(1000);
+    }
+
+    sceNetEpollDestroy(epoll);
     return result;
 }
 
@@ -927,7 +1046,8 @@ static int uvdb_wait_delete_thread(SceUID* thread, int* ended)
     if(!*ended)
     {
         int status = 0;
-        if(sceKernelWaitThreadEnd(*thread, &status, NULL) < 0)
+        unsigned int timeout = UVDB_THREAD_JOIN_TIMEOUT_US;
+        if(sceKernelWaitThreadEnd(*thread, &status, &timeout) < 0)
             return -1;
         *ended = 1;
     }
@@ -943,7 +1063,7 @@ int uvdb_configure(const struct uvdb_config* config)
     uvdb_lifecycle_lock();
     if(__atomic_load_n(&uvdb_shutdown_pending, __ATOMIC_SEQ_CST) ||
        uvdb_state != UVDB_STATE_IDLE || uvdb_socket >= 0 ||
-       uvdb_listen_socket >= 0)
+       uvdb_candidate_socket >= 0 || uvdb_listen_socket >= 0)
     {
         uvdb_lifecycle_unlock();
         return -1;
@@ -1001,6 +1121,7 @@ static int uvdb_stop_server_locked(void)
      * server can then enter its exception/all-stop cleanup path instead of
      * mistaking shutdown for a request to open a fresh listening socket. */
     uvdb_shutdown_socket(&uvdb_socket);
+    uvdb_shutdown_socket(&uvdb_candidate_socket);
     // Do not take uvdb_lock here: the blocked service or exception path may be
     // holding it while waiting for network input.
     // Abort wakes a blocking accept without closing its descriptor. The owner
@@ -1026,6 +1147,7 @@ static int uvdb_stop_server_locked(void)
          * alive until that owner has finished any stopped-side cleanup. */
         uvdb_lock();
         uvdb_close_socket(&uvdb_socket);
+        uvdb_close_socket(&uvdb_candidate_socket);
         uvdb_close_socket(&uvdb_listen_socket);
         if(uvdb_state != UVDB_STATE_ERROR)
             uvdb_state = UVDB_STATE_IDLE;
@@ -1036,6 +1158,7 @@ static int uvdb_stop_server_locked(void)
     if(thread >= 0)
     {
         uvdb_close_socket(&uvdb_socket);
+        uvdb_close_socket(&uvdb_candidate_socket);
         uvdb_close_socket(&uvdb_listen_socket);
     }
     /* Protocol-gate idleness precedes the tail of exception_handler(): that
@@ -1195,6 +1318,7 @@ void uvdb_shutdown(void)
     }
 #endif
     uvdb_close_socket(&uvdb_socket);
+    uvdb_close_socket(&uvdb_candidate_socket);
     uvdb_close_socket(&uvdb_listen_socket);
     if(uvdb_release_handlers() < 0)
     {
@@ -4428,36 +4552,80 @@ static __attribute__((used)) uint64_t real_uvdb_enter(uintptr_t lr)
         return no_trap;
     }
 
-    __atomic_store_n(&uvdb_accept_active, 1, __ATOMIC_RELEASE);
-    uvdb_unlock();
-    int accepted_socket = sceNetSyscallAccept(listen_socket, NULL, NULL);
-    uvdb_lock();
-    __atomic_store_n(&uvdb_accept_active, 0, __ATOMIC_RELEASE);
+    int accepted_socket = -1;
+    for(;;)
+    {
+        __atomic_store_n(&uvdb_accept_active, 1, __ATOMIC_RELEASE);
+        uvdb_unlock();
+        accepted_socket =
+            sceNetSyscallAccept(listen_socket, NULL, NULL);
+        uvdb_lock();
+        __atomic_store_n(&uvdb_accept_active, 0, __ATOMIC_RELEASE);
 
-    if(accepted_socket < 0)
-    {
-        uvdb_close_socket(&uvdb_listen_socket);
-        uvdb_state = __atomic_load_n(&uvdb_server_stop, __ATOMIC_SEQ_CST)
-                         ? UVDB_STATE_IDLE
-                         : UVDB_STATE_ERROR;
+        if(accepted_socket < 0)
+        {
+            uvdb_close_socket(&uvdb_listen_socket);
+            uvdb_state =
+                __atomic_load_n(&uvdb_server_stop, __ATOMIC_SEQ_CST)
+                    ? UVDB_STATE_IDLE : UVDB_STATE_ERROR;
+            uvdb_unlock();
+            return no_trap;
+        }
+        if(__atomic_load_n(&uvdb_server_stop, __ATOMIC_SEQ_CST))
+        {
+            uvdb_close_socket(&accepted_socket);
+            uvdb_close_socket(&uvdb_listen_socket);
+            uvdb_state = UVDB_STATE_IDLE;
+            uvdb_unlock();
+            return no_trap;
+        }
+        if(uvdb_publish_socket(
+               &uvdb_candidate_socket, accepted_socket) < 0)
+        {
+            uvdb_close_socket(&accepted_socket);
+            uvdb_close_socket(&uvdb_listen_socket);
+            uvdb_state = UVDB_STATE_ERROR;
+            uvdb_unlock();
+            return no_trap;
+        }
+
+        __atomic_store_n(&uvdb_accept_active, 1, __ATOMIC_RELEASE);
         uvdb_unlock();
-        return no_trap;
-    }
-    if(__atomic_load_n(&uvdb_server_stop, __ATOMIC_SEQ_CST))
-    {
-        uvdb_close_socket(&accepted_socket);
-        uvdb_close_socket(&uvdb_listen_socket);
-        uvdb_state = UVDB_STATE_IDLE;
-        uvdb_unlock();
-        return no_trap;
-    }
-    if(uvdb_publish_socket(&uvdb_socket, accepted_socket) < 0)
-    {
-        uvdb_close_socket(&accepted_socket);
-        uvdb_close_socket(&uvdb_listen_socket);
-        uvdb_state = UVDB_STATE_ERROR;
-        uvdb_unlock();
-        return no_trap;
+        int admitted = uvdb_wait_for_gdb_admission(accepted_socket);
+        uvdb_lock();
+        __atomic_store_n(&uvdb_accept_active, 0, __ATOMIC_RELEASE);
+
+        if(__atomic_load_n(&uvdb_server_stop, __ATOMIC_SEQ_CST))
+        {
+            uvdb_close_socket(&uvdb_candidate_socket);
+            uvdb_close_socket(&uvdb_listen_socket);
+            uvdb_state = UVDB_STATE_IDLE;
+            uvdb_unlock();
+            return no_trap;
+        }
+        if(admitted < 0)
+        {
+            uvdb_close_socket(&uvdb_candidate_socket);
+            uvdb_close_socket(&uvdb_listen_socket);
+            uvdb_state = UVDB_STATE_ERROR;
+            uvdb_unlock();
+            return no_trap;
+        }
+        if(!admitted)
+        {
+            uvdb_close_socket(&uvdb_candidate_socket);
+            accepted_socket = -1;
+            continue;
+        }
+        if(uvdb_promote_candidate_socket(accepted_socket) < 0)
+        {
+            uvdb_close_socket(&uvdb_candidate_socket);
+            uvdb_close_socket(&uvdb_listen_socket);
+            uvdb_state = UVDB_STATE_ERROR;
+            uvdb_unlock();
+            return no_trap;
+        }
+        break;
     }
     uvdb_close_socket(&uvdb_listen_socket);
     /* stop_server may have observed no connected socket immediately before
