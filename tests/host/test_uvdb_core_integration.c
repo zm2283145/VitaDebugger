@@ -51,9 +51,16 @@ static int fake_connected_socket_shutdown;
 static int fake_block_receive;
 static int fake_receive_blocked;
 static int fake_release_receive;
+static int fake_require_nonblocking_receive;
+static int fake_nonblocking_receive_violation;
+static int fake_receive_would_block_count;
+static int fake_peer_reset;
 static int fake_block_send;
 static int fake_send_blocked;
 static int fake_release_send;
+static int fake_require_nonblocking_send;
+static int fake_nonblocking_send_violation;
+static int fake_send_would_block_count;
 static int fake_epoll_block;
 static int fake_epoll_wait_blocked;
 static int fake_epoll_release;
@@ -124,9 +131,16 @@ static void reset_core(void)
     fake_block_receive = 0;
     fake_receive_blocked = 0;
     fake_release_receive = 0;
+    fake_require_nonblocking_receive = 0;
+    fake_nonblocking_receive_violation = 0;
+    fake_receive_would_block_count = 0;
+    fake_peer_reset = 0;
     fake_block_send = 0;
     fake_send_blocked = 0;
     fake_release_send = 0;
+    fake_require_nonblocking_send = 0;
+    fake_nonblocking_send_violation = 0;
+    fake_send_would_block_count = 0;
     fake_epoll_block = 0;
     fake_epoll_wait_blocked = 0;
     fake_epoll_release = 0;
@@ -204,10 +218,15 @@ static void queue_rsp_payload(
     size_t payload_size,
     int append_ack)
 {
-    check(payload != NULL && payload_size + 4u + (size_t)append_ack <=
+    fake_receive_size = 0;
+    fake_receive_offset = 0;
+    check(payload != NULL, "RSP fixture payload is present");
+    if(!payload)
+        return;
+    unsigned int checksum = 0;
+    check(payload_size + 4u + (size_t)append_ack <=
               sizeof(fake_receive),
           "RSP fixture fits fake receive storage");
-    unsigned int checksum = 0;
     fake_receive[0] = '$';
     memcpy(fake_receive + 1u, payload, payload_size);
     for(size_t i = 0; i < payload_size; ++i)
@@ -217,6 +236,35 @@ static void queue_rsp_payload(
     fake_receive[2u + payload_size] = digits[(checksum >> 4) & 0xfu];
     fake_receive[3u + payload_size] = digits[checksum & 0xfu];
     fake_receive_size = payload_size + 4u;
+    if(append_ack)
+        fake_receive[fake_receive_size++] = '+';
+}
+
+static void append_rsp_payload(
+    const char* payload,
+    size_t payload_size,
+    int append_ack)
+{
+    check(payload != NULL && payload_size + 4u + (size_t)append_ack <=
+              sizeof(fake_receive) - fake_receive_size,
+          "RSP fixture fits fake receive storage");
+    if(!payload ||
+       payload_size + 4u + (size_t)append_ack >
+           sizeof(fake_receive) - fake_receive_size)
+        return;
+    unsigned int checksum = 0;
+    size_t start = fake_receive_size;
+    fake_receive[start] = '$';
+    memcpy(fake_receive + start + 1u, payload, payload_size);
+    for(size_t i = 0; i < payload_size; ++i)
+        checksum += (unsigned char)payload[i];
+    static const char digits[] = "0123456789abcdef";
+    fake_receive[start + 1u + payload_size] = '#';
+    fake_receive[start + 2u + payload_size] =
+        digits[(checksum >> 4) & 0xfu];
+    fake_receive[start + 3u + payload_size] =
+        digits[checksum & 0xfu];
+    fake_receive_size += payload_size + 4u;
     if(append_ack)
         fake_receive[fake_receive_size++] = '+';
 }
@@ -660,6 +708,134 @@ static void test_disconnect_command_matrix(void)
         "disconnect during P fails closed and releases the target");
 }
 
+struct fake_exception_thread {
+    KuKernelExceptionContext context;
+};
+
+static void* run_fake_exception_handler(void* opaque)
+{
+    struct fake_exception_thread* operation = opaque;
+    fake_thread = FAKE_THREAD;
+    exception_handler(&operation->context);
+    return NULL;
+}
+
+static void queue_rst_wait_sequence(int no_ack)
+{
+    queue_rsp_payload("qSupported", strlen("qSupported"), 1);
+    if(no_ack)
+        append_rsp_payload(
+            "QStartNoAckMode", strlen("QStartNoAckMode"), 1);
+    append_rsp_payload("qOffsets", strlen("qOffsets"), !no_ack);
+    append_rsp_payload("g", 1u, !no_ack);
+    append_rsp_payload("p0", 2u, !no_ack);
+}
+
+static void queue_clean_reconnect_sequence(void)
+{
+    queue_rsp_payload("qSupported", strlen("qSupported"), 1);
+    append_rsp_payload("D", 1u, 1);
+}
+
+static void test_stopped_rst_reopens_listener(void)
+{
+    reset_core();
+    uvdb_socket = -1;
+    uvdb_state = UVDB_STATE_IDLE;
+    __atomic_store_n(&uvdb_target_stopped, 0, __ATOMIC_RELEASE);
+
+    const uintptr_t resume = UINT32_C(0x81005678);
+    const uint64_t no_trap = (uint64_t)resume << 32 | resume;
+    for(unsigned int cycle = 0; cycle < 100u; ++cycle)
+    {
+        const int no_ack = (cycle & 1u) != 0;
+        queue_rst_wait_sequence(no_ack);
+        fake_accept_calls = 1;
+        fake_transmit_size = 0;
+        fake_connected_socket_closed = 0;
+        fake_connected_socket_shutdown = 0;
+        fake_require_nonblocking_receive = 1;
+        fake_nonblocking_receive_violation = 0;
+        fake_receive_would_block_count = 0;
+        fake_peer_reset = 0;
+
+        const uint32_t failed_generation = uvdb_socket_generation + 1u;
+        check(real_uvdb_enter(resume) != no_trap &&
+                  uvdb_socket == FAKE_SOCKET &&
+                  uvdb_socket_generation == failed_generation,
+              "RST cycle admits the stopped debugger generation");
+
+        struct fake_exception_thread operation = {
+            .context = {
+                .r0 = (uint32_t)resume,
+                .pc = (uint32_t)uvdb_trap_address(),
+                .SPSR = UINT32_C(0x60000010),
+                .exceptionType =
+                    KU_KERNEL_EXCEPTION_TYPE_UNDEFINED_INSTRUCTION,
+            },
+        };
+        pthread_t stopped_thread;
+        check(pthread_create(
+                  &stopped_thread, NULL,
+                  run_fake_exception_handler, &operation) == 0,
+              "start stopped RST packet wait");
+        check(wait_for_atomic_nonzero(
+                  &fake_receive_would_block_count) == 0 &&
+                  __atomic_load_n(&uvdb_packet_io_active,
+                                  __ATOMIC_ACQUIRE) == 1 &&
+                  !uvdb_protocol_gate_is_idle(&uvdb_protocol_gate) &&
+                  uvdb_candidate_socket < 0 &&
+                  uvdb_console_transport_no_ack(
+                      &uvdb_console_transport) == no_ack,
+              "stopped packet wait publishes nonblocking I/O and ownership");
+        __atomic_store_n(&fake_peer_reset, 1, __ATOMIC_RELEASE);
+        check(pthread_join(stopped_thread, NULL) == 0,
+              "join stopped RST cleanup");
+        check(!fake_nonblocking_receive_violation &&
+                  uvdb_socket < 0 &&
+                  uvdb_state == UVDB_STATE_ERROR &&
+                  !__atomic_load_n(&uvdb_target_stopped,
+                                   __ATOMIC_ACQUIRE) &&
+                  !__atomic_load_n(&uvdb_packet_io_active,
+                                   __ATOMIC_ACQUIRE) &&
+                  uvdb_protocol_gate_is_idle(&uvdb_protocol_gate) &&
+                  uvdb_exception_guard_is_idle(&uvdb_exception_guard) &&
+                  !uvdb_console_transport_no_ack(
+                      &uvdb_console_transport),
+              "RST read error releases stopped state and protocol ownership");
+
+        queue_clean_reconnect_sequence();
+        fake_accept_calls = 1;
+        fake_transmit_size = 0;
+        fake_connected_socket_closed = 0;
+        fake_connected_socket_shutdown = 0;
+        fake_require_nonblocking_receive = 0;
+        fake_peer_reset = 0;
+        const uint32_t reconnect_generation =
+            uvdb_socket_generation + 1u;
+        check(real_uvdb_enter(resume) != no_trap &&
+                  uvdb_socket == FAKE_SOCKET &&
+                  uvdb_socket_generation == reconnect_generation,
+              "RST recovery reopens and admits a new listener generation");
+        KuKernelExceptionContext reconnect = {
+            .r0 = (uint32_t)resume,
+            .pc = (uint32_t)uvdb_trap_address(),
+            .SPSR = UINT32_C(0x60000010),
+            .exceptionType =
+                KU_KERNEL_EXCEPTION_TYPE_UNDEFINED_INSTRUCTION,
+        };
+        fake_thread = FAKE_THREAD;
+        exception_handler(&reconnect);
+        check(uvdb_socket < 0 &&
+                  uvdb_state == UVDB_STATE_IDLE &&
+                  !__atomic_load_n(&uvdb_target_stopped,
+                                   __ATOMIC_ACQUIRE) &&
+                  uvdb_protocol_gate_is_idle(&uvdb_protocol_gate) &&
+                  uvdb_exception_guard_is_idle(&uvdb_exception_guard),
+              "reconnected qSupported and detach complete cleanly");
+    }
+}
+
 struct fake_packet_io_thread {
     int send;
     int result;
@@ -723,7 +899,7 @@ static void test_connected_io_cancellation_and_exclusion(void)
           "receive cancellation drains I/O and protocol ownership");
 
     reset_core();
-    fake_block_send = 1;
+    fake_require_nonblocking_send = 1;
     struct fake_packet_io_thread send = {.send = 1};
     pthread_t send_thread;
     check(pthread_create(
@@ -744,6 +920,8 @@ static void test_connected_io_cancellation_and_exclusion(void)
     check(pthread_join(send_thread, NULL) == 0 &&
               send.result == 0 &&
               fake_connected_socket_shutdown &&
+              fake_send_would_block_count > 0 &&
+              !fake_nonblocking_send_violation &&
               __atomic_load_n(&uvdb_packet_io_active,
                               __ATOMIC_ACQUIRE) == 0 &&
               uvdb_protocol_gate_is_idle(&uvdb_protocol_gate),
@@ -933,6 +1111,7 @@ int main(void)
     test_candidate_socket_cleanup();
     test_production_frame_boundaries_and_escapes();
     test_disconnect_command_matrix();
+    test_stopped_rst_reopens_listener();
     test_connected_io_cancellation_and_exclusion();
     test_connected_hup_during_shutdown();
     test_deterministic_multithread_lifecycle_stress();
@@ -1078,6 +1257,27 @@ ssize_t sceNetSyscallRecvfrom(void* arguments)
     }
     else
         return -1;
+    if(*offset >= source_size &&
+       (int)args[0] == FAKE_SOCKET &&
+       __atomic_load_n(
+           &fake_require_nonblocking_receive, __ATOMIC_ACQUIRE))
+    {
+        if(!(args[3] & MSG_DONTWAIT))
+        {
+            __atomic_store_n(
+                &fake_nonblocking_receive_violation, 1,
+                __ATOMIC_RELEASE);
+            return -1;
+        }
+        if(!__atomic_load_n(&fake_peer_reset, __ATOMIC_ACQUIRE))
+        {
+            __atomic_add_fetch(
+                &fake_receive_would_block_count, 1,
+                __ATOMIC_RELAXED);
+            return SCE_NET_ERROR_EAGAIN;
+        }
+        return -1;
+    }
     if(*offset >= source_size)
         return -1;
     size_t available = source_size - *offset;
@@ -1095,6 +1295,27 @@ ssize_t sceNetSyscallSendto(void* arguments)
     uvdb_net_syscall_arg* args = arguments;
     if(!args || (int)args[0] != FAKE_SOCKET)
         return -1;
+    if(__atomic_load_n(
+           &fake_require_nonblocking_send, __ATOMIC_ACQUIRE))
+    {
+        if(!(args[3] & MSG_DONTWAIT))
+        {
+            __atomic_store_n(
+                &fake_nonblocking_send_violation, 1,
+                __ATOMIC_RELEASE);
+            return -1;
+        }
+        __atomic_store_n(&fake_send_blocked, 1, __ATOMIC_RELEASE);
+        if(!__atomic_load_n(
+               &fake_connected_socket_shutdown, __ATOMIC_ACQUIRE))
+        {
+            __atomic_add_fetch(
+                &fake_send_would_block_count, 1,
+                __ATOMIC_RELAXED);
+            return SCE_NET_ERROR_EAGAIN;
+        }
+        return -1;
+    }
     if(__atomic_load_n(&fake_block_send, __ATOMIC_ACQUIRE))
     {
         __atomic_store_n(&fake_send_blocked, 1, __ATOMIC_RELEASE);

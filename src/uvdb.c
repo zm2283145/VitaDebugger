@@ -519,6 +519,8 @@ static int uvdb_refresh_thread_inventory(void)
 static void uvdb_active_socket_snapshot(int* descriptor,
                                         uint32_t* generation);
 static int uvdb_begin_packet_io(int* descriptor, uint32_t* generation);
+static int uvdb_packet_io_cancelled(int descriptor, uint32_t generation);
+static int uvdb_raw_io_would_block(ssize_t result);
 
 struct buffer
 {
@@ -596,21 +598,29 @@ static size_t buffer_poll(struct buffer* buf, char** pos)
         (uvdb_net_syscall_arg)active_socket,
         (uvdb_net_syscall_arg)*pos,
         (uvdb_net_syscall_arg)chk_size,
-        0, 0, 0,
+        MSG_DONTWAIT, 0, 0,
     };
-    /* The socket shutdown path owns cancellation and waits for this flag.
-     * The surrounding whole-protocol gate excludes every other packet path
-     * from mutating `buf`, so the global state lock need not cover the wait. */
+    /* A retail RST need not wake a raw blocking recvfrom. Polling the same
+     * generation bounds peer-reset and shutdown observation while preserving
+     * an indefinitely idle debugger session. The surrounding whole-protocol
+     * gate excludes every other packet path from mutating `buf`. */
     uvdb_unlock();
-    ssize_t ans = sceNetSyscallRecvfrom((void*)args);
+    ssize_t ans;
+    for(;;)
+    {
+        ans = sceNetSyscallRecvfrom((void*)args);
+        if(!uvdb_raw_io_would_block(ans))
+            break;
+        if(uvdb_packet_io_cancelled(active_socket, active_generation))
+        {
+            ans = -1;
+            break;
+        }
+        sceKernelDelayThread(1000);
+    }
     uvdb_lock();
     __atomic_store_n(&uvdb_packet_io_active, 0, __ATOMIC_RELEASE);
-    int after_socket = -1;
-    uint32_t after_generation = 0;
-    uvdb_active_socket_snapshot(&after_socket, &after_generation);
-    if(__atomic_load_n(&uvdb_network_closing, __ATOMIC_ACQUIRE) ||
-       after_socket != active_socket ||
-       after_generation != active_generation)
+    if(uvdb_packet_io_cancelled(active_socket, active_generation))
         ans = -1;
     if(ans <= 0)
     {
@@ -681,20 +691,28 @@ static void buffer_flush(struct buffer* buf)
             (uvdb_net_syscall_arg)active_socket,
             (uvdb_net_syscall_arg)(buf->buf + pos),
             (uvdb_net_syscall_arg)(buf->size - pos),
-            0,
+            MSG_DONTWAIT,
             0,
             0,
         };
         uvdb_unlock();
-        ssize_t chk = sceNetSyscallSendto((void*)args);
+        ssize_t chk;
+        for(;;)
+        {
+            chk = sceNetSyscallSendto((void*)args);
+            if(!uvdb_raw_io_would_block(chk))
+                break;
+            if(uvdb_packet_io_cancelled(
+                   active_socket, active_generation))
+            {
+                chk = -1;
+                break;
+            }
+            sceKernelDelayThread(1000);
+        }
         uvdb_lock();
         __atomic_store_n(&uvdb_packet_io_active, 0, __ATOMIC_RELEASE);
-        int after_socket = -1;
-        uint32_t after_generation = 0;
-        uvdb_active_socket_snapshot(&after_socket, &after_generation);
-        if(__atomic_load_n(&uvdb_network_closing, __ATOMIC_ACQUIRE) ||
-           after_socket != active_socket ||
-           after_generation != active_generation)
+        if(uvdb_packet_io_cancelled(active_socket, active_generation))
             chk = -1;
         if(chk <= 0)
         {
@@ -804,6 +822,21 @@ static int uvdb_begin_packet_io(int* descriptor, uint32_t* generation)
     }
     uvdb_socket_lifecycle_unlock();
     return result;
+}
+
+static int uvdb_packet_io_cancelled(int descriptor, uint32_t generation)
+{
+    int active_socket = -1;
+    uint32_t active_generation = 0;
+    uvdb_active_socket_snapshot(&active_socket, &active_generation);
+    return __atomic_load_n(&uvdb_network_closing, __ATOMIC_ACQUIRE) ||
+           active_socket != descriptor ||
+           active_generation != generation;
+}
+
+static int uvdb_raw_io_would_block(ssize_t result)
+{
+    return (uint32_t)result == (uint32_t)SCE_NET_ERROR_EAGAIN;
 }
 
 /* Shutdown wakes a descriptor owner without transferring close ownership.
