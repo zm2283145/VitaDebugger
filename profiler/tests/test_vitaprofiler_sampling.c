@@ -5,6 +5,34 @@
 
 static int failures;
 
+struct legacy_sampler_layout {
+    const struct vp_sample_provider* provider;
+    struct vp_sample_frame* frames;
+    uint64_t active_token;
+    int32_t last_provider_error;
+    uint32_t frame_capacity;
+    uint32_t max_depth;
+    uint32_t capabilities;
+    uint32_t active;
+    uint32_t release_pending;
+    uint32_t initialized;
+};
+
+_Static_assert(sizeof(struct vp_sampler_config) ==
+                   sizeof(void*) + sizeof(uint32_t) * 4u,
+               "legacy sampler config layout changed");
+_Static_assert(sizeof(struct vp_sample_provider) ==
+                   sizeof(uint32_t) * 2u + sizeof(void*) * 4u,
+               "legacy sample provider layout changed");
+_Static_assert(sizeof(struct vp_sampler) ==
+                   sizeof(struct legacy_sampler_layout),
+               "legacy sampler layout changed");
+_Static_assert(offsetof(struct vp_sampler, initialized) ==
+                   offsetof(struct legacy_sampler_layout, initialized),
+               "legacy sampler field offsets changed");
+_Static_assert(sizeof(struct vp_sampler_status) == sizeof(uint32_t) * 5u,
+               "legacy sampler status layout changed");
+
 #define CHECK(condition, message)                                           \
     do {                                                                    \
         if (!(condition)) {                                                 \
@@ -13,8 +41,81 @@ static int failures;
         }                                                                   \
     } while (0)
 
+static int legacy_begin(void* user,
+                        const struct vp_sample_target* target,
+                        uint32_t max_depth, uint64_t* lease_token,
+                        struct vp_sample_capture* capture)
+{
+    (void)user;
+    (void)max_depth;
+    *lease_token = 1u;
+    capture->cursor.pc = UINT32_C(0x81000000);
+    capture->thread_id = target->kind == VP_SAMPLE_TARGET_CURRENT ? 1 : 0;
+    return VP_RESULT_OK;
+}
+
+static int legacy_end(void* user, uint64_t lease_token)
+{
+    (void)user;
+    return lease_token == 1u ? VP_RESULT_OK : VP_ERROR_STATE;
+}
+
+static void test_legacy_abi_layout_and_canaries(void)
+{
+    struct guarded_sampler {
+        uint8_t before[16];
+        struct vp_sampler value;
+        uint8_t after[16];
+    } sampler;
+    struct guarded_status {
+        uint8_t before[16];
+        struct vp_sampler_status value;
+        uint8_t after[16];
+    } status;
+    struct vp_sample_frame frame;
+    struct vp_sample sample;
+    const struct vp_sample_provider provider = {
+        VP_SAMPLE_PROVIDER_ABI_VERSION,
+        VP_SAMPLE_CAP_CURRENT_THREAD_PC,
+        legacy_begin, NULL, legacy_end, NULL};
+    const struct vp_sampler_config config = {
+        &frame, 1u, 1u, VP_SAMPLE_CAP_CURRENT_THREAD_PC, 0u};
+    uint8_t canary[16];
+    memset(&sampler, 0, sizeof(sampler));
+    memset(&status, 0, sizeof(status));
+    memset(canary, 0xa5, sizeof(canary));
+    memset(sampler.before, 0xa5, sizeof(sampler.before));
+    memset(sampler.after, 0xa5, sizeof(sampler.after));
+    memset(status.before, 0xa5, sizeof(status.before));
+    memset(status.after, 0xa5, sizeof(status.after));
+
+    CHECK(vp_sampler_init(&sampler.value, &provider, &config) ==
+              VP_RESULT_OK &&
+              vp_sampler_sample_current(&sampler.value, &sample) ==
+                  VP_RESULT_OK &&
+              vp_sampler_get_status(&sampler.value, &status.value) ==
+                  VP_RESULT_OK &&
+              vp_sampler_deinit(&sampler.value) == VP_RESULT_OK,
+          "legacy ABI entry points remain functional");
+    CHECK(memcmp(sampler.before, canary, sizeof(canary)) == 0 &&
+              memcmp(sampler.after, canary, sizeof(canary)) == 0 &&
+              memcmp(status.before, canary, sizeof(canary)) == 0 &&
+              memcmp(status.after, canary, sizeof(canary)) == 0,
+          "legacy sampler and status writes preserve caller canaries");
+}
+
+#define vp_sampler vp_sampler_v2
+#define vp_sampler_config vp_sampler_config_v2
+#define vp_sampler_status vp_sampler_status_v2
+#define vp_sampler_init vp_sampler_init_v2
+#define vp_sampler_deinit vp_sampler_deinit_v2
+#define vp_sampler_sample_current vp_sampler_sample_current_v2
+#define vp_sampler_sample_foreign vp_sampler_sample_foreign_v2
+#define vp_sampler_retry_release vp_sampler_retry_release_v2
+#define vp_sampler_get_status vp_sampler_get_status_v2
+
 struct fake_provider {
-    struct vp_sample_provider provider;
+    struct vp_sample_provider_v2 provider;
     struct vp_sample_cursor cursors[VP_SAMPLE_MAX_FRAMES + 1u];
     uint32_t cursor_count;
     uint32_t next_index;
@@ -99,12 +200,12 @@ static struct fake_provider make_fake(uint32_t capabilities,
 {
     struct fake_provider fake;
     memset(&fake, 0, sizeof(fake));
-    fake.provider.abi_version = VP_SAMPLE_PROVIDER_ABI_VERSION;
-    fake.provider.capabilities = capabilities;
-    fake.provider.begin_sample = fake_begin;
-    fake.provider.next_frame = fake_next;
-    fake.provider.end_sample = fake_end;
-    fake.provider.user = &fake;
+    fake.provider.base.abi_version = VP_SAMPLE_PROVIDER_ABI_VERSION_V2;
+    fake.provider.base.capabilities = capabilities;
+    fake.provider.base.begin_sample = fake_begin;
+    fake.provider.base.next_frame = fake_next;
+    fake.provider.base.end_sample = fake_end;
+    fake.provider.base.user = &fake;
     fake.provider.validate_sample = fake_validate;
     fake.provider.max_callback_us = 500u;
     fake.current_thread_id = 17;
@@ -122,7 +223,7 @@ static struct fake_provider make_fake(uint32_t capabilities,
 
 static void fix_fake_user(struct fake_provider* fake)
 {
-    fake->provider.user = fake;
+    fake->provider.base.user = fake;
 }
 
 static struct vp_sampler_config make_config(
@@ -149,16 +250,11 @@ static void test_validation_and_capabilities(void)
     CHECK(vp_sampler_init(&sampler, NULL, &config) ==
               VP_ERROR_UNSUPPORTED,
           "missing provider fails closed");
-    fake.provider.abi_version = 99u;
+    fake.provider.base.abi_version = 99u;
     CHECK(vp_sampler_init(&sampler, &fake.provider, &config) ==
               VP_ERROR_UNSUPPORTED,
           "provider ABI mismatch is unsupported");
-    fake.provider.abi_version = VP_SAMPLE_PROVIDER_ABI_VERSION_LEGACY;
-    CHECK(vp_sampler_init(&sampler, &fake.provider, &config) ==
-              VP_RESULT_OK &&
-              vp_sampler_deinit(&sampler) == VP_RESULT_OK,
-          "legacy ABI remains supported for current-thread providers");
-    fake.provider.abi_version = VP_SAMPLE_PROVIDER_ABI_VERSION;
+    fake.provider.base.abi_version = VP_SAMPLE_PROVIDER_ABI_VERSION_V2;
     config.required_capabilities =
         VP_SAMPLE_CAP_FOREIGN_THREAD_PC |
         VP_SAMPLE_CAP_STABLE_IDENTITY |
@@ -169,21 +265,21 @@ static void test_validation_and_capabilities(void)
     CHECK(vp_sampler_init(&sampler, &fake.provider, &config) ==
               VP_ERROR_UNSUPPORTED,
           "unadvertised foreign sampling is unsupported");
-    fake.provider.capabilities =
+    fake.provider.base.capabilities =
         VP_SAMPLE_CAP_FOREIGN_THREAD_PC |
         VP_SAMPLE_CAP_STABLE_IDENTITY;
-    config.required_capabilities = fake.provider.capabilities;
+    config.required_capabilities = fake.provider.base.capabilities;
     CHECK(vp_sampler_init(&sampler, &fake.provider, &config) ==
               VP_ERROR_INVALID_ARGUMENT,
           "foreign provider must advertise context confidence");
-    fake.provider.capabilities =
+    fake.provider.base.capabilities =
         VP_SAMPLE_CAP_CURRENT_THREAD_PC |
         VP_SAMPLE_CAP_CURRENT_THREAD_STACK;
-    config.required_capabilities = fake.provider.capabilities;
+    config.required_capabilities = fake.provider.base.capabilities;
     CHECK(vp_sampler_init(&sampler, &fake.provider, &config) ==
               VP_ERROR_INVALID_ARGUMENT,
           "stack provider must advertise bounded reads");
-    fake.provider.capabilities = VP_SAMPLE_CAP_CURRENT_THREAD_PC;
+    fake.provider.base.capabilities = VP_SAMPLE_CAP_CURRENT_THREAD_PC;
     config = make_config(frames, 4u, VP_SAMPLE_MAX_FRAMES + 1u,
                          VP_SAMPLE_CAP_CURRENT_THREAD_PC);
     CHECK(vp_sampler_init(&sampler, &fake.provider, &config) ==
@@ -508,6 +604,7 @@ static void test_malformed_unwind_progress(void)
 
 int main(void)
 {
+    test_legacy_abi_layout_and_canaries();
     test_validation_and_capabilities();
     test_depth_bound_and_canaries();
     test_partial_unwind_and_output_stability();

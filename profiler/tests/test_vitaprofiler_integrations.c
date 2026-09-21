@@ -6,6 +6,17 @@
 
 static int failures;
 
+_Static_assert(VP_GRAPHICS_ZONE_COUNT == 19,
+               "legacy graphics zone count changed");
+_Static_assert(VP_GRAPHICS_COUNTER_COUNT == 8,
+               "legacy graphics counter count changed");
+_Static_assert(sizeof(struct vp_graphics_name_ids) ==
+                   sizeof(uint32_t) * 28u,
+               "legacy graphics name layout changed");
+_Static_assert(offsetof(struct vp_graphics_hooks, enabled) ==
+                   sizeof(void*) + sizeof(struct vp_graphics_name_ids),
+               "legacy graphics hook offsets changed");
+
 #define CHECK(condition, message)                                             \
     do {                                                                      \
         if (!(condition)) {                                                   \
@@ -138,6 +149,64 @@ static uint64_t fake_clock(void* user)
 static uint32_t fake_thread(void* user)
 {
     return ((struct fake_source*)user)->thread_id;
+}
+
+static void test_legacy_graphics_canaries(void)
+{
+    struct guarded_names {
+        uint8_t before[16];
+        struct vp_graphics_name_ids value;
+        uint8_t after[16];
+    } names;
+    struct guarded_hooks {
+        uint8_t before[16];
+        struct vp_graphics_hooks value;
+        uint8_t after[16];
+    } hooks;
+    struct vp_context context;
+    struct vp_slot slots[8];
+    struct vp_config config;
+    struct fake_source source = {1u, 1u, 0u};
+    struct vp_name_dictionary dictionary;
+    struct vp_name_dictionary_config dictionary_config;
+    struct vp_name_entry entries[32];
+    char text[2048];
+    uint8_t canary[16];
+    memset(&names, 0, sizeof(names));
+    memset(&hooks, 0, sizeof(hooks));
+    memset(canary, 0xa5, sizeof(canary));
+    memset(names.before, 0xa5, sizeof(names.before));
+    memset(names.after, 0xa5, sizeof(names.after));
+    memset(hooks.before, 0xa5, sizeof(hooks.before));
+    memset(hooks.after, 0xa5, sizeof(hooks.after));
+    memset(&config, 0, sizeof(config));
+    config.slots = slots;
+    config.capacity = 8u;
+    config.clock = fake_clock;
+    config.clock_user = &source;
+    config.thread_id = fake_thread;
+    config.thread_user = &source;
+    memset(&dictionary_config, 0, sizeof(dictionary_config));
+    dictionary_config.entries = entries;
+    dictionary_config.entry_capacity = 32u;
+    dictionary_config.text = text;
+    dictionary_config.text_capacity = sizeof(text);
+    CHECK(vp_init(&context, &config) == VP_RESULT_OK &&
+              vp_name_dictionary_init(
+                  &dictionary, &dictionary_config) == VP_RESULT_OK &&
+              vp_graphics_register_extended_names(
+                  &dictionary, &names.value) == VP_RESULT_OK &&
+              vp_name_dictionary_seal(&dictionary) == VP_RESULT_OK &&
+              vp_graphics_hooks_init(
+                  &hooks.value, &context, &names.value) == VP_RESULT_OK,
+          "legacy graphics entry points remain functional");
+    CHECK(memcmp(names.before, canary, sizeof(canary)) == 0 &&
+              memcmp(names.after, canary, sizeof(canary)) == 0 &&
+              memcmp(hooks.before, canary, sizeof(canary)) == 0 &&
+              memcmp(hooks.after, canary, sizeof(canary)) == 0,
+          "legacy graphics registration and init preserve canaries");
+    vp_name_dictionary_deinit(&dictionary);
+    vp_deinit(&context);
 }
 
 static void test_cooperative_graphics_hooks(void)
@@ -318,7 +387,7 @@ static void test_render96ex_vitagl_callsite_sequence(void)
 
 static void test_deep_graphics_instrumentation(void)
 {
-    static const uint32_t expected_zones[VP_GRAPHICS_ZONE_COUNT] = {
+    static const uint32_t expected_zones[VP_GRAPHICS_ZONE_COUNT_V2] = {
         VP_GRAPHICS_NAME_ID_VITAGL_FRAME,
         VP_GRAPHICS_NAME_ID_VITAGL_SWAP_BUFFERS,
         VP_GRAPHICS_NAME_ID_SCEGXM_SCENE,
@@ -353,7 +422,7 @@ static void test_deep_graphics_instrumentation(void)
         VP_GRAPHICS_NAME_ID_SCEGXM_BUFFER_TRANSITION,
         VP_GRAPHICS_NAME_ID_SCEGXM_UPLOAD,
     };
-    static const uint32_t expected_counters[VP_GRAPHICS_COUNTER_COUNT] = {
+    static const uint32_t expected_counters[VP_GRAPHICS_COUNTER_COUNT_V2] = {
         VP_GRAPHICS_NAME_ID_VITAGL_DRAW_CALLS,
         VP_GRAPHICS_NAME_ID_SCEGXM_DRAW_CALLS,
         VP_GRAPHICS_NAME_ID_VITAGL_SHADER_CHANGES,
@@ -377,8 +446,8 @@ static void test_deep_graphics_instrumentation(void)
     struct vp_name_dictionary_config dictionary_config;
     struct vp_name_entry entries[64];
     char text[4096];
-    struct vp_graphics_name_ids ids;
-    struct vp_graphics_hooks hooks;
+    struct vp_graphics_name_ids_v2 ids;
+    struct vp_graphics_hooks_v2 hooks;
     struct vp_graphics_scope_stack stack;
     struct vp_zone_scope disabled_scope;
     struct vp_event events[32];
@@ -400,69 +469,69 @@ static void test_deep_graphics_instrumentation(void)
     CHECK(vp_init(&context, &config) == VP_RESULT_OK &&
               vp_name_dictionary_init(&dictionary, &dictionary_config) ==
                   VP_RESULT_OK &&
-              vp_graphics_register_extended_names(&dictionary, &ids) ==
+              vp_graphics_register_names_v2(&dictionary, &ids) ==
                   VP_RESULT_OK &&
               vp_name_dictionary_seal(&dictionary) == VP_RESULT_OK &&
-              vp_graphics_hooks_init(&hooks, &context, &ids) ==
+              vp_graphics_hooks_init_v2(&hooks, &context, &ids) ==
                   VP_RESULT_OK,
           "initialize deep graphics hooks");
-    for (i = 0u; i < VP_GRAPHICS_ZONE_COUNT; ++i)
+    for (i = 0u; i < VP_GRAPHICS_ZONE_COUNT_V2; ++i)
         CHECK(ids.zones[i] == expected_zones[i],
               "graphics zone ID remains stable");
-    for (i = 0u; i < VP_GRAPHICS_COUNTER_COUNT; ++i)
+    for (i = 0u; i < VP_GRAPHICS_COUNTER_COUNT_V2; ++i)
         CHECK(ids.counters[i] == expected_counters[i],
               "graphics counter ID remains stable");
     CHECK(ids.frames[VP_GRAPHICS_FRAME] == VP_GRAPHICS_NAME_ID_FRAME,
           "graphics frame ID remains stable");
 
-    CHECK(vp_graphics_hooks_set_enabled(&hooks, 0) == VP_RESULT_OK &&
-              vp_graphics_zone_begin(
+    CHECK(vp_graphics_hooks_set_enabled_v2(&hooks, 0) == VP_RESULT_OK &&
+              vp_graphics_zone_begin_v2(
                   &hooks, VP_GRAPHICS_ZONE_VITAGL_DRAW_CALL,
                   &disabled_scope) == VP_RESULT_OK &&
-              vp_graphics_zone_end(&hooks, &disabled_scope) ==
+              vp_graphics_zone_end_v2(&hooks, &disabled_scope) ==
                   VP_RESULT_OK &&
-              vp_graphics_counter(
+              vp_graphics_counter_v2(
                   &hooks, VP_GRAPHICS_COUNTER_VITAGL_DRAW_CALLS, 1) ==
                   VP_RESULT_OK &&
-              vp_graphics_frame_mark(&hooks, VP_GRAPHICS_FRAME) ==
+              vp_graphics_frame_mark_v2(&hooks, VP_GRAPHICS_FRAME) ==
                   VP_RESULT_OK &&
               source.clock_calls == 0u &&
               vp_drain(&context, events, 32u) == 0u,
           "runtime-disabled hooks avoid clock and ring work");
-    CHECK(vp_graphics_hooks_set_enabled(&hooks, 1) == VP_RESULT_OK,
+    CHECK(vp_graphics_hooks_set_enabled_v2(&hooks, 1) == VP_RESULT_OK,
           "enable graphics hooks");
 
     vp_graphics_scope_stack_init(&stack);
-    CHECK(VP_GRAPHICS_FRAME_MARK(&hooks, VP_GRAPHICS_FRAME) ==
+    CHECK(VP_GRAPHICS_V2_FRAME_MARK(&hooks, VP_GRAPHICS_FRAME) ==
               VP_RESULT_OK,
           "record explicit graphics frame marker");
     source.now = 100u;
-    CHECK(VP_GRAPHICS_SCOPE_PUSH(
+    CHECK(VP_GRAPHICS_V2_SCOPE_PUSH(
               &hooks, &stack, VP_GRAPHICS_ZONE_VITAGL_FRAME) ==
                   VP_RESULT_OK,
           "push outer graphics frame");
     source.now = 110u;
-    CHECK(VP_GRAPHICS_SCOPE_PUSH(
+    CHECK(VP_GRAPHICS_V2_SCOPE_PUSH(
               &hooks, &stack, VP_GRAPHICS_ZONE_VITAGL_SHADER) ==
                   VP_RESULT_OK,
           "push nested shader change");
     source.now = 115u;
-    CHECK(VP_GRAPHICS_SCOPE_POP(&hooks, &stack) == VP_RESULT_OK,
+    CHECK(VP_GRAPHICS_V2_SCOPE_POP(&hooks, &stack) == VP_RESULT_OK,
           "pop nested shader change");
     source.now = 120u;
-    CHECK(VP_GRAPHICS_SCOPE_PUSH(
+    CHECK(VP_GRAPHICS_V2_SCOPE_PUSH(
               &hooks, &stack, VP_GRAPHICS_ZONE_VITAGL_STATE) ==
                   VP_RESULT_OK,
           "push nested state change");
     source.now = 125u;
-    CHECK(VP_GRAPHICS_SCOPE_POP(&hooks, &stack) == VP_RESULT_OK,
+    CHECK(VP_GRAPHICS_V2_SCOPE_POP(&hooks, &stack) == VP_RESULT_OK,
           "pop nested state change");
-    CHECK(VP_GRAPHICS_COUNTER(
+    CHECK(VP_GRAPHICS_V2_COUNTER(
               &hooks, VP_GRAPHICS_COUNTER_VITAGL_ALLOCATION_BYTES,
               4096) == VP_RESULT_OK,
           "record allocation byte counter");
     source.now = 130u;
-    CHECK(VP_GRAPHICS_SCOPE_POP(&hooks, &stack) == VP_RESULT_OK,
+    CHECK(VP_GRAPHICS_V2_SCOPE_POP(&hooks, &stack) == VP_RESULT_OK,
           "pop outer graphics frame");
 
     count = vp_drain(&context, events, 32u);
@@ -491,23 +560,23 @@ static void test_deep_graphics_instrumentation(void)
           "graphics events preserve nested ordering and duration");
 
     source.now = 140u;
-    CHECK(VP_GRAPHICS_SCOPE_PUSH(
+    CHECK(VP_GRAPHICS_V2_SCOPE_PUSH(
               &hooks, &stack,
               VP_GRAPHICS_ZONE_VITAGL_RENDER_TARGET_TRANSITION) ==
                   VP_RESULT_OK,
           "begin render-target transition");
     source.now = 145u;
-    CHECK(VP_GRAPHICS_SCOPE_POP(&hooks, &stack) == VP_RESULT_OK &&
-              VP_GRAPHICS_ZONE_BEGIN(
+    CHECK(VP_GRAPHICS_V2_SCOPE_POP(&hooks, &stack) == VP_RESULT_OK &&
+              VP_GRAPHICS_V2_ZONE_BEGIN(
                   &hooks, VP_GRAPHICS_ZONE_SCEGXM_FENCE_WAIT,
                   &disabled_scope) == VP_RESULT_OK,
           "finish transition and begin explicit fence wait");
     source.now = 155u;
-    CHECK(VP_GRAPHICS_ZONE_END(&hooks, &disabled_scope) == VP_RESULT_OK &&
-              VP_GRAPHICS_COUNTER(
+    CHECK(VP_GRAPHICS_V2_ZONE_END(&hooks, &disabled_scope) == VP_RESULT_OK &&
+              VP_GRAPHICS_V2_COUNTER(
                   &hooks, VP_GRAPHICS_COUNTER_VITAGL_UPLOAD_BYTES,
                   8192) == VP_RESULT_OK &&
-              VP_GRAPHICS_COUNTER(
+              VP_GRAPHICS_V2_COUNTER(
                   &hooks, VP_GRAPHICS_COUNTER_SCEGXM_PROGRAM_CHANGES,
                   3) == VP_RESULT_OK,
           "record fence, upload, and program instrumentation");
@@ -532,22 +601,22 @@ static void test_deep_graphics_instrumentation(void)
     vp_graphics_scope_stack_init(&stack);
     for (i = 0u; i < VP_GRAPHICS_SCOPE_STACK_CAPACITY; ++i) {
         ++source.now;
-        CHECK(vp_graphics_scope_push(
+        CHECK(vp_graphics_scope_push_v2(
                   &hooks, &stack, VP_GRAPHICS_ZONE_SCEGXM_DRAW_SUBMIT) ==
                       VP_RESULT_OK,
               "fill bounded graphics scope stack");
     }
-    CHECK(vp_graphics_scope_push(
+    CHECK(vp_graphics_scope_push_v2(
               &hooks, &stack, VP_GRAPHICS_ZONE_SCEGXM_DRAW_SUBMIT) ==
                   VP_ERROR_CAPACITY &&
               stack.depth == VP_GRAPHICS_SCOPE_STACK_CAPACITY,
           "graphics scope stack rejects overflow");
     for (i = 0u; i < VP_GRAPHICS_SCOPE_STACK_CAPACITY; ++i) {
         ++source.now;
-        CHECK(vp_graphics_scope_pop(&hooks, &stack) == VP_RESULT_OK,
+        CHECK(vp_graphics_scope_pop_v2(&hooks, &stack) == VP_RESULT_OK,
               "drain bounded graphics scope stack");
     }
-    CHECK(vp_graphics_scope_pop(&hooks, &stack) ==
+    CHECK(vp_graphics_scope_pop_v2(&hooks, &stack) ==
               VP_ERROR_INVALID_ARGUMENT,
           "graphics scope stack rejects underflow");
     count = vp_drain(&context, events, 32u);
@@ -570,6 +639,7 @@ static void test_deep_graphics_instrumentation(void)
 int main(void)
 {
     test_guarded_pmu_provider();
+    test_legacy_graphics_canaries();
     test_cooperative_graphics_hooks();
     test_render96ex_vitagl_callsite_sequence();
     test_deep_graphics_instrumentation();

@@ -6,7 +6,7 @@
 #define VP_GRAPHICS_LEGACY_ZONE_COUNT 5u
 #define VP_GRAPHICS_LEGACY_COUNTER_COUNT 2u
 
-static const char* const vp_graphics_zone_names[VP_GRAPHICS_ZONE_COUNT] = {
+static const char* const vp_graphics_zone_names[VP_GRAPHICS_ZONE_COUNT_V2] = {
     "vitagl.frame.cpu",
     "vitagl.swap_buffers.cpu",
     "scegxm.scene.cpu",
@@ -43,7 +43,7 @@ static const char* const vp_graphics_zone_names[VP_GRAPHICS_ZONE_COUNT] = {
 };
 
 static const char* const
-    vp_graphics_counter_names[VP_GRAPHICS_COUNTER_COUNT] = {
+    vp_graphics_counter_names[VP_GRAPHICS_COUNTER_COUNT_V2] = {
         "vitagl.draw_calls",
         "scegxm.draw_calls",
         "vitagl.shader_changes",
@@ -123,6 +123,41 @@ int vp_graphics_register_extended_names(
         result = vp_name_dictionary_register(dictionary,
                                              vp_graphics_frame_names[i],
                                              &registered.frames[i]);
+        if (result != VP_RESULT_OK)
+            return result;
+    }
+    *names = registered;
+    return VP_RESULT_OK;
+}
+
+int vp_graphics_register_names_v2(
+    struct vp_name_dictionary* dictionary,
+    struct vp_graphics_name_ids_v2* names)
+{
+    struct vp_graphics_name_ids_v2 registered;
+    uint32_t i;
+    int result;
+    if (dictionary == NULL || names == NULL)
+        return VP_ERROR_INVALID_ARGUMENT;
+    memset(&registered, 0, sizeof(registered));
+    for (i = 0u; i < VP_GRAPHICS_ZONE_COUNT_V2; ++i) {
+        result = vp_name_dictionary_register(
+            dictionary, vp_graphics_zone_names[i],
+            &registered.zones[i]);
+        if (result != VP_RESULT_OK)
+            return result;
+    }
+    for (i = 0u; i < VP_GRAPHICS_COUNTER_COUNT_V2; ++i) {
+        result = vp_name_dictionary_register(
+            dictionary, vp_graphics_counter_names[i],
+            &registered.counters[i]);
+        if (result != VP_RESULT_OK)
+            return result;
+    }
+    for (i = 0u; i < VP_GRAPHICS_FRAME_COUNT; ++i) {
+        result = vp_name_dictionary_register(
+            dictionary, vp_graphics_frame_names[i],
+            &registered.frames[i]);
         if (result != VP_RESULT_OK)
             return result;
     }
@@ -264,4 +299,139 @@ int vp_graphics_scope_pop(struct vp_graphics_hooks* hooks,
     if (scope->active == 0u)
         return VP_RESULT_OK;
     return vp_graphics_zone_end(hooks, scope);
+}
+
+int vp_graphics_hooks_init_v2(
+    struct vp_graphics_hooks_v2* hooks, struct vp_context* context,
+    const struct vp_graphics_name_ids_v2* names)
+{
+    struct vp_stats stats;
+    uint32_t i;
+    if (hooks == NULL || context == NULL || names == NULL)
+        return VP_ERROR_INVALID_ARGUMENT;
+    memset(hooks, 0, sizeof(*hooks));
+    if (vp_get_stats(context, &stats) != VP_RESULT_OK)
+        return VP_ERROR_NOT_INITIALIZED;
+    for (i = 0u; i < VP_GRAPHICS_ZONE_COUNT_V2; ++i) {
+        if (names->zones[i] == 0u)
+            return VP_ERROR_INVALID_ARGUMENT;
+    }
+    for (i = 0u; i < VP_GRAPHICS_COUNTER_COUNT_V2; ++i) {
+        if (names->counters[i] == 0u)
+            return VP_ERROR_INVALID_ARGUMENT;
+    }
+    for (i = 0u; i < VP_GRAPHICS_FRAME_COUNT; ++i) {
+        if (names->frames[i] == 0u)
+            return VP_ERROR_INVALID_ARGUMENT;
+    }
+    hooks->context = context;
+    hooks->names = *names;
+    hooks->enabled = 1u;
+    hooks->initialized = VP_GRAPHICS_HOOKS_MAGIC;
+    return VP_RESULT_OK;
+}
+
+int vp_graphics_hooks_set_enabled_v2(
+    struct vp_graphics_hooks_v2* hooks, int enabled)
+{
+    if (hooks == NULL || hooks->initialized != VP_GRAPHICS_HOOKS_MAGIC ||
+        hooks->context == NULL)
+        return VP_ERROR_NOT_INITIALIZED;
+    hooks->enabled = enabled != 0 ? 1u : 0u;
+    return VP_RESULT_OK;
+}
+
+int vp_graphics_zone_begin_v2(
+    struct vp_graphics_hooks_v2* hooks, enum vp_graphics_zone zone,
+    struct vp_zone_scope* scope)
+{
+    if (hooks == NULL || hooks->initialized != VP_GRAPHICS_HOOKS_MAGIC ||
+        hooks->context == NULL)
+        return VP_ERROR_NOT_INITIALIZED;
+    if ((uint32_t)zone >= VP_GRAPHICS_ZONE_COUNT_V2 || scope == NULL)
+        return VP_ERROR_INVALID_ARGUMENT;
+    if (hooks->names.zones[(uint32_t)zone] == 0u)
+        return VP_ERROR_UNSUPPORTED;
+    if (hooks->enabled == 0u) {
+        memset(scope, 0, sizeof(*scope));
+        return VP_RESULT_OK;
+    }
+    return vp_zone_begin(
+        hooks->context, hooks->names.zones[(uint32_t)zone], scope);
+}
+
+int vp_graphics_zone_end_v2(
+    struct vp_graphics_hooks_v2* hooks, struct vp_zone_scope* scope)
+{
+    if (hooks == NULL || hooks->initialized != VP_GRAPHICS_HOOKS_MAGIC ||
+        hooks->context == NULL)
+        return VP_ERROR_NOT_INITIALIZED;
+    if (scope == NULL)
+        return VP_ERROR_INVALID_ARGUMENT;
+    if (scope->active == 0u && hooks->enabled == 0u)
+        return VP_RESULT_OK;
+    return vp_zone_end(hooks->context, scope);
+}
+
+int vp_graphics_counter_v2(
+    struct vp_graphics_hooks_v2* hooks,
+    enum vp_graphics_counter counter, int64_t value)
+{
+    if (hooks == NULL || hooks->initialized != VP_GRAPHICS_HOOKS_MAGIC ||
+        hooks->context == NULL)
+        return VP_ERROR_NOT_INITIALIZED;
+    if ((uint32_t)counter >= VP_GRAPHICS_COUNTER_COUNT_V2)
+        return VP_ERROR_INVALID_ARGUMENT;
+    if (hooks->names.counters[(uint32_t)counter] == 0u)
+        return VP_ERROR_UNSUPPORTED;
+    if (hooks->enabled == 0u)
+        return VP_RESULT_OK;
+    return vp_counter(
+        hooks->context, hooks->names.counters[(uint32_t)counter], value);
+}
+
+int vp_graphics_frame_mark_v2(
+    struct vp_graphics_hooks_v2* hooks, enum vp_graphics_frame frame)
+{
+    if (hooks == NULL || hooks->initialized != VP_GRAPHICS_HOOKS_MAGIC ||
+        hooks->context == NULL)
+        return VP_ERROR_NOT_INITIALIZED;
+    if ((uint32_t)frame >= VP_GRAPHICS_FRAME_COUNT)
+        return VP_ERROR_INVALID_ARGUMENT;
+    if (hooks->names.frames[(uint32_t)frame] == 0u)
+        return VP_ERROR_UNSUPPORTED;
+    if (hooks->enabled == 0u)
+        return VP_RESULT_OK;
+    return vp_frame_mark(
+        hooks->context, hooks->names.frames[(uint32_t)frame]);
+}
+
+int vp_graphics_scope_push_v2(
+    struct vp_graphics_hooks_v2* hooks,
+    struct vp_graphics_scope_stack* stack, enum vp_graphics_zone zone)
+{
+    int result;
+    if (stack == NULL)
+        return VP_ERROR_INVALID_ARGUMENT;
+    if (stack->depth >= VP_GRAPHICS_SCOPE_STACK_CAPACITY)
+        return VP_ERROR_CAPACITY;
+    result = vp_graphics_zone_begin_v2(
+        hooks, zone, &stack->scopes[stack->depth]);
+    if (result == VP_RESULT_OK || result == VP_RESULT_DROPPED)
+        ++stack->depth;
+    return result;
+}
+
+int vp_graphics_scope_pop_v2(
+    struct vp_graphics_hooks_v2* hooks,
+    struct vp_graphics_scope_stack* stack)
+{
+    struct vp_zone_scope* scope;
+    if (stack == NULL || stack->depth == 0u)
+        return VP_ERROR_INVALID_ARGUMENT;
+    --stack->depth;
+    scope = &stack->scopes[stack->depth];
+    if (scope->active == 0u)
+        return VP_RESULT_OK;
+    return vp_graphics_zone_end_v2(hooks, scope);
 }

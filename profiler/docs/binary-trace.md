@@ -36,7 +36,10 @@ timer unit whose presence bits the producer sets. `THREAD` carries a numeric
 thread ID, generation, optional exact identity, and optional dictionary name
 ID. `MODULE` carries an ID/generation, half-open 32-bit address range, optional
 name ID, and explicitly supplied executable/ARM/Thumb bits. No missing value is
-inferred.
+inferred. A session permits at most 64 thread declarations and 64 module
+declarations, and each `(ID, generation)` pair must be unique. Writers reject
+duplicates or excess metadata before emission; receivers enforce the same
+limits.
 
 `STATS` snapshots carry producer accepted/dropped, caller-reported transport
 loss, writer sink loss, events written, and bytes written. `END` repeats the
@@ -86,7 +89,7 @@ struct vp_stream_writer_config config = {
     .dictionary_buffer = dictionary_wire,
     .dictionary_buffer_capacity = sizeof(dictionary_wire),
 };
-struct vp_stream_writer writer;
+struct vp_stream_writer_v2 writer;
 size_t sent;
 
 struct vp_stream_v2_session session = {
@@ -99,18 +102,21 @@ struct vp_stream_v2_session session = {
     .timer_unit = "microseconds",
 };
 
-if (vp_stream_writer_init(&writer, &config) == VP_RESULT_OK &&
+if (vp_stream_writer_init_v2(&writer, &config) == VP_RESULT_OK &&
     vp_stream_writer_begin_v2(
         &writer, capture_start_us, &session) == VP_RESULT_OK) {
     while (capturing)
-        vp_stream_writer_drain(&writer, 64, &sent);
-    vp_stream_writer_drain(&writer, SIZE_MAX, &sent);
-    vp_stream_writer_close(&writer);
+        vp_stream_writer_drain_v2(&writer, 64, &sent);
+    vp_stream_writer_drain_v2(&writer, SIZE_MAX, &sent);
+    vp_stream_writer_close_v2(&writer);
     shutdown_send_side(&connection); /* END already frames clean v2 close. */
 }
 ```
 
-`vp_stream_writer_begin()` remains the byte-for-byte v1 path.
+The original `vp_stream_writer`, `vp_stream_writer_stats`, and entry points
+remain the byte-for-byte, layout-compatible v1 path. V2 uses the distinct
+`vp_stream_writer_v2` storage and `*_v2()` lifecycle so a new library never
+writes beyond legacy caller-owned objects.
 `vp_stream_writer_write_thread_v2()` and
 `vp_stream_writer_write_module_v2()` publish only source-owned metadata.
 `vp_stream_writer_write_stats_v2()` can expose loss while a session is live,

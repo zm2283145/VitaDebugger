@@ -6,6 +6,30 @@
 
 static int failures;
 
+struct legacy_stream_writer_layout {
+    struct vp_context* context;
+    const struct vp_name_dictionary* names;
+    vp_stream_write_fn write;
+    void* write_user;
+    uint8_t* dictionary_buffer;
+    size_t dictionary_buffer_capacity;
+    uint64_t bytes_written;
+    uint64_t events_written;
+    uint32_t events_lost_to_sink;
+    uint32_t state;
+    uint32_t initialized;
+};
+
+_Static_assert(sizeof(struct vp_stream_writer) ==
+                   sizeof(struct legacy_stream_writer_layout),
+               "legacy stream writer layout changed");
+_Static_assert(offsetof(struct vp_stream_writer, initialized) ==
+                   offsetof(struct legacy_stream_writer_layout, initialized),
+               "legacy stream writer field offsets changed");
+_Static_assert(sizeof(struct vp_stream_writer_stats) ==
+                   sizeof(uint64_t) * 2u + sizeof(uint32_t) * 2u,
+               "legacy stream stats layout changed");
+
 #define CHECK(condition, message)                                             \
     do {                                                                      \
         if (!(condition)) {                                                   \
@@ -20,7 +44,7 @@ struct fake_source {
 };
 
 struct memory_sink {
-    uint8_t data[4096];
+    uint8_t data[16384];
     size_t used;
     uint32_t calls;
     uint32_t fail_call;
@@ -147,6 +171,62 @@ static void init_names(struct vp_name_dictionary* names,
           "register counter name");
     CHECK(vp_name_dictionary_seal(names) == VP_RESULT_OK,
           "seal dictionary");
+}
+
+static void test_legacy_writer_canaries(void)
+{
+    struct guarded_writer {
+        uint8_t before[16];
+        struct vp_stream_writer value;
+        uint8_t after[16];
+    } writer;
+    struct guarded_stats {
+        uint8_t before[16];
+        struct vp_stream_writer_stats value;
+        uint8_t after[16];
+    } stats;
+    struct vp_context context;
+    struct vp_slot slots[8];
+    struct fake_source source = {1u, 2u};
+    struct vp_name_dictionary names;
+    struct vp_name_entry entries[4];
+    char text[128];
+    uint32_t zone_id;
+    uint32_t counter_id;
+    uint8_t dictionary_buffer[1024];
+    struct memory_sink sink;
+    struct vp_stream_writer_config config;
+    uint8_t canary[16];
+    memset(&writer, 0, sizeof(writer));
+    memset(&stats, 0, sizeof(stats));
+    memset(&sink, 0, sizeof(sink));
+    memset(canary, 0xa5, sizeof(canary));
+    memset(writer.before, 0xa5, sizeof(writer.before));
+    memset(writer.after, 0xa5, sizeof(writer.after));
+    memset(stats.before, 0xa5, sizeof(stats.before));
+    memset(stats.after, 0xa5, sizeof(stats.after));
+    init_context(&context, slots, &source);
+    init_names(&names, entries, text, &zone_id, &counter_id);
+    memset(&config, 0, sizeof(config));
+    config.context = &context;
+    config.names = &names;
+    config.write = memory_write;
+    config.write_user = &sink;
+    config.dictionary_buffer = dictionary_buffer;
+    config.dictionary_buffer_capacity = sizeof(dictionary_buffer);
+    CHECK(vp_stream_writer_init(&writer.value, &config) == VP_RESULT_OK &&
+              vp_stream_writer_begin(&writer.value, 1u) == VP_RESULT_OK &&
+              vp_stream_writer_get_stats(
+                  &writer.value, &stats.value) == VP_RESULT_OK &&
+              vp_stream_writer_close(&writer.value) == VP_RESULT_OK,
+          "legacy stream writer entry points remain functional");
+    CHECK(memcmp(writer.before, canary, sizeof(canary)) == 0 &&
+              memcmp(writer.after, canary, sizeof(canary)) == 0 &&
+              memcmp(stats.before, canary, sizeof(canary)) == 0 &&
+              memcmp(stats.after, canary, sizeof(canary)) == 0,
+          "legacy stream writer and stats preserve caller canaries");
+    vp_name_dictionary_deinit(&names);
+    vp_deinit(&context);
 }
 
 static void test_combined_stream_round_trip(void)
@@ -303,7 +383,7 @@ static void test_v2_incremental_session_round_trip(void)
     uint32_t counter_id = 0u;
     uint8_t dictionary_buffer[1024];
     struct memory_sink sink;
-    struct vp_stream_writer writer;
+    struct vp_stream_writer_v2 writer;
     struct vp_stream_writer_config config;
     struct vp_stream_v2_session session;
     struct vp_stream_v2_thread thread;
@@ -361,7 +441,7 @@ static void test_v2_incremental_session_round_trip(void)
                    VP_STREAM_V2_MODULE_ARM |
                    VP_STREAM_V2_MODULE_THUMB;
 
-    CHECK(vp_stream_writer_init(&writer, &config) == VP_RESULT_OK &&
+    CHECK(vp_stream_writer_init_v2(&writer, &config) == VP_RESULT_OK &&
               vp_stream_writer_begin_v2(&writer, 900u, &session) ==
                   VP_RESULT_OK &&
               vp_stream_writer_write_thread_v2(&writer, &thread) ==
@@ -369,18 +449,38 @@ static void test_v2_incremental_session_round_trip(void)
               vp_stream_writer_write_module_v2(&writer, &module) ==
                   VP_RESULT_OK,
           "begin v2 session and publish supplied identity metadata");
-    CHECK(vp_stream_writer_drain(&writer, 2u, &drained) == VP_RESULT_OK &&
+    CHECK(vp_stream_writer_write_thread_v2(&writer, &thread) ==
+              VP_ERROR_INVALID_ARGUMENT &&
+              vp_stream_writer_write_module_v2(&writer, &module) ==
+                  VP_ERROR_INVALID_ARGUMENT,
+          "v2 writer rejects duplicate metadata generations");
+    for (uint32_t index = 1u;
+         index < VP_STREAM_V2_MAX_THREAD_METADATA; ++index) {
+        thread.thread_id = 100u + index;
+        thread.generation = index;
+        CHECK(vp_stream_writer_write_thread_v2(&writer, &thread) ==
+                  VP_RESULT_OK,
+              "v2 writer accepts metadata within the session bound");
+    }
+    thread.thread_id = 1000u;
+    thread.generation = 1000u;
+    CHECK(vp_stream_writer_write_thread_v2(&writer, &thread) ==
+              VP_ERROR_CAPACITY,
+          "v2 writer enforces the thread metadata bound");
+    CHECK(vp_stream_writer_drain_v2(
+              &writer, 2u, &drained) == VP_RESULT_OK &&
               drained == 2u &&
               vp_stream_writer_write_stats_v2(&writer) == VP_RESULT_OK,
           "publish a bounded live v2 event chunk and stats snapshot");
-    CHECK(vp_stream_writer_drain(&writer, 8u, &drained) == VP_RESULT_OK &&
+    CHECK(vp_stream_writer_drain_v2(
+              &writer, 8u, &drained) == VP_RESULT_OK &&
               drained == 1u &&
               vp_stream_writer_set_transport_loss_v2(
                   &writer, UINT32_MAX) == VP_RESULT_OK &&
               vp_stream_writer_write_stats_v2(&writer) == VP_RESULT_OK &&
               vp_stream_writer_set_transport_loss_v2(&writer, 2u) ==
                   VP_RESULT_OK &&
-              vp_stream_writer_close(&writer) == VP_RESULT_OK,
+              vp_stream_writer_close_v2(&writer) == VP_RESULT_OK,
           "close v2 session after wrapping transport loss counter");
 
     CHECK(vp_stream_v2_cursor_init(
@@ -413,8 +513,10 @@ static void test_v2_incremental_session_round_trip(void)
           "v2 chunks expose incremental event batches");
 
     {
-        uint8_t damaged[4096];
+        uint8_t damaged[16384];
         size_t chunk_offset = 0u;
+        size_t dictionary_offset = 0u;
+        size_t thread_offset = 0u;
         size_t stats_offset = 0u;
         size_t end_offset = 0u;
         size_t last_chunk_size =
@@ -425,6 +527,11 @@ static void test_v2_incremental_session_round_trip(void)
             uint32_t chunk_type =
                 (uint32_t)damaged[chunk_offset + 8u] |
                 ((uint32_t)damaged[chunk_offset + 9u] << 8u);
+            if (chunk_type == VP_STREAM_V2_CHUNK_DICTIONARY)
+                dictionary_offset = chunk_offset;
+            if (chunk_type == VP_STREAM_V2_CHUNK_THREAD &&
+                thread_offset == 0u)
+                thread_offset = chunk_offset;
             if (chunk_type == VP_STREAM_V2_CHUNK_STATS &&
                 stats_offset == 0u)
                 stats_offset = chunk_offset;
@@ -468,6 +575,39 @@ static void test_v2_incremental_session_round_trip(void)
         CHECK(vp_stream_v2_cursor_init(
                   &cursor, damaged, sink.used, NULL) == VP_ERROR_MALFORMED,
               "END byte count must include its own complete chunk");
+        memcpy(damaged, sink.data, sink.used);
+        damaged[stats_offset + 8u] = VP_STREAM_V2_CHUNK_THREAD;
+        damaged[stats_offset + 9u] = 0u;
+        memcpy(damaged + stats_offset + VP_STREAM_V2_CHUNK_HEADER_SIZE,
+               damaged + thread_offset + VP_STREAM_V2_CHUNK_HEADER_SIZE,
+               VP_STREAM_V2_THREAD_PAYLOAD_SIZE);
+        refresh_chunk_crc(damaged + stats_offset);
+        CHECK(vp_stream_v2_cursor_init(
+                  &cursor, damaged, sink.used, NULL) == VP_ERROR_MALFORMED,
+              "v2 cursor rejects duplicate metadata generations");
+        memcpy(damaged, sink.data, sink.used);
+        {
+            uint32_t dictionary_size =
+                read_u32_le(damaged + dictionary_offset + 12u);
+            size_t insertion =
+                dictionary_offset + VP_STREAM_V2_CHUNK_HEADER_SIZE +
+                dictionary_size;
+            memmove(damaged + insertion + 1u, damaged + insertion,
+                    sink.used - insertion);
+            damaged[insertion] = 0u;
+            write_u32_le(
+                damaged + dictionary_offset + 12u, dictionary_size + 1u);
+            refresh_chunk_crc(damaged + dictionary_offset);
+            write_u64_le(
+                damaged + end_offset + 1u +
+                    VP_STREAM_V2_CHUNK_HEADER_SIZE + 24u,
+                sink.used + 1u);
+            refresh_chunk_crc(damaged + end_offset + 1u);
+            CHECK(vp_stream_v2_cursor_init(
+                      &cursor, damaged, sink.used + 1u, NULL) ==
+                      VP_ERROR_MALFORMED,
+                  "v2 dictionary chunk rejects trailing payload bytes");
+        }
     }
 }
 
@@ -490,7 +630,7 @@ static void test_v2_drain_caps_oversized_staging_buffer(void)
     uint32_t zone_id = 0u;
     uint32_t counter_id = 0u;
     struct counting_sink sink;
-    struct vp_stream_writer writer;
+    struct vp_stream_writer_v2 writer;
     struct vp_stream_writer_config config;
     struct vp_stream_v2_session session;
     struct vp_stats ring;
@@ -529,20 +669,20 @@ static void test_v2_drain_caps_oversized_staging_buffer(void)
         VP_STREAM_V2_MAX_CHUNK_PAYLOAD + VP_WIRE_EVENT_SIZE;
     memset(&session, 0, sizeof(session));
     session.session_id = 1u;
-    CHECK(vp_stream_writer_init(&writer, &config) == VP_RESULT_OK &&
+    CHECK(vp_stream_writer_init_v2(&writer, &config) == VP_RESULT_OK &&
               vp_stream_writer_begin_v2(&writer, 0u, &session) ==
                   VP_RESULT_OK &&
-              vp_stream_writer_drain(&writer, SIZE_MAX, &drained) ==
+              vp_stream_writer_drain_v2(&writer, SIZE_MAX, &drained) ==
                   VP_RESULT_OK &&
               drained == maximum_events &&
               sink.largest_write <= VP_STREAM_V2_MAX_CHUNK_PAYLOAD &&
               vp_get_stats(&context, &ring) == VP_RESULT_OK &&
               ring.pending == 1u,
           "oversized staging is capped before events leave the ring");
-    CHECK(vp_stream_writer_drain(&writer, SIZE_MAX, &drained) ==
+    CHECK(vp_stream_writer_drain_v2(&writer, SIZE_MAX, &drained) ==
                   VP_RESULT_OK &&
               drained == 1u &&
-              vp_stream_writer_close(&writer) == VP_RESULT_OK,
+              vp_stream_writer_close_v2(&writer) == VP_RESULT_OK,
           "remaining event drains into a second valid v2 chunk");
     vp_name_dictionary_deinit(&names);
     vp_deinit(&context);
@@ -552,6 +692,7 @@ static void test_v2_drain_caps_oversized_staging_buffer(void)
 
 int main(void)
 {
+    test_legacy_writer_canaries();
     test_combined_stream_round_trip();
     test_fail_closed_sink_lifecycle();
     test_v2_incremental_session_round_trip();

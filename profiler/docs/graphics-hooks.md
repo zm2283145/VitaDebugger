@@ -16,12 +16,16 @@ or CPU waits.
 
 ## Stable operations
 
-`vp_graphics_register_extended_names()` registers all labels before the
+`vp_graphics_register_names_v2()` registers all labels before the
 dictionary is sealed. Their FNV-1a IDs are public `VP_GRAPHICS_NAME_ID_*`
 constants and are tested so captures remain comparable. The original
+`vp_graphics_name_ids`, `vp_graphics_hooks`, count constants, and entry points
+retain their original 19-zone/eight-counter ABI.
 `vp_graphics_register_names()` remains the compatibility path for the five
-original zones and two draw counters; deeper helpers return
-`VP_ERROR_UNSUPPORTED` when initialized from that smaller name set.
+original zones and two draw counters, while
+`vp_graphics_register_extended_names()` retains the pre-v2 19-zone/eight-
+counter set. Deeper helpers use the distinct v2 structures and return
+`VP_ERROR_UNSUPPORTED` through legacy hooks.
 
 | Kind | Stable name | Intended owned boundary |
 | --- | --- | --- |
@@ -76,18 +80,20 @@ answer different questions than one broad scene-flow zone.
 An enabled integration:
 
 1. initializes the caller-owned profiler context and name dictionary;
-2. calls `vp_graphics_register_extended_names()` while the dictionary is
+2. calls `vp_graphics_register_names_v2()` while the dictionary is
    mutable;
-3. seals the dictionary and calls `vp_graphics_hooks_init()`;
+3. seals the dictionary and calls `vp_graphics_hooks_init_v2()`;
 4. emits from application-owned call sites; and
 5. stops producers and drains before deinitializing caller-owned storage.
 
-Define `VITAPROFILER_GRAPHICS_ENABLED` only for instrumented builds and use the
-uppercase `VP_GRAPHICS_*` call-site macros. When the definition is absent,
+Use `vp_graphics_name_ids_v2`, `vp_graphics_hooks_v2`, and the uppercase
+`VP_GRAPHICS_V2_*` call-site macros for the complete label set. Define
+`VITAPROFILER_GRAPHICS_ENABLED` only for instrumented builds. When the
+definition is absent,
 those macros do not evaluate their arguments and compile to no profiler calls.
 The graphics operation itself must always remain outside the macro.
 
-`vp_graphics_hooks_set_enabled()` additionally provides a runtime switch. A
+`vp_graphics_hooks_set_enabled_v2()` additionally provides a runtime switch. A
 runtime-disabled hook checks one flag but does not read the clock or touch the
 ring. Toggle only while graphics-helper producers are quiescent and no
 graphics scope is active. Initialization, runtime toggle, dictionary storage,
@@ -105,33 +111,33 @@ void render_one_frame(struct renderer* renderer)
     struct vp_graphics_scope_stack scopes;
 
     vp_graphics_scope_stack_init(&scopes);
-    (void)VP_GRAPHICS_FRAME_MARK(&renderer->graphics, VP_GRAPHICS_FRAME);
-    (void)VP_GRAPHICS_SCOPE_PUSH(
+    (void)VP_GRAPHICS_V2_FRAME_MARK(&renderer->graphics, VP_GRAPHICS_FRAME);
+    (void)VP_GRAPHICS_V2_SCOPE_PUSH(
         &renderer->graphics, &scopes, VP_GRAPHICS_ZONE_VITAGL_FRAME);
 
     if (renderer->shader_dirty) {
-        (void)VP_GRAPHICS_SCOPE_PUSH(
+        (void)VP_GRAPHICS_V2_SCOPE_PUSH(
             &renderer->graphics, &scopes, VP_GRAPHICS_ZONE_VITAGL_SHADER);
         bind_current_shader(renderer);
-        (void)VP_GRAPHICS_SCOPE_POP(&renderer->graphics, &scopes);
+        (void)VP_GRAPHICS_V2_SCOPE_POP(&renderer->graphics, &scopes);
         ++renderer->shader_changes;
     }
 
     draw_scene(renderer);
 
-    (void)VP_GRAPHICS_SCOPE_PUSH(
+    (void)VP_GRAPHICS_V2_SCOPE_PUSH(
         &renderer->graphics, &scopes,
         VP_GRAPHICS_ZONE_VITAGL_SWAP_BUFFERS);
     vglSwapBuffers(GL_FALSE);
-    (void)VP_GRAPHICS_SCOPE_POP(&renderer->graphics, &scopes);
+    (void)VP_GRAPHICS_V2_SCOPE_POP(&renderer->graphics, &scopes);
 
-    (void)VP_GRAPHICS_COUNTER(
+    (void)VP_GRAPHICS_V2_COUNTER(
         &renderer->graphics, VP_GRAPHICS_COUNTER_VITAGL_DRAW_CALLS,
         renderer->draw_calls);
-    (void)VP_GRAPHICS_COUNTER(
+    (void)VP_GRAPHICS_V2_COUNTER(
         &renderer->graphics, VP_GRAPHICS_COUNTER_VITAGL_SHADER_CHANGES,
         renderer->shader_changes);
-    (void)VP_GRAPHICS_SCOPE_POP(&renderer->graphics, &scopes);
+    (void)VP_GRAPHICS_V2_SCOPE_POP(&renderer->graphics, &scopes);
 }
 ```
 
@@ -157,14 +163,14 @@ int submit_display_entry(struct renderer* renderer)
     int profile_result;
     int result;
 
-    profile_result = VP_GRAPHICS_ZONE_BEGIN(
+    profile_result = VP_GRAPHICS_V2_ZONE_BEGIN(
         &renderer->graphics,
         VP_GRAPHICS_ZONE_SCEGXM_DISPLAY_QUEUE_ADD_WAIT, &submit);
     result = sceGxmDisplayQueueAddEntry(
         renderer->old_sync, renderer->new_sync,
         renderer->display_data);
     if (profile_result == VP_RESULT_OK)
-        (void)VP_GRAPHICS_ZONE_END(&renderer->graphics, &submit);
+        (void)VP_GRAPHICS_V2_ZONE_END(&renderer->graphics, &submit);
     return result;
 }
 ```

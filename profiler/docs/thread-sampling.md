@@ -43,6 +43,11 @@ enough. Its identity must include a logical lifetime epoch: thread exit makes
 the identity stale even if the platform can retain a dormant/restartable object.
 
 ABI-v1 providers remain accepted for cooperative current-thread sampling only.
+Their original provider/config/sampler/status layouts and entry points are
+unchanged. The stronger contract uses the explicitly versioned
+`vp_sample_provider_v2`, `vp_sampler_config_v2`, `vp_sampler_v2`, and
+`vp_sampler_status_v2` structures with the corresponding `*_v2()` entry
+points; v2 extensions are never read from or written through v1 storage.
 A foreign provider must use ABI v2 and advertise
 `STABLE_IDENTITY`, `EXIT_AWARE_IDENTITY`,
 `FOREIGN_CONTEXT_CONFIDENCE`, `BOUNDED_CALLBACKS`, and

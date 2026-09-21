@@ -7,8 +7,8 @@
 extern "C" {
 #endif
 
-#define VP_SAMPLE_PROVIDER_ABI_VERSION_LEGACY 1u
-#define VP_SAMPLE_PROVIDER_ABI_VERSION 2u
+#define VP_SAMPLE_PROVIDER_ABI_VERSION 1u
+#define VP_SAMPLE_PROVIDER_ABI_VERSION_V2 2u
 #define VP_SAMPLE_MAX_FRAMES 64u
 
 #define VP_SAMPLE_CAP_CURRENT_THREAD_PC (UINT32_C(1) << 0)
@@ -131,6 +131,10 @@ struct vp_sample_provider {
     vp_sample_next_frame_fn next_frame;
     vp_sample_end_fn end_sample;
     void* user;
+};
+
+struct vp_sample_provider_v2 {
+    struct vp_sample_provider base;
     vp_sample_validate_fn validate_sample;
     /* Worst-case callback bound promised by the provider. Foreign admission
      * requires a nonzero value no larger than config.callback_timeout_us. */
@@ -139,6 +143,14 @@ struct vp_sample_provider {
 };
 
 struct vp_sampler_config {
+    struct vp_sample_frame* frames;
+    uint32_t frame_capacity;
+    uint32_t max_depth;
+    uint32_t required_capabilities;
+    uint32_t reserved;
+};
+
+struct vp_sampler_config_v2 {
     struct vp_sample_frame* frames;
     uint32_t frame_capacity;
     uint32_t max_depth;
@@ -157,10 +169,24 @@ struct vp_sampler {
     uint32_t frame_capacity;
     uint32_t max_depth;
     uint32_t capabilities;
-    uint32_t callback_timeout_us;
     uint32_t active;
     uint32_t release_pending;
     uint32_t initialized;
+};
+
+struct vp_sampler_v2 {
+    const struct vp_sample_provider_v2* provider;
+    struct vp_sample_frame* frames;
+    uint64_t active_token;
+    int32_t last_provider_error;
+    uint32_t frame_capacity;
+    uint32_t max_depth;
+    uint32_t capabilities;
+    uint32_t active;
+    uint32_t release_pending;
+    uint32_t initialized;
+    uint32_t reserved_v1_padding;
+    uint32_t callback_timeout_us;
 };
 
 struct vp_sample {
@@ -179,10 +205,18 @@ struct vp_sample {
 struct vp_sampler_status {
     uint32_t capabilities;
     uint32_t max_depth;
-    uint32_t callback_timeout_us;
     uint32_t active;
     uint32_t release_pending;
     int32_t last_provider_error;
+};
+
+struct vp_sampler_status_v2 {
+    uint32_t capabilities;
+    uint32_t max_depth;
+    uint32_t active;
+    uint32_t release_pending;
+    int32_t last_provider_error;
+    uint32_t callback_timeout_us;
 };
 
 /*
@@ -198,7 +232,12 @@ struct vp_sampler_status {
 int vp_sampler_init(struct vp_sampler* sampler,
                     const struct vp_sample_provider* provider,
                     const struct vp_sampler_config* config);
+int vp_sampler_init_v2(
+    struct vp_sampler_v2* sampler,
+    const struct vp_sample_provider_v2* provider,
+    const struct vp_sampler_config_v2* config);
 int vp_sampler_deinit(struct vp_sampler* sampler);
+int vp_sampler_deinit_v2(struct vp_sampler_v2* sampler);
 
 /* Current-thread callbacks execute synchronously on the calling thread.
  * Foreign sampling requires a positive thread ID and nonzero stable identity.
@@ -208,12 +247,31 @@ int vp_sampler_sample_current(struct vp_sampler* sampler,
 int vp_sampler_sample_foreign(struct vp_sampler* sampler,
                               int32_t thread_id, uint64_t identity,
                               struct vp_sample* sample);
+int vp_sampler_sample_current_v2(struct vp_sampler_v2* sampler,
+                                 struct vp_sample* sample);
+int vp_sampler_sample_foreign_v2(struct vp_sampler_v2* sampler,
+                                 int32_t thread_id, uint64_t identity,
+                                 struct vp_sample* sample);
 
 /* A failed end_sample quarantines the sampler. No new sample is admitted until
  * this retry succeeds; deinit also refuses to discard the obligation. */
 int vp_sampler_retry_release(struct vp_sampler* sampler);
+int vp_sampler_retry_release_v2(struct vp_sampler_v2* sampler);
 int vp_sampler_get_status(const struct vp_sampler* sampler,
                           struct vp_sampler_status* status);
+int vp_sampler_get_status_v2(
+    const struct vp_sampler_v2* sampler,
+    struct vp_sampler_status_v2* status);
+
+#if defined(__cplusplus)
+static_assert(offsetof(struct vp_sampler_v2, callback_timeout_us) ==
+                  sizeof(struct vp_sampler),
+              "sampler v2 must preserve the v1 prefix");
+#else
+_Static_assert(offsetof(struct vp_sampler_v2, callback_timeout_us) ==
+                   sizeof(struct vp_sampler),
+               "sampler v2 must preserve the v1 prefix");
+#endif
 
 #ifdef __cplusplus
 }

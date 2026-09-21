@@ -40,6 +40,8 @@ STREAM_V2_STATS_PAYLOAD_SIZE = 32
 STREAM_V2_TIMER_SOURCE_MAX = 40
 STREAM_V2_TIMER_UNIT_MAX = 16
 STREAM_V2_MAX_CHUNK_PAYLOAD = 2 * 1024 * 1024
+STREAM_V2_MAX_THREAD_METADATA = 64
+STREAM_V2_MAX_MODULE_METADATA = 64
 
 STREAM_V2_CHUNK_SESSION = 1
 STREAM_V2_CHUNK_DICTIONARY = 2
@@ -487,6 +489,8 @@ class IncrementalTraceDecoder:
         self._events: list[Event] = []
         self._threads: list[ThreadIdentity] = []
         self._modules: list[ModuleRange] = []
+        self._thread_keys: set[tuple[int, int]] = set()
+        self._module_keys: set[tuple[int, int]] = set()
         self._loss: LossCounters | None = None
         self._complete = False
         self._finished = False
@@ -672,9 +676,12 @@ class IncrementalTraceDecoder:
             thread_id, generation,
             identity if flags & STREAM_V2_THREAD_IDENTITY else None, name_id,
             len(self._events))
-        if any((existing.thread_id, existing.generation) ==
-               (thread_id, generation) for existing in self._threads):
+        key = (thread_id, generation)
+        if key in self._thread_keys:
             raise TraceFormatError("duplicate v2 thread generation")
+        if len(self._thread_keys) == STREAM_V2_MAX_THREAD_METADATA:
+            raise TraceFormatError("v2 thread metadata exceeds safety limit")
+        self._thread_keys.add(key)
         self._threads.append(item)
 
     def _decode_v2_module(self, payload: bytes) -> None:
@@ -692,9 +699,12 @@ class IncrementalTraceDecoder:
             bool(flags & STREAM_V2_MODULE_EXECUTABLE),
             bool(flags & STREAM_V2_MODULE_ARM),
             bool(flags & STREAM_V2_MODULE_THUMB))
-        if any((existing.module_id, existing.generation) ==
-               (module_id, generation) for existing in self._modules):
+        key = (module_id, generation)
+        if key in self._module_keys:
             raise TraceFormatError("duplicate v2 module generation")
+        if len(self._module_keys) == STREAM_V2_MAX_MODULE_METADATA:
+            raise TraceFormatError("v2 module metadata exceeds safety limit")
+        self._module_keys.add(key)
         self._modules.append(item)
 
     @staticmethod

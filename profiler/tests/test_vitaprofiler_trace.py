@@ -197,6 +197,20 @@ def make_run_clocks_metadata(**overrides: object) -> dict[str, object]:
     return metadata
 
 
+def split_v2_chunks(raw: bytes) -> list[tuple[int, bytes, bytes]]:
+    chunks: list[tuple[int, bytes, bytes]] = []
+    offset = 0
+    while offset < len(raw):
+        fields = trace.STREAM_V2_CHUNK_HEADER.unpack_from(raw, offset)
+        total_size = trace.STREAM_V2_CHUNK_HEADER_SIZE + fields[5]
+        chunk = raw[offset:offset + total_size]
+        chunks.append((
+            fields[3], chunk,
+            chunk[trace.STREAM_V2_CHUNK_HEADER_SIZE:]))
+        offset += total_size
+    return chunks
+
+
 class DecodeTests(unittest.TestCase):
     def test_v1_compatibility_and_v2_metadata_exports(self):
         v1 = trace.decode_capture(make_capture())
@@ -255,6 +269,63 @@ class DecodeTests(unittest.TestCase):
         capture = trace.decode_capture(raw)
         self.assertTrue(capture.complete)
         self.assertEqual(capture.loss.producer_accepted, 0)
+
+    def test_v2_rejects_duplicate_and_excess_metadata(self):
+        chunks = split_v2_chunks(make_v2_capture())
+        thread_index = next(
+            index for index, item in enumerate(chunks)
+            if item[0] == trace.STREAM_V2_CHUNK_THREAD)
+        decoder = trace.IncrementalTraceDecoder()
+        decoder.feed(b"".join(item[1]
+                              for item in chunks[:thread_index + 1]))
+        with self.assertRaisesRegex(
+                trace.TraceFormatError, "duplicate.*thread"):
+            decoder.feed(encode_v2_chunk(
+                trace.STREAM_V2_CHUNK_THREAD,
+                thread_index + 1, chunks[thread_index][2]))
+        module_index = next(
+            index for index, item in enumerate(chunks)
+            if item[0] == trace.STREAM_V2_CHUNK_MODULE)
+        decoder = trace.IncrementalTraceDecoder()
+        decoder.feed(b"".join(item[1]
+                              for item in chunks[:module_index + 1]))
+        with self.assertRaisesRegex(
+                trace.TraceFormatError, "duplicate.*module"):
+            decoder.feed(encode_v2_chunk(
+                trace.STREAM_V2_CHUNK_MODULE,
+                module_index + 1, chunks[module_index][2]))
+
+        decoder = trace.IncrementalTraceDecoder()
+        decoder.feed(chunks[0][1] + chunks[1][1])
+        for index in range(trace.STREAM_V2_MAX_THREAD_METADATA):
+            payload = trace.STREAM_V2_THREAD.pack(
+                0, index + 1, 1, 0, 0, 0)
+            decoder.feed(encode_v2_chunk(
+                trace.STREAM_V2_CHUNK_THREAD, index + 2, payload))
+        payload = trace.STREAM_V2_THREAD.pack(
+            0, 1000, 1, 0, 0, 0)
+        with self.assertRaisesRegex(
+                trace.TraceFormatError, "thread metadata.*limit"):
+            decoder.feed(encode_v2_chunk(
+                trace.STREAM_V2_CHUNK_THREAD,
+                trace.STREAM_V2_MAX_THREAD_METADATA + 2, payload))
+
+        decoder = trace.IncrementalTraceDecoder()
+        decoder.feed(chunks[0][1] + chunks[1][1])
+        for index in range(trace.STREAM_V2_MAX_MODULE_METADATA):
+            payload = trace.STREAM_V2_MODULE.pack(
+                index + 1, 1, 0x81000000, 0x81001000, 0,
+                trace.STREAM_V2_MODULE_ARM, 0)
+            decoder.feed(encode_v2_chunk(
+                trace.STREAM_V2_CHUNK_MODULE, index + 2, payload))
+        payload = trace.STREAM_V2_MODULE.pack(
+            1000, 1, 0x81000000, 0x81001000, 0,
+            trace.STREAM_V2_MODULE_ARM, 0)
+        with self.assertRaisesRegex(
+                trace.TraceFormatError, "module metadata.*limit"):
+            decoder.feed(encode_v2_chunk(
+                trace.STREAM_V2_CHUNK_MODULE,
+                trace.STREAM_V2_MAX_MODULE_METADATA + 2, payload))
 
     def test_v2_corrupt_truncated_version_and_lifecycle_fail_closed(self):
         raw = make_v2_capture()

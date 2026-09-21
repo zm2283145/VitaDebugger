@@ -23,6 +23,8 @@ typedef int (*vp_stream_write_fn)(void* user, const uint8_t* data,
 #define VP_STREAM_V2_TIMER_SOURCE_MAX 40u
 #define VP_STREAM_V2_TIMER_UNIT_MAX 16u
 #define VP_STREAM_V2_MAX_CHUNK_PAYLOAD (2u * 1024u * 1024u)
+#define VP_STREAM_V2_MAX_THREAD_METADATA 64u
+#define VP_STREAM_V2_MAX_MODULE_METADATA 64u
 
 enum vp_stream_v2_chunk_type {
     VP_STREAM_V2_CHUNK_SESSION = 1,
@@ -141,20 +143,44 @@ struct vp_stream_writer {
     uint64_t bytes_written;
     uint64_t events_written;
     uint32_t events_lost_to_sink;
-    uint32_t transport_events_lost;
-    uint32_t chunk_sequence;
-    uint32_t wire_version;
     uint32_t state;
     uint32_t initialized;
+};
+
+struct vp_stream_writer_v2 {
+    struct vp_context* context;
+    const struct vp_name_dictionary* names;
+    vp_stream_write_fn write;
+    void* write_user;
+    uint8_t* dictionary_buffer;
+    size_t dictionary_buffer_capacity;
+    uint64_t bytes_written;
+    uint64_t events_written;
+    uint32_t events_lost_to_sink;
+    uint32_t state;
+    uint32_t initialized;
+    uint32_t transport_events_lost;
+    uint32_t chunk_sequence;
+    uint64_t thread_metadata_keys[VP_STREAM_V2_MAX_THREAD_METADATA];
+    uint64_t module_metadata_keys[VP_STREAM_V2_MAX_MODULE_METADATA];
+    uint32_t thread_metadata_count;
+    uint32_t module_metadata_count;
 };
 
 struct vp_stream_writer_stats {
     uint64_t bytes_written;
     uint64_t events_written;
     uint32_t events_lost_to_sink;
+    uint32_t state;
+};
+
+struct vp_stream_writer_stats_v2 {
+    uint64_t bytes_written;
+    uint64_t events_written;
+    uint32_t events_lost_to_sink;
+    uint32_t state;
     uint32_t transport_events_lost;
     uint32_t wire_version;
-    uint32_t state;
 };
 
 /* Initialization performs all capacity and sealed-dictionary checks before a
@@ -169,18 +195,28 @@ int vp_stream_writer_begin(struct vp_stream_writer* writer,
 /* Version 2 wraps the unchanged VPNM dictionary and 32-byte event records in
  * CRC-checked, sequence-numbered chunks. The caller-owned dictionary buffer is
  * reused as bounded event-chunk staging after begin. */
+int vp_stream_writer_init_v2(
+    struct vp_stream_writer_v2* writer,
+    const struct vp_stream_writer_config* config);
 int vp_stream_writer_begin_v2(
-    struct vp_stream_writer* writer, uint64_t stream_start_us,
+    struct vp_stream_writer_v2* writer, uint64_t stream_start_us,
     const struct vp_stream_v2_session* session);
 int vp_stream_writer_write_thread_v2(
-    struct vp_stream_writer* writer,
+    struct vp_stream_writer_v2* writer,
     const struct vp_stream_v2_thread* thread);
 int vp_stream_writer_write_module_v2(
-    struct vp_stream_writer* writer,
+    struct vp_stream_writer_v2* writer,
     const struct vp_stream_v2_module* module);
-int vp_stream_writer_write_stats_v2(struct vp_stream_writer* writer);
+int vp_stream_writer_write_stats_v2(struct vp_stream_writer_v2* writer);
 int vp_stream_writer_set_transport_loss_v2(
-    struct vp_stream_writer* writer, uint32_t events_lost);
+    struct vp_stream_writer_v2* writer, uint32_t events_lost);
+int vp_stream_writer_drain_v2(
+    struct vp_stream_writer_v2* writer,
+    size_t max_events, size_t* events_written);
+int vp_stream_writer_close_v2(struct vp_stream_writer_v2* writer);
+int vp_stream_writer_get_stats_v2(
+    const struct vp_stream_writer_v2* writer,
+    struct vp_stream_writer_stats_v2* stats);
 int vp_stream_writer_drain(struct vp_stream_writer* writer,
                            size_t max_events, size_t* events_written);
 /* Stop producers first, drain until the ring is empty, then close. Close

@@ -41,7 +41,7 @@ static int vp_capabilities_valid(uint32_t capabilities,
             VP_SAMPLE_CAP_EXIT_AWARE_IDENTITY |
             VP_SAMPLE_CAP_BOUNDED_CALLBACKS |
             VP_SAMPLE_CAP_RELEASE_ROLLBACK;
-        if (provider_abi != VP_SAMPLE_PROVIDER_ABI_VERSION ||
+        if (provider_abi != VP_SAMPLE_PROVIDER_ABI_VERSION_V2 ||
             (capabilities & required) != required)
             return 0;
         if ((capabilities & VP_SAMPLE_CAP_FOREIGN_THREAD_STACK) != 0u &&
@@ -67,6 +67,43 @@ static uint32_t vp_sampler_stop_reason(int result)
     default:
         return VP_SAMPLE_STOP_PROVIDER_ERROR;
     }
+}
+
+static const struct vp_sample_provider_v2* vp_provider_v2(
+    const struct vp_sample_provider* provider)
+{
+    return (const struct vp_sample_provider_v2*)provider;
+}
+
+static void vp_sampler_v2_load(const struct vp_sampler_v2* source,
+                               struct vp_sampler* target)
+{
+    memset(target, 0, sizeof(*target));
+    if (source == NULL)
+        return;
+    target->provider =
+        source->provider != NULL ? &source->provider->base : NULL;
+    target->frames = source->frames;
+    target->active_token = source->active_token;
+    target->last_provider_error = source->last_provider_error;
+    target->frame_capacity = source->frame_capacity;
+    target->max_depth = source->max_depth;
+    target->capabilities = source->capabilities;
+    target->active = source->active;
+    target->release_pending = source->release_pending;
+    target->initialized = source->initialized;
+}
+
+static void vp_sampler_v2_store(struct vp_sampler_v2* target,
+                                const struct vp_sampler* source)
+{
+    if (target == NULL || source == NULL)
+        return;
+    target->active_token = source->active_token;
+    target->last_provider_error = source->last_provider_error;
+    target->active = source->active;
+    target->release_pending = source->release_pending;
+    target->initialized = source->initialized;
 }
 
 static int vp_cursor_valid(const struct vp_sample_cursor* cursor,
@@ -185,7 +222,7 @@ static int vp_sampler_sample(struct vp_sampler* sampler,
               VP_SAMPLE_FRAME_FLAG_CONTEXT_CONFIDENT) == 0u)
         result = VP_ERROR_UNSUPPORTED;
     else if (target->kind == VP_SAMPLE_TARGET_FOREIGN)
-        result = sampler->provider->validate_sample(
+        result = vp_provider_v2(sampler->provider)->validate_sample(
             sampler->provider->user, sampler->active_token, target);
     if (result != VP_RESULT_OK) {
         if (result >= 0)
@@ -223,7 +260,7 @@ static int vp_sampler_sample(struct vp_sampler* sampler,
 
         struct vp_sample_cursor next;
         if (target->kind == VP_SAMPLE_TARGET_FOREIGN) {
-            result = sampler->provider->validate_sample(
+            result = vp_provider_v2(sampler->provider)->validate_sample(
                 sampler->provider->user, sampler->active_token, target);
             if (result != VP_RESULT_OK) {
                 sampler->last_provider_error =
@@ -272,8 +309,7 @@ int vp_sampler_init(struct vp_sampler* sampler,
         return sampler->release_pending != 0u
                    ? VP_ERROR_RELEASE_REQUIRED
                    : VP_ERROR_BUSY;
-    if (provider->abi_version != VP_SAMPLE_PROVIDER_ABI_VERSION &&
-        provider->abi_version != VP_SAMPLE_PROVIDER_ABI_VERSION_LEGACY)
+    if (provider->abi_version != VP_SAMPLE_PROVIDER_ABI_VERSION)
         return VP_ERROR_UNSUPPORTED;
     if (!vp_capabilities_valid(provider->capabilities,
                                provider->abi_version) ||
@@ -282,12 +318,9 @@ int vp_sampler_init(struct vp_sampler* sampler,
           (VP_SAMPLE_CAP_CURRENT_THREAD_STACK |
            VP_SAMPLE_CAP_FOREIGN_THREAD_STACK)) != 0u &&
          provider->next_frame == NULL) ||
-        ((provider->capabilities &
-          (VP_SAMPLE_CAP_FOREIGN_THREAD_PC |
-           VP_SAMPLE_CAP_FOREIGN_THREAD_STACK)) != 0u &&
-         (provider->validate_sample == NULL ||
-          provider->max_callback_us == 0u ||
-          provider->reserved != 0u)))
+        (provider->capabilities &
+         (VP_SAMPLE_CAP_FOREIGN_THREAD_PC |
+          VP_SAMPLE_CAP_FOREIGN_THREAD_STACK)) != 0u)
         return VP_ERROR_INVALID_ARGUMENT;
     if (config->frames == NULL || config->frame_capacity == 0u ||
         config->frame_capacity > VP_SAMPLE_MAX_FRAMES ||
@@ -300,6 +333,66 @@ int vp_sampler_init(struct vp_sampler* sampler,
         config->reserved != 0u)
         return VP_ERROR_INVALID_ARGUMENT;
     if ((config->required_capabilities & ~provider->capabilities) != 0u)
+        return VP_ERROR_UNSUPPORTED;
+    memset(sampler, 0, sizeof(*sampler));
+    memset(config->frames, 0,
+           sizeof(config->frames[0]) * config->frame_capacity);
+    sampler->provider = provider;
+    sampler->frames = config->frames;
+    sampler->frame_capacity = config->frame_capacity;
+    sampler->max_depth = config->max_depth;
+    sampler->capabilities = config->required_capabilities;
+    sampler->initialized = VP_SAMPLER_MAGIC;
+    return VP_RESULT_OK;
+}
+
+int vp_sampler_init_v2(
+    struct vp_sampler_v2* sampler,
+    const struct vp_sample_provider_v2* provider,
+    const struct vp_sampler_config_v2* config)
+{
+    const struct vp_sample_provider* base_provider;
+    uint32_t foreign;
+    if (sampler == NULL || config == NULL)
+        return VP_ERROR_INVALID_ARGUMENT;
+    if (provider == NULL)
+        return VP_ERROR_UNSUPPORTED;
+    base_provider = &provider->base;
+    if (sampler->initialized == VP_SAMPLER_MAGIC)
+        return sampler->release_pending != 0u
+                   ? VP_ERROR_RELEASE_REQUIRED
+                   : VP_ERROR_BUSY;
+    if (base_provider->abi_version != VP_SAMPLE_PROVIDER_ABI_VERSION_V2)
+        return VP_ERROR_UNSUPPORTED;
+    foreign = base_provider->capabilities &
+              (VP_SAMPLE_CAP_FOREIGN_THREAD_PC |
+               VP_SAMPLE_CAP_FOREIGN_THREAD_STACK);
+    if (!vp_capabilities_valid(base_provider->capabilities,
+                               base_provider->abi_version) ||
+        base_provider->begin_sample == NULL ||
+        base_provider->end_sample == NULL ||
+        ((base_provider->capabilities &
+          (VP_SAMPLE_CAP_CURRENT_THREAD_STACK |
+           VP_SAMPLE_CAP_FOREIGN_THREAD_STACK)) != 0u &&
+         base_provider->next_frame == NULL) ||
+        (foreign != 0u &&
+         (provider->validate_sample == NULL ||
+          provider->max_callback_us == 0u ||
+          provider->reserved != 0u)))
+        return VP_ERROR_INVALID_ARGUMENT;
+    if (config->frames == NULL ||
+        config->frame_capacity == 0u ||
+        config->frame_capacity > VP_SAMPLE_MAX_FRAMES ||
+        config->max_depth == 0u ||
+        config->max_depth > VP_SAMPLE_MAX_FRAMES ||
+        config->frame_capacity < config->max_depth ||
+        config->required_capabilities == 0u ||
+        !vp_capabilities_valid(config->required_capabilities,
+                               base_provider->abi_version) ||
+        config->reserved != 0u)
+        return VP_ERROR_INVALID_ARGUMENT;
+    if ((config->required_capabilities &
+         ~base_provider->capabilities) != 0u)
         return VP_ERROR_UNSUPPORTED;
     if ((config->required_capabilities &
          (VP_SAMPLE_CAP_FOREIGN_THREAD_PC |
@@ -316,8 +409,8 @@ int vp_sampler_init(struct vp_sampler* sampler,
     sampler->frame_capacity = config->frame_capacity;
     sampler->max_depth = config->max_depth;
     sampler->capabilities = config->required_capabilities;
-    sampler->callback_timeout_us = config->callback_timeout_us;
     sampler->initialized = VP_SAMPLER_MAGIC;
+    sampler->callback_timeout_us = config->callback_timeout_us;
     return VP_RESULT_OK;
 }
 
@@ -329,6 +422,19 @@ int vp_sampler_deinit(struct vp_sampler* sampler)
         return VP_ERROR_RELEASE_REQUIRED;
     memset(sampler, 0, sizeof(*sampler));
     return VP_RESULT_OK;
+}
+
+int vp_sampler_deinit_v2(struct vp_sampler_v2* sampler)
+{
+    struct vp_sampler base;
+    int result;
+    if (sampler == NULL)
+        return VP_ERROR_NOT_INITIALIZED;
+    vp_sampler_v2_load(sampler, &base);
+    result = vp_sampler_deinit(&base);
+    if (result == VP_RESULT_OK)
+        memset(sampler, 0, sizeof(*sampler));
+    return result;
 }
 
 int vp_sampler_sample_current(struct vp_sampler* sampler,
@@ -360,6 +466,31 @@ int vp_sampler_sample_foreign(struct vp_sampler* sampler,
         VP_SAMPLE_CAP_FOREIGN_THREAD_STACK, sample);
 }
 
+int vp_sampler_sample_current_v2(struct vp_sampler_v2* sampler,
+                                 struct vp_sample* sample)
+{
+    struct vp_sampler base;
+    int result;
+    vp_sampler_v2_load(sampler, &base);
+    result = vp_sampler_sample_current(
+        sampler != NULL ? &base : NULL, sample);
+    vp_sampler_v2_store(sampler, &base);
+    return result;
+}
+
+int vp_sampler_sample_foreign_v2(struct vp_sampler_v2* sampler,
+                                 int32_t thread_id, uint64_t identity,
+                                 struct vp_sample* sample)
+{
+    struct vp_sampler base;
+    int result;
+    vp_sampler_v2_load(sampler, &base);
+    result = vp_sampler_sample_foreign(
+        sampler != NULL ? &base : NULL, thread_id, identity, sample);
+    vp_sampler_v2_store(sampler, &base);
+    return result;
+}
+
 int vp_sampler_retry_release(struct vp_sampler* sampler)
 {
     if (!vp_sampler_is_valid(sampler))
@@ -372,6 +503,17 @@ int vp_sampler_retry_release(struct vp_sampler* sampler)
     return VP_RESULT_OK;
 }
 
+int vp_sampler_retry_release_v2(struct vp_sampler_v2* sampler)
+{
+    struct vp_sampler base;
+    int result;
+    vp_sampler_v2_load(sampler, &base);
+    result = vp_sampler_retry_release(
+        sampler != NULL ? &base : NULL);
+    vp_sampler_v2_store(sampler, &base);
+    return result;
+}
+
 int vp_sampler_get_status(const struct vp_sampler* sampler,
                           struct vp_sampler_status* status)
 {
@@ -381,9 +523,25 @@ int vp_sampler_get_status(const struct vp_sampler* sampler,
         return VP_ERROR_INVALID_ARGUMENT;
     status->capabilities = sampler->capabilities;
     status->max_depth = sampler->max_depth;
-    status->callback_timeout_us = sampler->callback_timeout_us;
     status->active = sampler->active;
     status->release_pending = sampler->release_pending;
     status->last_provider_error = sampler->last_provider_error;
+    return VP_RESULT_OK;
+}
+
+int vp_sampler_get_status_v2(
+    const struct vp_sampler_v2* sampler,
+    struct vp_sampler_status_v2* status)
+{
+    if (sampler == NULL || sampler->initialized != VP_SAMPLER_MAGIC)
+        return VP_ERROR_NOT_INITIALIZED;
+    if (status == NULL)
+        return VP_ERROR_INVALID_ARGUMENT;
+    status->capabilities = sampler->capabilities;
+    status->max_depth = sampler->max_depth;
+    status->active = sampler->active;
+    status->release_pending = sampler->release_pending;
+    status->last_provider_error = sampler->last_provider_error;
+    status->callback_timeout_us = sampler->callback_timeout_us;
     return VP_RESULT_OK;
 }

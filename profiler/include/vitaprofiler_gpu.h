@@ -84,6 +84,7 @@ enum vp_graphics_zone {
     VP_GRAPHICS_ZONE_SCEGXM_DISPLAY_QUEUE_ADD_WAIT = 16,
     VP_GRAPHICS_ZONE_SCEGXM_DISPLAY_CALLBACK = 17,
     VP_GRAPHICS_ZONE_DISPLAY_VBLANK_WAIT = 18,
+    VP_GRAPHICS_ZONE_COUNT = 19,
     VP_GRAPHICS_ZONE_VITAGL_COMMAND_SUBMIT = 19,
     VP_GRAPHICS_ZONE_VITAGL_CLEAR = 20,
     VP_GRAPHICS_ZONE_VITAGL_FENCE_WAIT = 21,
@@ -98,7 +99,7 @@ enum vp_graphics_zone {
     VP_GRAPHICS_ZONE_SCEGXM_RENDER_TARGET_TRANSITION = 30,
     VP_GRAPHICS_ZONE_SCEGXM_BUFFER_TRANSITION = 31,
     VP_GRAPHICS_ZONE_SCEGXM_UPLOAD = 32,
-    VP_GRAPHICS_ZONE_COUNT = 33,
+    VP_GRAPHICS_ZONE_COUNT_V2 = 33,
 };
 
 enum vp_graphics_counter {
@@ -110,13 +111,14 @@ enum vp_graphics_counter {
     VP_GRAPHICS_COUNTER_SCEGXM_STATE_CHANGES = 5,
     VP_GRAPHICS_COUNTER_VITAGL_ALLOCATION_BYTES = 6,
     VP_GRAPHICS_COUNTER_SCEGXM_ALLOCATION_BYTES = 7,
+    VP_GRAPHICS_COUNTER_COUNT = 8,
     VP_GRAPHICS_COUNTER_VITAGL_CLEAR_CALLS = 8,
     VP_GRAPHICS_COUNTER_SCEGXM_CLEAR_CALLS = 9,
     VP_GRAPHICS_COUNTER_VITAGL_PROGRAM_CHANGES = 10,
     VP_GRAPHICS_COUNTER_SCEGXM_PROGRAM_CHANGES = 11,
     VP_GRAPHICS_COUNTER_VITAGL_UPLOAD_BYTES = 12,
     VP_GRAPHICS_COUNTER_SCEGXM_UPLOAD_BYTES = 13,
-    VP_GRAPHICS_COUNTER_COUNT = 14,
+    VP_GRAPHICS_COUNTER_COUNT_V2 = 14,
 };
 
 enum vp_graphics_frame {
@@ -137,6 +139,19 @@ struct vp_graphics_hooks {
     uint32_t initialized;
 };
 
+struct vp_graphics_name_ids_v2 {
+    uint32_t zones[VP_GRAPHICS_ZONE_COUNT_V2];
+    uint32_t counters[VP_GRAPHICS_COUNTER_COUNT_V2];
+    uint32_t frames[VP_GRAPHICS_FRAME_COUNT];
+};
+
+struct vp_graphics_hooks_v2 {
+    struct vp_context* context;
+    struct vp_graphics_name_ids_v2 names;
+    uint32_t enabled;
+    uint32_t initialized;
+};
+
 /* A stack is owned by one instrumented call flow, normally one render thread.
  * It adds no global renderer state and bounds nesting without allocation. */
 struct vp_graphics_scope_stack {
@@ -152,6 +167,9 @@ int vp_graphics_register_names(struct vp_name_dictionary* dictionary,
 int vp_graphics_register_extended_names(
     struct vp_name_dictionary* dictionary,
     struct vp_graphics_name_ids* names);
+int vp_graphics_register_names_v2(
+    struct vp_name_dictionary* dictionary,
+    struct vp_graphics_name_ids_v2* names);
 int vp_graphics_hooks_init(struct vp_graphics_hooks* hooks,
                            struct vp_context* context,
                            const struct vp_graphics_name_ids* names);
@@ -175,6 +193,27 @@ int vp_graphics_scope_push(struct vp_graphics_hooks* hooks,
                            enum vp_graphics_zone zone);
 int vp_graphics_scope_pop(struct vp_graphics_hooks* hooks,
                           struct vp_graphics_scope_stack* stack);
+int vp_graphics_hooks_init_v2(
+    struct vp_graphics_hooks_v2* hooks, struct vp_context* context,
+    const struct vp_graphics_name_ids_v2* names);
+int vp_graphics_hooks_set_enabled_v2(
+    struct vp_graphics_hooks_v2* hooks, int enabled);
+int vp_graphics_zone_begin_v2(
+    struct vp_graphics_hooks_v2* hooks, enum vp_graphics_zone zone,
+    struct vp_zone_scope* scope);
+int vp_graphics_zone_end_v2(
+    struct vp_graphics_hooks_v2* hooks, struct vp_zone_scope* scope);
+int vp_graphics_counter_v2(
+    struct vp_graphics_hooks_v2* hooks,
+    enum vp_graphics_counter counter, int64_t value);
+int vp_graphics_frame_mark_v2(
+    struct vp_graphics_hooks_v2* hooks, enum vp_graphics_frame frame);
+int vp_graphics_scope_push_v2(
+    struct vp_graphics_hooks_v2* hooks,
+    struct vp_graphics_scope_stack* stack, enum vp_graphics_zone zone);
+int vp_graphics_scope_pop_v2(
+    struct vp_graphics_hooks_v2* hooks,
+    struct vp_graphics_scope_stack* stack);
 
 #ifdef __cplusplus
 }
@@ -196,6 +235,18 @@ int vp_graphics_scope_pop(struct vp_graphics_hooks* hooks,
     vp_graphics_scope_push((hooks), (stack), (zone))
 #define VP_GRAPHICS_SCOPE_POP(hooks, stack) \
     vp_graphics_scope_pop((hooks), (stack))
+#define VP_GRAPHICS_V2_ZONE_BEGIN(hooks, zone, scope) \
+    vp_graphics_zone_begin_v2((hooks), (zone), (scope))
+#define VP_GRAPHICS_V2_ZONE_END(hooks, scope) \
+    vp_graphics_zone_end_v2((hooks), (scope))
+#define VP_GRAPHICS_V2_COUNTER(hooks, counter, value) \
+    vp_graphics_counter_v2((hooks), (counter), (value))
+#define VP_GRAPHICS_V2_FRAME_MARK(hooks, frame) \
+    vp_graphics_frame_mark_v2((hooks), (frame))
+#define VP_GRAPHICS_V2_SCOPE_PUSH(hooks, stack, zone) \
+    vp_graphics_scope_push_v2((hooks), (stack), (zone))
+#define VP_GRAPHICS_V2_SCOPE_POP(hooks, stack) \
+    vp_graphics_scope_pop_v2((hooks), (stack))
 #else
 #define VP_GRAPHICS_ZONE_BEGIN(hooks, zone, scope) \
     ((void)sizeof(hooks), (void)sizeof(zone), (void)sizeof(scope), \
@@ -211,6 +262,21 @@ int vp_graphics_scope_pop(struct vp_graphics_hooks* hooks,
     ((void)sizeof(hooks), (void)sizeof(stack), (void)sizeof(zone), \
      VP_RESULT_OK)
 #define VP_GRAPHICS_SCOPE_POP(hooks, stack) \
+    ((void)sizeof(hooks), (void)sizeof(stack), VP_RESULT_OK)
+#define VP_GRAPHICS_V2_ZONE_BEGIN(hooks, zone, scope) \
+    ((void)sizeof(hooks), (void)sizeof(zone), (void)sizeof(scope), \
+     VP_RESULT_OK)
+#define VP_GRAPHICS_V2_ZONE_END(hooks, scope) \
+    ((void)sizeof(hooks), (void)sizeof(scope), VP_RESULT_OK)
+#define VP_GRAPHICS_V2_COUNTER(hooks, counter, value) \
+    ((void)sizeof(hooks), (void)sizeof(counter), (void)sizeof(value), \
+     VP_RESULT_OK)
+#define VP_GRAPHICS_V2_FRAME_MARK(hooks, frame) \
+    ((void)sizeof(hooks), (void)sizeof(frame), VP_RESULT_OK)
+#define VP_GRAPHICS_V2_SCOPE_PUSH(hooks, stack, zone) \
+    ((void)sizeof(hooks), (void)sizeof(stack), (void)sizeof(zone), \
+     VP_RESULT_OK)
+#define VP_GRAPHICS_V2_SCOPE_POP(hooks, stack) \
     ((void)sizeof(hooks), (void)sizeof(stack), VP_RESULT_OK)
 #endif
 

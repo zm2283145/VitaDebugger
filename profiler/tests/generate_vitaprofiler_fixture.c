@@ -44,6 +44,7 @@ static int generate_fixture(const char* path, int wire_v2)
     struct vp_event events[6];
     uint8_t dictionary_buffer[4096];
     struct vp_stream_writer writer;
+    struct vp_stream_writer_v2 writer_v2;
     struct vp_stream_writer_config writer_config;
     struct vp_stream_v2_session session;
     struct vp_stream_v2_thread thread;
@@ -122,8 +123,6 @@ static int generate_fixture(const char* path, int wire_v2)
     writer_config.write_user = output;
     writer_config.dictionary_buffer = dictionary_buffer;
     writer_config.dictionary_buffer_capacity = sizeof(dictionary_buffer);
-    if (vp_stream_writer_init(&writer, &writer_config) != VP_RESULT_OK)
-        goto done;
     if (wire_v2) {
         memset(&session, 0, sizeof(session));
         session.session_id = UINT64_C(0x0102030405060708);
@@ -150,20 +149,29 @@ static int generate_fixture(const char* path, int wire_v2)
         module.flags = VP_STREAM_V2_MODULE_EXECUTABLE |
                        VP_STREAM_V2_MODULE_ARM |
                        VP_STREAM_V2_MODULE_THUMB;
-        if (vp_stream_writer_begin_v2(&writer, 900u, &session) !=
+        if (vp_stream_writer_init_v2(&writer_v2, &writer_config) !=
                 VP_RESULT_OK ||
-            vp_stream_writer_write_thread_v2(&writer, &thread) !=
+            vp_stream_writer_begin_v2(&writer_v2, 900u, &session) !=
                 VP_RESULT_OK ||
-            vp_stream_writer_write_module_v2(&writer, &module) !=
+            vp_stream_writer_write_thread_v2(&writer_v2, &thread) !=
+                VP_RESULT_OK ||
+            vp_stream_writer_write_module_v2(&writer_v2, &module) !=
                 VP_RESULT_OK)
             goto done;
-    } else if (vp_stream_writer_begin(&writer, 900u) != VP_RESULT_OK) {
-        goto done;
+        if (vp_stream_writer_drain_v2(
+                  &writer_v2, 16u, &drained) != VP_RESULT_OK ||
+            drained != 10u ||
+            vp_stream_writer_close_v2(&writer_v2) != VP_RESULT_OK)
+            goto done;
+    } else {
+        if (vp_stream_writer_init(&writer, &writer_config) != VP_RESULT_OK ||
+            vp_stream_writer_begin(&writer, 900u) != VP_RESULT_OK ||
+            vp_stream_writer_drain(&writer, 16u, &drained) != VP_RESULT_OK ||
+            drained != 10u ||
+            vp_stream_writer_close(&writer) != VP_RESULT_OK)
+            goto done;
     }
-    if (vp_stream_writer_drain(&writer, 16u, &drained) != VP_RESULT_OK ||
-        drained != 10u ||
-        vp_stream_writer_close(&writer) != VP_RESULT_OK ||
-        fflush(output) != 0)
+    if (fflush(output) != 0)
         goto done;
     if (fclose(output) != 0) {
         output = NULL;
