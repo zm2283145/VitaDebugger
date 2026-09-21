@@ -160,6 +160,8 @@ transport remains signed plaintext with no encryption.
 - `docs/protocol-v2-auth.md` is the authentication-only version-2 contract.
 - `docs/auth-provisioning.md` defines host and injected Vita key storage.
 - `docs/hardware-auth-gate.md` is the serialized future hardware runbook.
+- `docs/retail-365-secure-storage-audit.md` seals the public-API NO-GO
+  decision and exact evidence required to unblock it.
 - `docs/api-audit.md` records the relevant current and VitaSDK APIs.
 - `SECURITY.md` defines promotion gates for any later loader implementation.
 

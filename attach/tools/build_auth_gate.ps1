@@ -131,6 +131,7 @@ try {
     $elf = Join-Path $buildDirectory "vitadebug_attach_auth_gate"
     $readelf = Join-Path $VitaSdkPath "bin\arm-vita-eabi-readelf.exe"
     $nm = Join-Path $VitaSdkPath "bin\arm-vita-eabi-nm.exe"
+    $objdump = Join-Path $VitaSdkPath "bin\arm-vita-eabi-objdump.exe"
     $sections = (& $readelf -SW $elf) -join "`n"
     if ($LASTEXITCODE -ne 0) {
         throw "Could not inspect sentinel ELF sections."
@@ -141,6 +142,63 @@ try {
         $symbols -match
             "sce(Net|NetCtl|Sysmodule|AppMgr|Kernel(Create|Start)Thread|KernelGetRandomNumber)|vd_attach_auth_(listener|store)") {
         throw "Sentinel unexpectedly contains networking or authentication runtime code."
+    }
+    $symbolTable = (& $objdump -t $elf)
+    if ($LASTEXITCODE -ne 0) {
+        throw "Could not inspect sentinel import symbols."
+    }
+    $parsedImports = [Collections.Generic.List[string]]::new()
+    foreach ($line in $symbolTable) {
+        if ($line -notmatch "\.vitalink\.") {
+            continue
+        }
+        $fields = @($line.Trim() -split "\s+")
+        if ($fields.Length -lt 6 -or
+            $fields[3] -notmatch
+                "^\.vitalink\.(fstubs|vstubs)\.(.+)$") {
+            throw "Unrecognized sentinel import-table entry: '$line'."
+        }
+        $kind = $Matches[1]
+        $module = $Matches[2]
+        if ($fields[1] -eq "l" -and $fields[2] -eq "d" -and
+            $fields[5] -eq $fields[3]) {
+            continue
+        }
+        if ($fields[1] -ne "g" -or
+            $fields[2] -notin @("F", "O")) {
+            throw "Unrecognized sentinel import symbol: '$line'."
+        }
+        $parsedImports.Add(
+            ("{0}.{1}::{2}" -f $kind, $module, $fields[5]))
+    }
+    $actualImports = @($parsedImports | Sort-Object -Unique)
+    $expectedImports = @(
+        "fstubs.SceIofilemgr::sceIoClose",
+        "fstubs.SceIofilemgr::sceIoSyncByFd",
+        "fstubs.SceIofilemgr::sceIoWrite",
+        "fstubs.SceLibKernel::sceClibMemset",
+        "fstubs.SceLibKernel::sceIoMkdir",
+        "fstubs.SceLibKernel::sceIoOpen",
+        "fstubs.SceLibKernel::sceKernelCreateLwMutex",
+        "fstubs.SceLibKernel::sceKernelCreateMutex",
+        "fstubs.SceLibKernel::sceKernelDeleteLwMutex",
+        "fstubs.SceLibKernel::sceKernelExitProcess",
+        "fstubs.SceLibKernel::sceKernelGetThreadId",
+        "fstubs.SceLibKernel::sceKernelGetTLSAddr",
+        "fstubs.SceLibKernel::sceKernelLockLwMutex",
+        "fstubs.SceLibKernel::sceKernelUnlockLwMutex",
+        "fstubs.SceSysmem::sceKernelAllocMemBlock",
+        "fstubs.SceSysmem::sceKernelFreeMemBlock",
+        "fstubs.SceSysmem::sceKernelGetMemBlockBase",
+        "fstubs.SceThreadmgr::sceKernelDeleteMutex"
+    ) | Sort-Object -Unique
+    $importDifference = @(
+        Compare-Object -ReferenceObject $expectedImports `
+            -DifferenceObject $actualImports
+    )
+    if ($importDifference.Count -ne 0) {
+        $details = ($importDifference | Out-String).Trim()
+        throw "Sentinel import allowlist mismatch:`n$details"
     }
 
     $ebootBytes = [IO.File]::ReadAllBytes($eboot)
@@ -165,9 +223,17 @@ try {
     try {
         Copy-Item -LiteralPath $eboot -Destination (Join-Path $stage "eboot.bin")
         Copy-Item -LiteralPath $vpk -Destination (Join-Path $stage "VitaDebuggerAuthGate.vpk")
+        $auditRelativePath =
+            "attach/docs/retail-365-secure-storage-audit.md"
+        $auditPath = Join-Path $repoRoot $auditRelativePath
+        $auditText = Get-Content -LiteralPath $auditPath -Raw
+        if ($auditText -notmatch [regex]::Escape("**NO-GO.**")) {
+            throw "Secure-storage audit does not contain the NO-GO decision."
+        }
         $sourceFiles = @(
             "attach/vita-auth-test/CMakeLists.txt",
             "attach/vita-auth-test/src/main.c",
+            $auditRelativePath,
             "attach/broker/include/vitadebug_attach_auth.h",
             "attach/broker/include/vitadebug_attach_auth_listener.h",
             "attach/broker/include/vitadebug_attach_auth_listener_vita.h",
@@ -206,6 +272,14 @@ try {
                 handshake_deadline_ms = $HandshakeDeadlineMs
             }
             hardware_assurance = "retail-3.65-hard-block"
+            secure_storage_audit = [ordered]@{
+                decision = "no-go"
+                required_properties = 3
+                all_properties_proven = $false
+                transaction_binding_proven = $false
+                hardware_contacted = $false
+                evidence = $auditRelativePath
+            }
             artifacts = [ordered]@{
                 "eboot.bin" = Get-Sha256Lower (Join-Path $stage "eboot.bin")
                 "VitaDebuggerAuthGate.vpk" = Get-Sha256Lower (Join-Path $stage "VitaDebuggerAuthGate.vpk")

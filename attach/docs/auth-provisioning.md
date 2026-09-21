@@ -62,10 +62,15 @@ handles; the core never performs a pathname check followed by a separate open.
 
 The core is bounded and allocation-free. It rejects malformed, truncated,
 trailing, oversized, unknown-schema, duplicate, stale, and mismatched-key
-state. A commit writes and syncs a staged handle, closes it, asks the trusted
-backend to publish it durably, and only then advances the independent floor.
-The core receives no storage path and makes no boolean claim that a pathname
-is private.
+state. Its current commit model writes and syncs a staged handle, asks the
+trusted backend to publish it durably, and only then advances a revision-only
+floor. That ordering has an interruption window in which old metadata can
+still equal the old floor. Reversing the calls would strand recovery because
+the floor does not bind the exact staged object. This portable model is
+therefore not a production transaction design. A future backend requires
+either an atomic trusted metadata/floor commit or a monotonic record bound to
+the staged object's digest/token. The core receives no storage path and makes
+no boolean claim that a pathname is private.
 
 Schema 1 contained a raw device seed and is rejected rather than migrated.
 No seed-bearing schema-1 file was provisioned on the authorized device. A
@@ -84,10 +89,11 @@ monotonic floor or reactivate an older identity.
 ## Retail 3.65 decision
 
 Production Vita authentication is a **hard block**. Public or safely callable
-retail 3.65 APIs do not provide both:
+retail 3.65 APIs do not simultaneously provide:
 
 - a non-exportable Ed25519 key inaccessible to ordinary/co-resident SceShell
   code; and
+- trusted handle-bound, no-follow, durable persistence/commit semantics; and
 - an independent durable monotonic anti-rollback floor.
 
 Running as `*main` shares the SceShell identity and memory. `0600` mode bits

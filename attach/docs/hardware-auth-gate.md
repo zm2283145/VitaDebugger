@@ -6,11 +6,12 @@ it.
 ## Authoritative decision: HARD BLOCK
 
 Production authentication on retail firmware 3.65 is blocked. No public or
-safely callable API establishes both:
+safely callable API establishes all three required properties:
 
 1. a non-exportable Ed25519 key inaccessible to ordinary or co-resident
-   SceShell code; and
-2. an independent durable monotonic anti-rollback floor.
+   SceShell code;
+2. trusted handle-bound, no-follow, durable persistence/commit semantics; and
+3. an independent durable monotonic anti-rollback floor.
 
 `*main` shares SceShell identity and memory. File mode `0600` is not documented
 per-title isolation. Public file APIs provide no documented no-follow/openat
@@ -30,6 +31,9 @@ Therefore:
 - do not contact `10.1.1.217` for authentication testing.
 
 The decision is not bypassable by a build flag or callback source.
+The complete reviewed surface, threat model, composition defect, and exact
+unblock evidence are sealed in
+[`retail-365-secure-storage-audit.md`](retail-365-secure-storage-audit.md).
 
 ## Sentinel artifact and hashes
 
@@ -74,6 +78,12 @@ transport=signed-plaintext
 encryption=none
 hardware_assurance=retail-3.65-hard-block
 secure_storage_backend=null
+secure_storage_audit.decision=no-go
+secure_storage_audit.required_properties=3
+secure_storage_audit.all_properties_proven=false
+secure_storage_audit.transaction_binding_proven=false
+secure_storage_audit.hardware_contacted=false
+secure_storage_audit.evidence=attach/docs/retail-365-secure-storage-audit.md
 ```
 
 It also records the future listener candidate endpoint
@@ -90,6 +100,8 @@ Get-FileHash -Algorithm SHA256 `
   .\deploy\agent\third_party\monocypher\monocypher.c
 Get-FileHash -Algorithm SHA256 `
   .\deploy\agent\third_party\monocypher\monocypher-ed25519.c
+Get-FileHash -Algorithm SHA256 `
+  .\attach\docs\retail-365-secure-storage-audit.md
 ```
 
 Every value must match `manifest.json`. The VPK must remain an ordinary
@@ -109,6 +121,13 @@ A future GO review requires three concrete backends, not an assurance boolean:
    core receives no path and cannot substitute check-then-open path proofs.
 3. **Monotonic backend:** stores and advances the revision floor in an
    independent trust domain that cannot be restored with metadata.
+
+These three backend labels are not sufficient for promotion. The current
+revision-only monotonic callback cannot bind a floor update to the exact staged
+metadata object. A future implementation must additionally provide either one
+trusted atomic metadata/floor transaction or a monotonic record bound to the
+staged object's digest/token, with deterministic interrupted-operation
+recovery.
 
 The schema-2 core rejects raw-seed, path-proof-only, same-namespace-floor, and
 shell-owned-network configurations. Initialization/recovery failures wipe all
@@ -168,7 +187,8 @@ or GDB surface appears.
 Layer 3 may begin only after all of the following are recorded against one
 reviewed commit:
 
-1. independently accepted hardware evidence for all three trusted backends;
+1. independently accepted hardware evidence for all three trusted backends
+   and a floor-to-staged-object transaction binding;
 2. no raw-seed, seed-export, path-proof, same-namespace-floor, or bypass
    contract exists;
 3. the authentication-only gate passes provision/reboot,

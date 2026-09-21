@@ -81,6 +81,11 @@ enum {
 /*
  * trust_domain must identify a security domain distinct from persistence.
  * advance_floor durably raises the floor before returning success.
+ *
+ * This revision-only interface cannot bind an advanced floor to the exact
+ * staged metadata object. It is a host-tested model, not a sufficient
+ * production transaction boundary. A production redesign must carry a digest
+ * or unforgeable staged-object token, or use one trusted atomic service.
  */
 typedef struct VdAttachAuthStoreMonotonicOps {
     void *context;

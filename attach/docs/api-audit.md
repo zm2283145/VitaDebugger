@@ -165,5 +165,8 @@ provisioning or networking.
 No resident SceShell module is shipped. See
 [`protocol-v2-auth.md`](protocol-v2-auth.md),
 [`auth-provisioning.md`](auth-provisioning.md), and
-[`hardware-auth-gate.md`](hardware-auth-gate.md). These additions do not change
+[`hardware-auth-gate.md`](hardware-auth-gate.md). The sealed three-property
+NO-GO evidence is in
+[`retail-365-secure-storage-audit.md`](retail-365-secure-storage-audit.md).
+These additions do not change
 the loader or hardware conclusions above.
