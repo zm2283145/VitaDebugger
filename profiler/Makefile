@@ -22,10 +22,19 @@ VITA_BUILD := build/vita
 VITA_PROBE_BUILD := build/vita-probe
 VITA_PMU_DISCOVERY_BUILD := build/vita-pmu-discovery
 VITA_TCP_GATE_BUILD := build/vita-tcp-gate
+VITA_RUNCLOCKS_BUILD = build/vita-runclocks-experiment-$(VITA_RUNCLOCKS_ENABLE)
 VITA_COMMON_DIR ?= $(VITASDK)/share/gcc-arm-vita-eabi/samples/common
 VITA_PROBE_TITLE_ID ?= VDPR00001
 VITA_PMU_DISCOVERY_TITLE_ID ?= VDPD00001
 VITA_TCP_GATE_TITLE_ID := VDPT00001
+VITA_RUNCLOCKS_ENABLE ?= 0
+VITA_RUNCLOCKS_EXPERIMENT_ID ?= disabled
+VITA_RUNCLOCKS_DEVICE_MODEL ?= unknown
+VITA_RUNCLOCKS_DEVICE_ID ?= unknown
+VITA_RUNCLOCKS_FIRMWARE ?= unknown
+VITA_RUNCLOCKS_BUILD_ID ?= unknown
+VITA_RUNCLOCKS_CLOCK_PROFILE ?= unknown
+VITA_RUNCLOCKS_POWER_STATE ?= unknown
 -include local/vita-tcp-gate.mk
 VITA_TCP_GATE_HOST_A ?= 127
 VITA_TCP_GATE_HOST_B ?= 0
@@ -76,8 +85,29 @@ VITA_TCP_GATE_LDLIBS := \
 	-lSceProcessmgr_stub \
 	-lSceSysmem_stub \
 	-lSceLibKernel_stub
+VITA_RUNCLOCKS_CPPFLAGS := \
+	-DVP_RUNCLOCKS_EXPERIMENT_ENABLED=$(VITA_RUNCLOCKS_ENABLE) \
+	-DVP_RUNCLOCKS_EXPERIMENT_ID=\"$(VITA_RUNCLOCKS_EXPERIMENT_ID)\" \
+	-DVP_RUNCLOCKS_DEVICE_MODEL=\"$(VITA_RUNCLOCKS_DEVICE_MODEL)\" \
+	-DVP_RUNCLOCKS_DEVICE_ID=\"$(VITA_RUNCLOCKS_DEVICE_ID)\" \
+	-DVP_RUNCLOCKS_FIRMWARE=\"$(VITA_RUNCLOCKS_FIRMWARE)\" \
+	-DVP_RUNCLOCKS_BUILD_ID=\"$(VITA_RUNCLOCKS_BUILD_ID)\" \
+	-DVP_RUNCLOCKS_CLOCK_PROFILE=\"$(VITA_RUNCLOCKS_CLOCK_PROFILE)\" \
+	-DVP_RUNCLOCKS_POWER_STATE=\"$(VITA_RUNCLOCKS_POWER_STATE)\"
+VITA_RUNCLOCKS_OBJECTS := \
+	$(VITA_RUNCLOCKS_BUILD)/main.o \
+	$(VITA_RUNCLOCKS_BUILD)/debugScreen.o
+VITA_RUNCLOCKS_LDLIBS := \
+	-lSceDisplay_stub \
+	-lSceCtrl_stub \
+	-lSceIofilemgr_stub \
+	-lSceKernelThreadMgr_stub \
+	-lSceProcessmgr_stub \
+	-lSceRtc_stub \
+	-lSceSysmem_stub \
+	-lSceLibKernel_stub
 
-.PHONY: all vita vita-check vita-probe vita-pmu-discovery vita-tcp-gate desktop host-test check clean
+.PHONY: all vita vita-check vita-probe vita-pmu-discovery vita-tcp-gate vita-runclocks-experiment desktop host-test check clean
 
 all: vita
 
@@ -90,6 +120,8 @@ vita-probe: $(VITA_PROBE_BUILD)/vitaprofiler-probe.vpk
 vita-pmu-discovery: $(VITA_PMU_DISCOVERY_BUILD)/vitaprofiler-pmu-discovery.vpk
 
 vita-tcp-gate: $(VITA_TCP_GATE_BUILD)/vitaprofiler-tcp-gate.vpk
+
+vita-runclocks-experiment: $(VITA_RUNCLOCKS_BUILD)/vitaprofiler-runclocks-experiment.vpk
 
 desktop:
 	$(PYTHON) tools/vitaprofiler_gui.py
@@ -210,6 +242,30 @@ $(VITA_TCP_GATE_BUILD)/param.sfo:
 
 $(VITA_TCP_GATE_BUILD)/vitaprofiler-tcp-gate.vpk: $(VITA_TCP_GATE_BUILD)/eboot.bin $(VITA_TCP_GATE_BUILD)/param.sfo
 	$(VITA_PACK_VPK) -s $(VITA_TCP_GATE_BUILD)/param.sfo -b $(VITA_TCP_GATE_BUILD)/eboot.bin $@
+
+$(VITA_RUNCLOCKS_BUILD)/main.o: runclocks-experiment/main.c include/vitaprofiler.h include/vitaprofiler_stream.h Makefile
+	mkdir -p $(VITA_RUNCLOCKS_BUILD)
+	$(VITA_CC) $(CPPFLAGS) -I$(VITA_COMMON_DIR) $(VITA_RUNCLOCKS_CPPFLAGS) $(VITA_PROBE_CFLAGS) -c $< -o $@
+
+$(VITA_RUNCLOCKS_BUILD)/debugScreen.o: $(VITA_COMMON_DIR)/debugScreen.c
+	mkdir -p $(VITA_RUNCLOCKS_BUILD)
+	$(VITA_CC) -I$(VITA_COMMON_DIR) $(VITA_CFLAGS) -c $< -o $@
+
+$(VITA_RUNCLOCKS_BUILD)/vitaprofiler-runclocks-experiment.elf: $(VITA_RUNCLOCKS_OBJECTS) $(VITA_BUILD)/libvitaprofiler.a
+	$(VITA_CC) -Wl,-q -Wl,-z,nocopyreloc $(VITA_PROBE_LDFLAGS) $^ $(VITA_RUNCLOCKS_LDLIBS) -o $@
+
+$(VITA_RUNCLOCKS_BUILD)/vitaprofiler-runclocks-experiment.velf: $(VITA_RUNCLOCKS_BUILD)/vitaprofiler-runclocks-experiment.elf
+	$(VITA_ELF_CREATE) $< $@
+
+$(VITA_RUNCLOCKS_BUILD)/eboot.bin: $(VITA_RUNCLOCKS_BUILD)/vitaprofiler-runclocks-experiment.velf
+	$(VITA_MAKE_FSELF) $< $@
+
+$(VITA_RUNCLOCKS_BUILD)/param.sfo:
+	mkdir -p $(VITA_RUNCLOCKS_BUILD)
+	$(VITA_MKSFOEX) -s TITLE_ID=VDPR00001 'VitaProfiler runClocks experiment' $@
+
+$(VITA_RUNCLOCKS_BUILD)/vitaprofiler-runclocks-experiment.vpk: $(VITA_RUNCLOCKS_BUILD)/eboot.bin $(VITA_RUNCLOCKS_BUILD)/param.sfo
+	$(VITA_PACK_VPK) -s $(VITA_RUNCLOCKS_BUILD)/param.sfo -b $(VITA_RUNCLOCKS_BUILD)/eboot.bin $@
 
 $(HOST_BUILD)/test_vitaprofiler: src/vitaprofiler.c tests/test_vitaprofiler.c include/vitaprofiler.h
 	mkdir -p $(HOST_BUILD)

@@ -114,11 +114,16 @@ RECEIVER_CANCEL_POLL_SECONDS = 0.1
 RUN_CLOCKS_METRIC_ID = 0xFFF00005
 RUN_CLOCKS_SOURCE = "SceKernelThreadInfo.runClocks"
 RUN_CLOCKS_UNIT = "unknown"
-RUN_CLOCKS_EXPERIMENT_FORMAT = "vitaprofiler-runclocks-experiment-v1"
-RUN_CLOCKS_REPORT_FORMAT = "vitaprofiler-runclocks-characterization-v1"
+RUN_CLOCKS_EXPERIMENT_FORMAT_V1 = "vitaprofiler-runclocks-experiment-v1"
+RUN_CLOCKS_EXPERIMENT_FORMAT = "vitaprofiler-runclocks-experiment-v2"
+RUN_CLOCKS_REPORT_FORMAT = "vitaprofiler-runclocks-characterization-v2"
 MAX_EXPERIMENT_METADATA_BYTES = 64 * 1024
 MAX_EXPERIMENT_THREADS = 64
+MAX_EXPERIMENT_PHASES = 64
+MAX_EXPERIMENT_WORKERS = 16
+MAX_EXPERIMENT_DURATION_US = 10 * 60 * 1_000_000
 MAX_METADATA_TEXT = 1024
+RUN_CLOCKS_RATE_UNIT = "unknown_raw_units_per_reference_second"
 
 BUILTIN_NAMES = {
     0xFFF00001: "vita.memory.free_user_bytes",
@@ -301,11 +306,23 @@ class ThreadGeneration:
 
 
 @dataclasses.dataclass(frozen=True)
+class RunClocksPhase:
+    phase_id: str
+    condition: str
+    repeat: int
+    target_duration_us: int
+    worker_count: int
+    first_event_index: int
+    last_event_index: int
+
+
+@dataclasses.dataclass(frozen=True)
 class RunClocksExperiment:
     metadata: dict[str, object]
     counter_bits: int | None
     max_wrap_delta_raw: int | None
     threads: tuple[ThreadGeneration, ...]
+    phases: tuple[RunClocksPhase, ...] = ()
 
 
 _UNSAFE_BIDI_CLASSES = frozenset({
@@ -828,6 +845,36 @@ def _thread_generation_for_event(
     return matches[0] if matches else None
 
 
+def _run_clocks_phase_for_event(
+        event: Event,
+        phases: tuple[RunClocksPhase, ...],
+        ) -> RunClocksPhase | None:
+    matches = [
+        phase for phase in phases
+        if phase.first_event_index <= event.index <= phase.last_event_index
+    ]
+    if len(matches) > 1:
+        raise TraceFormatError(
+            f"event {event.index} matches overlapping runClocks phases")
+    return matches[0] if matches else None
+
+
+def _pearson_correlation(pairs: list[tuple[int, int]]) -> float | None:
+    if len(pairs) < 2:
+        return None
+    mean_x = sum(pair[0] for pair in pairs) / len(pairs)
+    mean_y = sum(pair[1] for pair in pairs) / len(pairs)
+    centered = [
+        (pair[0] - mean_x, pair[1] - mean_y) for pair in pairs
+    ]
+    sum_xx = sum(pair[0] * pair[0] for pair in centered)
+    sum_yy = sum(pair[1] * pair[1] for pair in centered)
+    if sum_xx == 0 or sum_yy == 0:
+        return None
+    return sum(pair[0] * pair[1] for pair in centered) / math.sqrt(
+        sum_xx * sum_yy)
+
+
 def _wire_thread_generations(
         capture: TraceCapture) -> tuple[ThreadGeneration, ...]:
     grouped: dict[int, list[ThreadIdentity]] = collections.defaultdict(list)
@@ -869,9 +916,11 @@ def analyze_run_clocks(
     using_experiment_threads = bool(experiment and experiment.threads)
     threads = (experiment.threads if using_experiment_threads else
                _wire_thread_generations(capture))
+    phases = experiment.phases if experiment else ()
     explicit_state: dict[
-        tuple[int, int], tuple[int, int, int, int, int]] = {}
-    inferred_state: dict[int, tuple[int, int, int, int, int]] = {}
+        tuple[int, int], tuple[int, int, int, int, int, str | None]] = {}
+    inferred_state: dict[
+        int, tuple[int, int, int, int, int, str | None]] = {}
     samples: list[dict[str, object]] = []
     status_counts: collections.Counter[str] = collections.Counter()
     missing_raw_flags = 0
@@ -891,6 +940,8 @@ def analyze_run_clocks(
                 f"runClocks event {event.index} does not fit the declared "
                 f"{counter_bits}-bit counter")
         declared = _thread_generation_for_event(event, threads)
+        phase = _run_clocks_phase_for_event(event, phases)
+        phase_id = phase.phase_id if phase else None
         if declared is not None:
             generation = declared.generation
             label = declared.label
@@ -913,13 +964,16 @@ def analyze_run_clocks(
         previous_event_index: int | None = None
         if previous is not None:
             (previous_raw, counter_epoch, previous_generation,
-             previous_timestamp, previous_event_index) = previous
+             previous_timestamp, previous_event_index,
+             previous_phase_id) = previous
             if declared is None:
                 generation = previous_generation
             elapsed_us = event.timestamp_us - previous_timestamp
             if elapsed_us < 0:
                 elapsed_us = None
                 status = "timestamp_regression"
+            elif phase_id != previous_phase_id:
+                status = "phase_boundary"
             elif raw_value >= previous_raw:
                 delta_raw = raw_value - previous_raw
                 status = "delta"
@@ -948,6 +1002,9 @@ def analyze_run_clocks(
             "thread_generation": generation,
             "thread_label": label,
             "identity_source": identity_source,
+            "phase_id": phase_id,
+            "phase_condition": phase.condition if phase else None,
+            "phase_repeat": phase.repeat if phase else None,
             "counter_epoch": counter_epoch,
             "raw_value_u64": raw_value,
             "raw_value_u64_decimal": str(raw_value),
@@ -962,18 +1019,72 @@ def analyze_run_clocks(
                 str(delta_raw) if delta_raw is not None else None),
             "delta_raw_hex": (
                 f"0x{delta_raw:x}" if delta_raw is not None else None),
+            "rate_raw_per_reference_second": (
+                delta_raw * 1_000_000 / elapsed_us
+                if delta_raw is not None and elapsed_us else None),
+            "rate_unit": RUN_CLOCKS_RATE_UNIT,
             "delta_status": status,
             "unit": RUN_CLOCKS_UNIT,
         }
         samples.append(sample)
         status_counts[status] += 1
         state = (raw_value, counter_epoch, generation, event.timestamp_us,
-                 event.index)
+                 event.index, phase_id)
         if declared is not None:
             explicit_state[state_key] = state
         else:
             inferred_state[event.thread_id] = state
 
+    phase_analysis = []
+    for phase in phases:
+        phase_samples = [
+            sample for sample in samples
+            if sample["phase_id"] == phase.phase_id
+        ]
+        usable = [
+            sample for sample in phase_samples
+            if sample["delta_raw"] is not None and
+            sample["elapsed_us"] is not None and sample["elapsed_us"] > 0
+        ]
+        pairs = [
+            (int(sample["elapsed_us"]), int(sample["delta_raw"]))
+            for sample in usable
+        ]
+        rates = [
+            float(sample["rate_raw_per_reference_second"])
+            for sample in usable
+        ]
+        delta_total = sum(pair[1] for pair in pairs)
+        elapsed_total = sum(pair[0] for pair in pairs)
+        phase_analysis.append({
+            "phase_id": phase.phase_id,
+            "condition": phase.condition,
+            "repeat": phase.repeat,
+            "target_duration_us": phase.target_duration_us,
+            "declared_worker_count": phase.worker_count,
+            "sample_count": len(phase_samples),
+            "derived_delta_count": len(usable),
+            "reference_elapsed_us_total": elapsed_total,
+            "delta_raw_total": delta_total,
+            "delta_raw_total_decimal": str(delta_total),
+            "aggregate_rate_raw_per_reference_second": (
+                delta_total * 1_000_000 / elapsed_total
+                if elapsed_total else None),
+            "rate_min_raw_per_reference_second": min(rates) if rates else None,
+            "rate_max_raw_per_reference_second": max(rates) if rates else None,
+            "rate_unit": RUN_CLOCKS_RATE_UNIT,
+            "pearson_correlation_delta_raw_vs_elapsed_us":
+                _pearson_correlation(pairs),
+            "correlation_scope":
+                "descriptive_only; runClocks numerator unit unknown",
+        })
+
+    all_pairs = [
+        (int(sample["elapsed_us"]), int(sample["delta_raw"]))
+        for sample in samples
+        if sample["delta_raw"] is not None and
+        sample["elapsed_us"] is not None and sample["elapsed_us"] > 0
+    ]
     return {
         "semantics": {
             "source": RUN_CLOCKS_SOURCE,
@@ -985,6 +1096,10 @@ def analyze_run_clocks(
             "effective_counter_bits": counter_bits,
             "cpu_utilization": False,
             "conversion_applied": False,
+            "normalization_claim": "none",
+            "rate_unit": RUN_CLOCKS_RATE_UNIT,
+            "rate_interpretation":
+                "descriptive raw delta divided by reference timer only",
         },
         "policy": {
             "counter_bits": counter_bits,
@@ -999,7 +1114,12 @@ def analyze_run_clocks(
                 1 for sample in samples if sample["delta_raw"] is not None),
             "statuses": dict(sorted(status_counts.items())),
             "samples_missing_raw_flag": missing_raw_flags,
+            "pearson_correlation_delta_raw_vs_elapsed_us":
+                _pearson_correlation(all_pairs),
+            "correlation_scope":
+                "descriptive_only; runClocks numerator unit unknown",
         },
+        "phase_analysis": phase_analysis,
         "samples": samples,
     }
 
@@ -1633,13 +1753,21 @@ def decode_run_clocks_experiment(data: bytes) -> RunClocksExperiment:
     if not isinstance(decoded, dict):
         raise TraceFormatError("runClocks experiment metadata must be an object")
 
-    required = {
+    common_required = {
         "format", "experiment_id", "captured_at_utc", "device_model",
         "firmware", "title_id", "build_id", "workload", "clock_profile",
         "power_state", "sample_interval_us", "sample_count_limit",
         "capture_duration_limit_us", "producer_dropped_events",
         "sink_lost_events", "threads", "counter_bits", "max_wrap_delta_raw",
     }
+    format_name = decoded.get("format")
+    if format_name not in (
+            RUN_CLOCKS_EXPERIMENT_FORMAT_V1, RUN_CLOCKS_EXPERIMENT_FORMAT):
+        raise TraceFormatError("unsupported runClocks experiment format")
+    v2 = format_name == RUN_CLOCKS_EXPERIMENT_FORMAT
+    required = common_required | (
+        {"device_id", "transport_lost_events", "reference_timer", "phases"}
+        if v2 else set())
     allowed = required | {"notes"}
     missing = required - set(decoded)
     unknown = set(decoded) - allowed
@@ -1650,17 +1778,17 @@ def decode_run_clocks_experiment(data: bytes) -> RunClocksExperiment:
         raise TraceFormatError(
             "runClocks metadata has unknown fields: " +
             ", ".join(sorted(unknown)))
-    if decoded["format"] != RUN_CLOCKS_EXPERIMENT_FORMAT:
-        raise TraceFormatError("unsupported runClocks experiment format")
-
     normalized: dict[str, object] = {
-        "format": RUN_CLOCKS_EXPERIMENT_FORMAT,
+        "format": format_name,
     }
     for field in (
             "experiment_id", "captured_at_utc", "device_model", "firmware",
             "title_id", "build_id", "workload", "clock_profile",
             "power_state"):
         normalized[field] = _metadata_text(decoded[field], field)
+    if v2:
+        normalized["device_id"] = _metadata_text(
+            decoded["device_id"], "device_id")
     captured_at = str(normalized["captured_at_utc"])
     if not captured_at.endswith("Z"):
         raise TraceFormatError(
@@ -1680,14 +1808,45 @@ def decode_run_clocks_experiment(data: bytes) -> RunClocksExperiment:
     normalized["sample_count_limit"] = sample_count_limit
     normalized["capture_duration_limit_us"] = _metadata_positive_int(
         decoded["capture_duration_limit_us"], "capture_duration_limit_us")
+    if normalized["capture_duration_limit_us"] > MAX_EXPERIMENT_DURATION_US:
+        raise TraceFormatError(
+            "runClocks metadata capture duration exceeds 600000000 us")
     if (normalized["sample_interval_us"] >
             normalized["capture_duration_limit_us"]):
         raise TraceFormatError(
             "runClocks metadata sample interval exceeds duration limit")
     normalized["producer_dropped_events"] = _metadata_nonnegative_int(
         decoded["producer_dropped_events"], "producer_dropped_events")
+    normalized["transport_lost_events"] = _metadata_nonnegative_int(
+        decoded.get("transport_lost_events", 0), "transport_lost_events")
     normalized["sink_lost_events"] = _metadata_nonnegative_int(
         decoded["sink_lost_events"], "sink_lost_events")
+
+    if v2:
+        raw_timer = decoded["reference_timer"]
+        expected_timer_fields = {
+            "source", "unit", "frequency_hz", "monotonic",
+        }
+        if (not isinstance(raw_timer, dict) or
+                set(raw_timer) != expected_timer_fields):
+            raise TraceFormatError(
+                "runClocks metadata reference_timer fields must be: " +
+                ", ".join(sorted(expected_timer_fields)))
+        timer_source = _metadata_text(
+            raw_timer["source"], "reference_timer.source")
+        timer_unit = _metadata_text(
+            raw_timer["unit"], "reference_timer.unit")
+        timer_frequency = _metadata_positive_int(
+            raw_timer["frequency_hz"], "reference_timer.frequency_hz")
+        if raw_timer["monotonic"] is not True:
+            raise TraceFormatError(
+                "runClocks reference timer must be declared monotonic")
+        normalized["reference_timer"] = {
+            "source": timer_source,
+            "unit": timer_unit,
+            "frequency_hz": timer_frequency,
+            "monotonic": True,
+        }
 
     counter_bits = decoded["counter_bits"]
     if counter_bits not in (None, 32, 64):
@@ -1765,10 +1924,87 @@ def decode_run_clocks_experiment(data: bytes) -> RunClocksExperiment:
                     "runClocks metadata has overlapping ranges for thread "
                     f"0x{thread.thread_id:08x}")
     normalized["threads"] = normalized_threads
+    phases: list[RunClocksPhase] = []
+    normalized_phases: list[dict[str, object]] = []
+    if v2:
+        raw_phases = decoded["phases"]
+        if (not isinstance(raw_phases, list) or
+                not 1 <= len(raw_phases) <= MAX_EXPERIMENT_PHASES):
+            raise TraceFormatError(
+                "runClocks metadata phases must contain 1..64 entries")
+        phase_ids: set[str] = set()
+        for index, raw_phase in enumerate(raw_phases):
+            if not isinstance(raw_phase, dict):
+                raise TraceFormatError(
+                    f"runClocks metadata phases[{index}] must be an object")
+            expected = {
+                "phase_id", "condition", "repeat", "target_duration_us",
+                "worker_count", "first_event_index", "last_event_index",
+            }
+            if set(raw_phase) != expected:
+                raise TraceFormatError(
+                    f"runClocks metadata phases[{index}] fields must be: " +
+                    ", ".join(sorted(expected)))
+            phase_id = _metadata_text(
+                raw_phase["phase_id"], f"phases[{index}].phase_id")
+            condition = _metadata_text(
+                raw_phase["condition"], f"phases[{index}].condition")
+            repeat = _metadata_positive_int(
+                raw_phase["repeat"], f"phases[{index}].repeat")
+            target_duration = _metadata_positive_int(
+                raw_phase["target_duration_us"],
+                f"phases[{index}].target_duration_us")
+            worker_count = _metadata_positive_int(
+                raw_phase["worker_count"],
+                f"phases[{index}].worker_count")
+            first = raw_phase["first_event_index"]
+            last = raw_phase["last_event_index"]
+            if phase_id in phase_ids:
+                raise TraceFormatError(
+                    f"runClocks metadata repeats phase_id {phase_id!r}")
+            if repeat > MAX_EXPERIMENT_PHASES:
+                raise TraceFormatError(
+                    f"runClocks metadata phases[{index}].repeat exceeds 64")
+            if target_duration > normalized["capture_duration_limit_us"]:
+                raise TraceFormatError(
+                    f"runClocks metadata phases[{index}] target duration "
+                    "exceeds capture duration")
+            if worker_count > MAX_EXPERIMENT_WORKERS:
+                raise TraceFormatError(
+                    f"runClocks metadata phases[{index}].worker_count "
+                    "exceeds 16")
+            if (isinstance(first, bool) or not isinstance(first, int) or
+                    first < 0 or isinstance(last, bool) or
+                    not isinstance(last, int) or last < first):
+                raise TraceFormatError(
+                    f"runClocks metadata phases[{index}] has an invalid "
+                    "event range")
+            phase_ids.add(phase_id)
+            phase = RunClocksPhase(
+                phase_id, condition, repeat, target_duration, worker_count,
+                first, last)
+            phases.append(phase)
+            normalized_phases.append({
+                "phase_id": phase_id,
+                "condition": condition,
+                "repeat": repeat,
+                "target_duration_us": target_duration,
+                "worker_count": worker_count,
+                "first_event_index": first,
+                "last_event_index": last,
+            })
+        for index, phase in enumerate(phases):
+            for other in phases[index + 1:]:
+                if (phase.first_event_index <= other.last_event_index and
+                        other.first_event_index <= phase.last_event_index):
+                    raise TraceFormatError(
+                        "runClocks metadata has overlapping phase ranges")
+        normalized["phases"] = normalized_phases
     if "notes" in decoded:
         normalized["notes"] = _metadata_text(decoded["notes"], "notes")
     return RunClocksExperiment(
-        normalized, counter_bits, max_wrap_delta, tuple(threads))
+        normalized, counter_bits, max_wrap_delta, tuple(threads),
+        tuple(phases))
 
 
 def run_clocks_characterization_report(
@@ -1779,13 +2015,32 @@ def run_clocks_characterization_report(
     analysis = analyze_run_clocks(capture, experiment)
     samples = analysis["samples"]
     summary = analysis["summary"]
+    if not capture.complete:
+        raise TraceFormatError(
+            "runClocks characterization requires a complete capture")
     if summary["samples_missing_raw_flag"]:
         raise TraceFormatError(
             "runClocks characterization requires raw_value flags")
     if (experiment.metadata["producer_dropped_events"] or
+            experiment.metadata["transport_lost_events"] or
             experiment.metadata["sink_lost_events"]):
         raise TraceFormatError(
-            "runClocks characterization requires zero producer and sink loss")
+            "runClocks characterization requires zero producer, transport, "
+            "and sink loss")
+    if capture.loss is not None:
+        declared_loss = (
+            int(experiment.metadata["producer_dropped_events"]),
+            int(experiment.metadata["transport_lost_events"]),
+            int(experiment.metadata["sink_lost_events"]),
+        )
+        captured_loss = (
+            capture.loss.producer_dropped,
+            capture.loss.transport_lost,
+            capture.loss.sink_lost,
+        )
+        if declared_loss != captured_loss:
+            raise TraceFormatError(
+                "runClocks metadata loss counters do not match capture")
     if len(samples) < 2:
         raise TraceFormatError(
             "runClocks characterization requires at least two samples")
@@ -1817,6 +2072,55 @@ def run_clocks_characterization_report(
             raise TraceFormatError(
                 f"thread generation {thread.label!r} contains no runClocks "
                 "sample")
+    if experiment.phases:
+        unmapped_phases = [
+            sample["event_index"] for sample in samples
+            if sample["phase_id"] is None
+        ]
+        if unmapped_phases:
+            raise TraceFormatError(
+                "runClocks phases do not identify sample events: " +
+                ", ".join(str(index) for index in unmapped_phases))
+        interval_us = int(experiment.metadata["sample_interval_us"])
+        for phase in experiment.phases:
+            if phase.last_event_index >= len(capture.events):
+                raise TraceFormatError(
+                    f"runClocks phase {phase.phase_id!r} extends beyond "
+                    "capture")
+            phase_samples = [
+                sample for sample in samples
+                if sample["phase_id"] == phase.phase_id
+            ]
+            if not phase_samples:
+                raise TraceFormatError(
+                    f"runClocks phase {phase.phase_id!r} contains no samples")
+            identities = {
+                (sample["thread_id"], sample["thread_generation"])
+                for sample in phase_samples
+            }
+            if len(identities) != phase.worker_count:
+                raise TraceFormatError(
+                    f"runClocks phase {phase.phase_id!r} declares "
+                    f"{phase.worker_count} workers but capture has "
+                    f"{len(identities)}")
+            phase_timestamps = [
+                int(sample["timestamp_us"]) for sample in phase_samples
+            ]
+            phase_span = max(phase_timestamps) - min(phase_timestamps)
+            if phase_span > phase.target_duration_us + interval_us:
+                raise TraceFormatError(
+                    f"runClocks phase {phase.phase_id!r} sample span exceeds "
+                    "target duration plus one sample interval")
+    reference_timer = experiment.metadata.get("reference_timer")
+    if reference_timer is not None:
+        if capture.header.clock_hz != reference_timer["frequency_hz"]:
+            raise TraceFormatError(
+                "runClocks reference timer frequency does not match capture")
+        if capture.session is not None and (
+                capture.session.timer_source != reference_timer["source"] or
+                capture.session.timer_unit != reference_timer["unit"]):
+            raise TraceFormatError(
+                "runClocks reference timer does not match capture session")
     if summary["statuses"].get("timestamp_regression", 0):
         raise TraceFormatError(
             "runClocks characterization has a timestamp regression")

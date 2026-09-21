@@ -167,12 +167,49 @@ def make_run_clocks_capture(
     return names + header + events
 
 
+def make_run_clocks_v2_capture(
+        samples: list[tuple[int, int, int]],
+        producer_dropped: int = 0,
+        timer_source: str = "sceKernelGetProcessTimeWide",
+        ) -> bytes:
+    dictionary = encode_dictionary([])
+    events = b"".join(
+        encode_event(timestamp, value, trace.RUN_CLOCKS_METRIC_ID, thread_id,
+                     0, trace.EVENT_THREAD_SAMPLE,
+                     trace.EVENT_FLAG_RAW_VALUE)
+        for timestamp, value, thread_id in samples
+    )
+    source = timer_source.encode()
+    unit = b"microseconds"
+    session = trace.STREAM_V2_SESSION.pack(
+        0x0102030405060708, 0, 900, 0,
+        trace.STREAM_V2_SESSION_TIMER_SOURCE |
+        trace.STREAM_V2_SESSION_TIMER_UNIT,
+        len(source), len(unit), 0,
+        source.ljust(trace.STREAM_V2_TIMER_SOURCE_MAX, b"\0"),
+        unit.ljust(trace.STREAM_V2_TIMER_UNIT_MAX, b"\0"))
+    chunks = [
+        (trace.STREAM_V2_CHUNK_SESSION, session),
+        (trace.STREAM_V2_CHUNK_DICTIONARY, dictionary),
+        (trace.STREAM_V2_CHUNK_EVENTS, events),
+    ]
+    prefix = b"".join(encode_v2_chunk(kind, sequence, payload)
+                      for sequence, (kind, payload) in enumerate(chunks))
+    final_size = (len(prefix) + trace.STREAM_V2_CHUNK_HEADER_SIZE +
+                  trace.STREAM_V2_STATS_PAYLOAD_SIZE)
+    final_stats = trace.STREAM_V2_STATS.pack(
+        len(samples), producer_dropped, 0, 0, len(samples), final_size)
+    return prefix + encode_v2_chunk(
+        trace.STREAM_V2_CHUNK_END, len(chunks), final_stats)
+
+
 def make_run_clocks_metadata(**overrides: object) -> dict[str, object]:
     metadata: dict[str, object] = {
         "format": trace.RUN_CLOCKS_EXPERIMENT_FORMAT,
         "experiment_id": "idle-vs-busy-a",
         "captured_at_utc": "2026-09-18T05:00:00Z",
         "device_model": "PCH-2000",
+        "device_id": "lab-vita-slim-a",
         "firmware": "3.65",
         "title_id": "VDPR00001",
         "build_id": "test-fixture",
@@ -183,11 +220,27 @@ def make_run_clocks_metadata(**overrides: object) -> dict[str, object]:
         "sample_count_limit": 8,
         "capture_duration_limit_us": 10000,
         "producer_dropped_events": 0,
+        "transport_lost_events": 0,
         "sink_lost_events": 0,
+        "reference_timer": {
+            "source": "sceKernelGetProcessTimeWide",
+            "unit": "microseconds",
+            "frequency_hz": 1_000_000,
+            "monotonic": True,
+        },
         "threads": [{
             "thread_id": "0x40010003",
             "generation": 0,
             "label": "measurement-worker",
+            "first_event_index": 0,
+            "last_event_index": 2,
+        }],
+        "phases": [{
+            "phase_id": "busy-r1",
+            "condition": "bounded integer workload",
+            "repeat": 1,
+            "target_duration_us": 5000,
+            "worker_count": 1,
             "first_event_index": 0,
             "last_event_index": 2,
         }],
@@ -609,6 +662,70 @@ class DecodeTests(unittest.TestCase):
             trace.analyze_run_clocks(capture, experiment)["semantics"]
             ["effective_counter_bits"], 32)
 
+    def test_run_clocks_phase_rates_and_correlations_stay_unknown_unit(self):
+        capture = trace.decode_capture(make_run_clocks_capture([
+            (1000, 10, 0x40010003),
+            (2000, 30, 0x40010003),
+            (4000, 70, 0x40010003),
+        ]))
+        experiment = trace.decode_run_clocks_experiment(json.dumps(
+            make_run_clocks_metadata()).encode())
+        analysis = trace.analyze_run_clocks(capture, experiment)
+        phase = analysis["phase_analysis"][0]
+        self.assertEqual(phase["delta_raw_total"], 60)
+        self.assertEqual(
+            phase["aggregate_rate_raw_per_reference_second"], 20000)
+        self.assertEqual(phase["rate_unit"],
+                         "unknown_raw_units_per_reference_second")
+        self.assertAlmostEqual(
+            phase["pearson_correlation_delta_raw_vs_elapsed_us"], 1.0)
+        serialized = json.dumps(analysis).lower()
+        self.assertNotIn("cpu utilization", serialized)
+        self.assertNotIn("percent", serialized)
+        self.assertNotIn("cycle rate", serialized)
+
+    def test_run_clocks_phase_boundary_suppresses_cross_phase_delta(self):
+        capture = trace.decode_capture(make_run_clocks_capture([
+            (1000, 10, 0x40010003),
+            (2000, 20, 0x40010003),
+            (3000, 100, 0x40010003),
+            (4000, 130, 0x40010003),
+        ]))
+        metadata = make_run_clocks_metadata(
+            threads=[{
+                "thread_id": "0x40010003",
+                "generation": 0,
+                "label": "same-worker",
+                "first_event_index": 0,
+                "last_event_index": 3,
+            }],
+            phases=[
+                {
+                    "phase_id": "sleep-r1",
+                    "condition": "sleep",
+                    "repeat": 1,
+                    "target_duration_us": 2000,
+                    "worker_count": 1,
+                    "first_event_index": 0,
+                    "last_event_index": 1,
+                },
+                {
+                    "phase_id": "busy-r1",
+                    "condition": "integer workload",
+                    "repeat": 1,
+                    "target_duration_us": 2000,
+                    "worker_count": 1,
+                    "first_event_index": 2,
+                    "last_event_index": 3,
+                },
+            ])
+        experiment = trace.decode_run_clocks_experiment(
+            json.dumps(metadata).encode())
+        samples = trace.analyze_run_clocks(capture, experiment)["samples"]
+        self.assertEqual(samples[2]["delta_status"], "phase_boundary")
+        self.assertIsNone(samples[2]["delta_raw"])
+        self.assertEqual(samples[3]["delta_raw"], 30)
+
     def test_run_clocks_explicit_thread_generation_breaks_tid_reuse(self):
         capture = trace.decode_capture(make_run_clocks_capture([
             (1000, 10, 0x40010003),
@@ -903,9 +1020,98 @@ class CommandLineTests(unittest.TestCase):
         experiment = trace.decode_run_clocks_experiment(
             json.dumps(lossy).encode())
         with self.assertRaisesRegex(trace.TraceFormatError,
-                                    "requires zero producer and sink loss"):
+                                    "requires zero producer"):
             trace.run_clocks_characterization_report(
                 capture, raw, experiment)
+
+    def test_runclocks_metadata_rejects_malformed_phases_and_bounds(self):
+        overlapping = make_run_clocks_metadata(phases=[
+            {
+                "phase_id": "idle-r1",
+                "condition": "sleep",
+                "repeat": 1,
+                "target_duration_us": 1000,
+                "worker_count": 1,
+                "first_event_index": 0,
+                "last_event_index": 1,
+            },
+            {
+                "phase_id": "busy-r1",
+                "condition": "integer workload",
+                "repeat": 1,
+                "target_duration_us": 1000,
+                "worker_count": 1,
+                "first_event_index": 1,
+                "last_event_index": 2,
+            },
+        ])
+        with self.assertRaisesRegex(trace.TraceFormatError,
+                                    "overlapping phase ranges"):
+            trace.decode_run_clocks_experiment(
+                json.dumps(overlapping).encode())
+
+        excessive = make_run_clocks_metadata(
+            capture_duration_limit_us=trace.MAX_EXPERIMENT_DURATION_US + 1)
+        with self.assertRaisesRegex(trace.TraceFormatError,
+                                    "capture duration exceeds"):
+            trace.decode_run_clocks_experiment(
+                json.dumps(excessive).encode())
+
+        truncated = json.dumps(make_run_clocks_metadata()).encode()[:-1]
+        with self.assertRaisesRegex(trace.TraceFormatError,
+                                    "not valid UTF-8 JSON"):
+            trace.decode_run_clocks_experiment(truncated)
+
+    def test_runclocks_v1_metadata_remains_readable(self):
+        metadata = make_run_clocks_metadata()
+        metadata["format"] = trace.RUN_CLOCKS_EXPERIMENT_FORMAT_V1
+        for field in (
+                "device_id", "transport_lost_events", "reference_timer",
+                "phases"):
+            metadata.pop(field)
+        experiment = trace.decode_run_clocks_experiment(
+            json.dumps(metadata).encode())
+        self.assertEqual(experiment.metadata["format"],
+                         trace.RUN_CLOCKS_EXPERIMENT_FORMAT_V1)
+        self.assertEqual(experiment.metadata["transport_lost_events"], 0)
+        self.assertEqual(experiment.phases, ())
+
+    def test_runclocks_report_rejects_phase_worker_mismatch(self):
+        raw = make_run_clocks_capture([
+            (1000, 10, 0x40010003),
+            (2000, 20, 0x40010003),
+            (3000, 30, 0x40010003),
+        ])
+        metadata = make_run_clocks_metadata()
+        metadata["phases"][0]["worker_count"] = 2
+        experiment = trace.decode_run_clocks_experiment(
+            json.dumps(metadata).encode())
+        with self.assertRaisesRegex(trace.TraceFormatError,
+                                    "declares 2 workers"):
+            trace.run_clocks_characterization_report(
+                trace.decode_capture(raw), raw, experiment)
+
+    def test_runclocks_report_binds_v2_timer_and_loss_metadata(self):
+        samples = [
+            (1000, 10, 0x40010003),
+            (2000, 20, 0x40010003),
+            (3000, 30, 0x40010003),
+        ]
+        experiment = trace.decode_run_clocks_experiment(
+            json.dumps(make_run_clocks_metadata()).encode())
+
+        wrong_timer = make_run_clocks_v2_capture(
+            samples, timer_source="differentMonotonicTimer")
+        with self.assertRaisesRegex(trace.TraceFormatError,
+                                    "reference timer does not match"):
+            trace.run_clocks_characterization_report(
+                trace.decode_capture(wrong_timer), wrong_timer, experiment)
+
+        lossy = make_run_clocks_v2_capture(samples, producer_dropped=1)
+        with self.assertRaisesRegex(trace.TraceFormatError,
+                                    "loss counters do not match"):
+            trace.run_clocks_characterization_report(
+                trace.decode_capture(lossy), lossy, experiment)
 
     def test_cli_rejects_non_finite_timeouts(self):
         parser = trace.build_argument_parser()
