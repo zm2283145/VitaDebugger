@@ -155,7 +155,10 @@ stage's cleanup and its re-arm proof:
 1. stage `1`: competing-owner refusal and first-owner exact close;
 2. stage `2`: 250 ms timeout/watchdog restore and matching acknowledgement;
 3. stage `3`: production TCP sink receiver disconnect under a 5 s live lease,
-   followed by a required post-error PMU read and authenticated close;
+   with successful initial PMU open/read and network start/connect/prelude,
+   an initial sample authenticated to the nonzero handle and fixed
+   event/core/lane, followed by exact `VP_ERROR_IO`, a required post-error PMU
+   read, and authenticated close;
 4. stage `4`: owning-process normal return and same-boot relaunch; and
 5. stage `5`: approved Vita Companion `kill VDCP00013`, exercising the
    SceShell `.kill` callback, and same-boot relaunch.

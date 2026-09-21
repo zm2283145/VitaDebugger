@@ -15,7 +15,7 @@ Set `VITADEBUG_PMU_CLEANUP_GATE_STAGE` to exactly one value:
 | --- | --- | --- |
 | 1 | Competing owner | A second thread receives `BUSY`, cannot obtain a handle, the first owner closes exactly, and a new lease opens and closes. |
 | 2 | Watchdog timeout | A 250 ms lease expires, a late read reports `RESTORE_REQUIRED`, the matching handle acknowledges cleanup, and a new lease opens and closes. |
-| 3 | Receiver disconnect | A live 5 s lease outlasts the forced disconnect: the production Vita TCP sink connects and writes `VDPMU-DROP-V1\n`; the host sends an RST, a bounded later write reports `VP_ERROR_IO`, a required PMU read still succeeds before the matching handle closes, and a new lease opens and closes. |
+| 3 | Receiver disconnect | A live 5 s lease outlasts the forced disconnect: the initial PMU open/read and network start/connect/prelude all succeed, the initial sample authenticates against the nonzero handle and fixed event/core/lane, and the production Vita TCP sink writes `VDPMU-DROP-V1\n`; the host sends an RST, a bounded later write reports `VP_ERROR_IO`, a required PMU read still succeeds before the matching handle closes, and a new lease opens and closes. |
 | 4 | Normal process exit | The application returns normally with a live 5 s lease. Relaunch in the same boot proves process-event cleanup and opens/closes a new lease. |
 | 5 | SceShell kill | After the application durably writes its armed record with a live 5 s lease, the host helper archives that exact record and sends the approved Vita Companion command `kill VDCP00013`. Relaunch in the same boot proves the `.kill` process event cleaned up and opens/closes a new lease. |
 

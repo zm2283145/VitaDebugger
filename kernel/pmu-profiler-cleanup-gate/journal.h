@@ -10,12 +10,32 @@
 #define VD_PMU_CLEANUP_RECORD_SIZE 1024u
 #define VD_PMU_CLEANUP_RESULT_NOT_RUN ((int32_t)-799)
 #define VD_PMU_CLEANUP_SLOT_COUNT 3u
-#define VD_PMU_CLEANUP_RESULT_CLOSE 2u
-#define VD_PMU_CLEANUP_RESULT_NET_FAILURE 17u
-#define VD_PMU_CLEANUP_RESULT_NET_CLOSE 18u
-#define VD_PMU_CLEANUP_RESULT_NET_STOP 19u
-#define VD_PMU_CLEANUP_RESULT_POST_DISCONNECT_READ 21u
 #define VD_PMU_CLEANUP_EXPECTED_NET_FAILURE ((int32_t)-13)
+
+enum gate_result_index {
+    GATE_RESULT_OPEN = 0,
+    GATE_RESULT_READ,
+    GATE_RESULT_CLOSE,
+    GATE_RESULT_AUX_CREATE,
+    GATE_RESULT_AUX_START,
+    GATE_RESULT_AUX_WAIT,
+    GATE_RESULT_AUX_DELETE,
+    GATE_RESULT_AUX_ACTION,
+    GATE_RESULT_AUX_CLEANUP,
+    GATE_RESULT_REARM_OPEN,
+    GATE_RESULT_REARM_READ,
+    GATE_RESULT_REARM_CLOSE,
+    GATE_RESULT_AFFINITY,
+    GATE_RESULT_AFFINITY_RESTORE,
+    GATE_RESULT_NET_START,
+    GATE_RESULT_NET_CONNECT,
+    GATE_RESULT_NET_PRELUDE,
+    GATE_RESULT_NET_FAILURE,
+    GATE_RESULT_NET_CLOSE,
+    GATE_RESULT_NET_STOP,
+    GATE_RESULT_EXIT_RETURN,
+    GATE_RESULT_POST_DISCONNECT_READ,
+};
 
 enum vd_pmu_cleanup_stage {
     VD_PMU_CLEANUP_STAGE_CONFLICT = 1,
@@ -218,14 +238,20 @@ static inline int vdPmuCleanupRecordValid(
             vdPmuCleanupStatusIdle(&record->final) &&
             record->final.rearm_count > record->baseline.rearm_count &&
             (record->stage != VD_PMU_CLEANUP_STAGE_DISCONNECT ||
-             (record->results[
-                  VD_PMU_CLEANUP_RESULT_NET_FAILURE] ==
+             (record->results[GATE_RESULT_OPEN] == 0 &&
+              record->results[GATE_RESULT_READ] == 0 &&
+              record->results[GATE_RESULT_NET_START] == 0 &&
+              record->results[GATE_RESULT_NET_CONNECT] == 0 &&
+              record->results[GATE_RESULT_NET_PRELUDE] == 0 &&
+              record->results[GATE_RESULT_NET_FAILURE] ==
                       VD_PMU_CLEANUP_EXPECTED_NET_FAILURE &&
-              record->results[VD_PMU_CLEANUP_RESULT_CLOSE] == 0 &&
-              record->results[VD_PMU_CLEANUP_RESULT_NET_CLOSE] == 0 &&
-              record->results[VD_PMU_CLEANUP_RESULT_NET_STOP] == 0 &&
-              record->results[
-                  VD_PMU_CLEANUP_RESULT_POST_DISCONNECT_READ] == 0 &&
+              record->results[GATE_RESULT_CLOSE] == 0 &&
+              record->results[GATE_RESULT_NET_CLOSE] == 0 &&
+              record->results[GATE_RESULT_NET_STOP] == 0 &&
+              record->results[GATE_RESULT_POST_DISCONNECT_READ] == 0 &&
+              vdPmuCleanupSampleMatchesHandle(
+                  &record->samples[0], &record->handles[0],
+                  VD_KERNEL_PMU_PROFILER_EVENT_BRANCH_MISPREDICT) &&
               vdPmuCleanupSampleMatchesHandle(
                   &record->samples[2], &record->handles[0],
                   VD_KERNEL_PMU_PROFILER_EVENT_BRANCH_MISPREDICT))) &&

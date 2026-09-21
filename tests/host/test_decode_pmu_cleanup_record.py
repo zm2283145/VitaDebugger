@@ -6,6 +6,16 @@ from tools.decode_pmu_cleanup_record import (
     FLAG_OWNER_ARMED,
     MAGIC,
     NOT_RUN,
+    RESULT_CLOSE,
+    RESULT_NET_CLOSE,
+    RESULT_NET_CONNECT,
+    RESULT_NET_FAILURE,
+    RESULT_NET_PRELUDE,
+    RESULT_NET_START,
+    RESULT_OPEN,
+    RESULT_POST_DISCONNECT_READ,
+    RESULT_READ,
+    RESULT_NET_STOP,
     SIZE,
     STATE_ARMED,
     VERSION,
@@ -88,6 +98,53 @@ def armed_record() -> bytearray:
     return data
 
 
+def put_sample(
+    data: bytearray,
+    index: int,
+    owner_token: int = 7,
+    generation: int = 9,
+) -> None:
+    struct.pack_into(
+        "<8IQ2I",
+        data,
+        284 + index * 48,
+        48,
+        1,
+        owner_token,
+        generation,
+        0x10,
+        0,
+        5,
+        0,
+        123,
+        0,
+        0,
+    )
+
+
+def stage_three_record() -> bytearray:
+    data = complete_record()
+    struct.pack_into("<I", data, 24, 3)
+    for index, result in (
+        (RESULT_OPEN, 0),
+        (RESULT_READ, 0),
+        (RESULT_CLOSE, 0),
+        (RESULT_NET_START, 0),
+        (RESULT_NET_CONNECT, 0),
+        (RESULT_NET_PRELUDE, 0),
+        (RESULT_NET_FAILURE, -13),
+        (RESULT_NET_CLOSE, 0),
+        (RESULT_NET_STOP, 0),
+        (RESULT_POST_DISCONNECT_READ, 0),
+    ):
+        struct.pack_into("<i", data, 68 + index * 4, result)
+    struct.pack_into("<II", data, 164 + 8, 7, 9)
+    put_sample(data, 0)
+    put_sample(data, 2)
+    struct.pack_into("<I", data, 12, _fnv1a(data))
+    return data
+
+
 class CleanupRecordTests(unittest.TestCase):
     def test_complete_record_decodes(self) -> None:
         decoded = decode_record(bytes(complete_record()))
@@ -128,31 +185,7 @@ class CleanupRecordTests(unittest.TestCase):
     def test_stage_three_requires_preserved_post_disconnect_sample(
         self,
     ) -> None:
-        data = complete_record()
-        struct.pack_into("<I", data, 24, 3)
-        struct.pack_into("<i", data, 68 + 2 * 4, 0)
-        struct.pack_into("<i", data, 68 + 17 * 4, -13)
-        struct.pack_into("<i", data, 68 + 18 * 4, 0)
-        struct.pack_into("<i", data, 68 + 19 * 4, 0)
-        struct.pack_into("<i", data, 68 + 21 * 4, 0)
-        struct.pack_into("<II", data, 164 + 8, 7, 9)
-        struct.pack_into(
-            "<8IQ2I",
-            data,
-            284 + 2 * 48,
-            48,
-            1,
-            7,
-            9,
-            0x10,
-            0,
-            5,
-            0,
-            123,
-            0,
-            0,
-        )
-        struct.pack_into("<I", data, 12, _fnv1a(data))
+        data = stage_three_record()
         self.assertTrue(decode_record(bytes(data))["valid"])
         struct.pack_into("<I", data, 284 + 2 * 48 + 12, 10)
         struct.pack_into("<I", data, 12, _fnv1a(data))
@@ -161,33 +194,7 @@ class CleanupRecordTests(unittest.TestCase):
             decode_record(bytes(data))["validation_errors"],
         )
         for offset in (164 + 8, 164 + 12):
-            data = complete_record()
-            struct.pack_into("<I", data, 24, 3)
-            for index, result in (
-                (2, 0),
-                (17, -13),
-                (18, 0),
-                (19, 0),
-                (21, 0),
-            ):
-                struct.pack_into("<i", data, 68 + index * 4, result)
-            struct.pack_into("<II", data, 164 + 8, 7, 9)
-            struct.pack_into(
-                "<8IQ2I",
-                data,
-                284 + 2 * 48,
-                48,
-                1,
-                7,
-                9,
-                0x10,
-                0,
-                5,
-                0,
-                123,
-                0,
-                0,
-            )
+            data = stage_three_record()
             struct.pack_into("<I", data, offset, 0)
             struct.pack_into("<I", data, 12, _fnv1a(data))
             self.assertIn(
@@ -196,32 +203,9 @@ class CleanupRecordTests(unittest.TestCase):
             )
 
         for bad_error in (NOT_RUN, 0, -12):
-            data = complete_record()
-            struct.pack_into("<I", data, 24, 3)
-            for index, result in (
-                (2, 0),
-                (17, bad_error),
-                (18, 0),
-                (19, 0),
-                (21, 0),
-            ):
-                struct.pack_into("<i", data, 68 + index * 4, result)
-            struct.pack_into("<II", data, 164 + 8, 7, 9)
+            data = stage_three_record()
             struct.pack_into(
-                "<8IQ2I",
-                data,
-                284 + 2 * 48,
-                48,
-                1,
-                7,
-                9,
-                0x10,
-                0,
-                5,
-                0,
-                123,
-                0,
-                0,
+                "<i", data, 68 + RESULT_NET_FAILURE * 4, bad_error
             )
             struct.pack_into("<I", data, 12, _fnv1a(data))
             self.assertIn(
@@ -229,36 +213,12 @@ class CleanupRecordTests(unittest.TestCase):
                 decode_record(bytes(data))["validation_errors"],
             )
 
-        for failed_result in (2, 18, 19):
-            data = complete_record()
-            struct.pack_into("<I", data, 24, 3)
-            for index, result in (
-                (2, 0),
-                (17, -13),
-                (18, 0),
-                (19, 0),
-                (21, 0),
-            ):
-                struct.pack_into("<i", data, 68 + index * 4, result)
-            struct.pack_into(
-                "<II", data, 164 + 8, 7, 9
-            )
-            struct.pack_into(
-                "<8IQ2I",
-                data,
-                284 + 2 * 48,
-                48,
-                1,
-                7,
-                9,
-                0x10,
-                0,
-                5,
-                0,
-                123,
-                0,
-                0,
-            )
+        for failed_result in (
+            RESULT_CLOSE,
+            RESULT_NET_CLOSE,
+            RESULT_NET_STOP,
+        ):
+            data = stage_three_record()
             struct.pack_into(
                 "<i", data, 68 + failed_result * 4, -1
             )
@@ -267,6 +227,49 @@ class CleanupRecordTests(unittest.TestCase):
                 "completion_contract",
                 decode_record(bytes(data))["validation_errors"],
             )
+
+    def test_stage_three_requires_each_startup_result(self) -> None:
+        for index in (
+            RESULT_OPEN,
+            RESULT_READ,
+            RESULT_NET_START,
+            RESULT_NET_CONNECT,
+            RESULT_NET_PRELUDE,
+        ):
+            for invalid_result in (NOT_RUN, -1):
+                with self.subTest(
+                    index=index, invalid_result=invalid_result
+                ):
+                    data = stage_three_record()
+                    struct.pack_into(
+                        "<i", data, 68 + index * 4, invalid_result
+                    )
+                    struct.pack_into("<I", data, 12, _fnv1a(data))
+                    self.assertIn(
+                        "completion_contract",
+                        decode_record(bytes(data))["validation_errors"],
+                    )
+
+    def test_stage_three_authenticates_initial_sample(self) -> None:
+        sample_offset = 284
+        mismatches = (
+            ("struct_size", 0, 44),
+            ("abi_version", 4, 2),
+            ("owner_token", 8, 8),
+            ("generation", 12, 10),
+            ("event_code", 16, 0x03),
+            ("core_id", 20, 1),
+            ("physical_counter", 24, 4),
+        )
+        for field, offset, value in mismatches:
+            with self.subTest(field=field):
+                data = stage_three_record()
+                struct.pack_into("<I", data, sample_offset + offset, value)
+                struct.pack_into("<I", data, 12, _fnv1a(data))
+                self.assertIn(
+                    "completion_contract",
+                    decode_record(bytes(data))["validation_errors"],
+                )
 
     def test_armed_record_requires_nonzero_handle_identity(self) -> None:
         self.assertTrue(decode_record(bytes(armed_record()))["valid"])

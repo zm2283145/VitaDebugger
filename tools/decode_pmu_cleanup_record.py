@@ -25,6 +25,16 @@ FLAG_OWNER_ARMED = 1 << 3
 FLAG_PASS = 1 << 4
 COMPLETE_FLAGS = FLAG_ACTION | FLAG_RESTORED | FLAG_REARMED | FLAG_PASS
 REQUIRED_CAPABILITIES = 0x6B
+RESULT_OPEN = 0
+RESULT_READ = 1
+RESULT_CLOSE = 2
+RESULT_NET_START = 14
+RESULT_NET_CONNECT = 15
+RESULT_NET_PRELUDE = 16
+RESULT_NET_FAILURE = 17
+RESULT_NET_CLOSE = 18
+RESULT_NET_STOP = 19
+RESULT_POST_DISCONNECT_READ = 21
 
 
 def _fnv1a(data: bytes) -> int:
@@ -239,13 +249,27 @@ def decode_record(data: bytes) -> dict[str, object]:
             or (
                 header[6] == 3
                 and (
-                    results[17] != VP_ERROR_IO
-                    or results[2] != 0
-                    or results[18] != 0
-                    or results[19] != 0
-                    or results[21] != 0
+                    results[RESULT_OPEN] != 0
+                    or results[RESULT_READ] != 0
+                    or results[RESULT_NET_START] != 0
+                    or results[RESULT_NET_CONNECT] != 0
+                    or results[RESULT_NET_PRELUDE] != 0
+                    or results[RESULT_NET_FAILURE] != VP_ERROR_IO
+                    or results[RESULT_CLOSE] != 0
+                    or results[RESULT_NET_CLOSE] != 0
+                    or results[RESULT_NET_STOP] != 0
+                    or results[RESULT_POST_DISCONNECT_READ] != 0
                     or handles[0]["owner_token"] == 0
                     or handles[0]["generation"] == 0
+                    or samples[0]["struct_size"] != 48
+                    or samples[0]["abi_version"] != 1
+                    or samples[0]["owner_token"]
+                    != handles[0]["owner_token"]
+                    or samples[0]["generation"]
+                    != handles[0]["generation"]
+                    or samples[0]["event_code"] != 0x10
+                    or samples[0]["core_id"] != 0
+                    or samples[0]["physical_counter"] != 5
                     or samples[2]["struct_size"] != 48
                     or samples[2]["abi_version"] != 1
                     or samples[2]["owner_token"]

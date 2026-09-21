@@ -74,6 +74,46 @@ static void make_complete(struct vd_pmu_cleanup_record* record)
     seal(record);
 }
 
+static void set_sample(
+    struct vd_kernel_pmu_profiler_sample* sample,
+    uint32_t owner_token, uint32_t generation)
+{
+    sample->struct_size = sizeof(*sample);
+    sample->abi_version = VD_KERNEL_PMU_PROFILER_ABI_VERSION;
+    sample->owner_token = owner_token;
+    sample->generation = generation;
+    sample->event_code =
+        VD_KERNEL_PMU_PROFILER_EVENT_BRANCH_MISPREDICT;
+    sample->core_id = VD_KERNEL_PMU_PROFILER_FIXED_CORE;
+    sample->physical_counter =
+        VD_KERNEL_PMU_PROFILER_FIXED_COUNTER;
+}
+
+static void set_disconnect_evidence(
+    struct vd_pmu_cleanup_record* record)
+{
+    static const size_t success_results[] = {
+        GATE_RESULT_OPEN,
+        GATE_RESULT_READ,
+        GATE_RESULT_CLOSE,
+        GATE_RESULT_NET_START,
+        GATE_RESULT_NET_CONNECT,
+        GATE_RESULT_NET_PRELUDE,
+        GATE_RESULT_NET_CLOSE,
+        GATE_RESULT_NET_STOP,
+        GATE_RESULT_POST_DISCONNECT_READ,
+    };
+    for(size_t i = 0;
+        i < sizeof(success_results) / sizeof(success_results[0]); ++i)
+        record->results[success_results[i]] = 0;
+    record->results[GATE_RESULT_NET_FAILURE] =
+        VD_PMU_CLEANUP_EXPECTED_NET_FAILURE;
+    record->handles[0].owner_token = 3;
+    record->handles[0].generation = 4;
+    set_sample(&record->samples[0], 3, 4);
+    set_sample(&record->samples[2], 3, 4);
+}
+
 int main(void)
 {
     struct vd_pmu_cleanup_record
@@ -92,61 +132,95 @@ int main(void)
     struct vd_pmu_cleanup_record disconnect =
         attempted(VD_PMU_CLEANUP_STAGE_DISCONNECT);
     make_complete(&disconnect);
-    disconnect.results[
-        VD_PMU_CLEANUP_RESULT_POST_DISCONNECT_READ] = 0;
-    disconnect.results[VD_PMU_CLEANUP_RESULT_NET_FAILURE] =
-        VD_PMU_CLEANUP_EXPECTED_NET_FAILURE;
-    disconnect.results[VD_PMU_CLEANUP_RESULT_CLOSE] = 0;
-    disconnect.results[VD_PMU_CLEANUP_RESULT_NET_CLOSE] = 0;
-    disconnect.results[VD_PMU_CLEANUP_RESULT_NET_STOP] = 0;
-    disconnect.handles[0].owner_token = 3;
-    disconnect.handles[0].generation = 4;
-    disconnect.samples[2].struct_size =
-        sizeof(disconnect.samples[2]);
-    disconnect.samples[2].abi_version =
-        VD_KERNEL_PMU_PROFILER_ABI_VERSION;
-    disconnect.samples[2].owner_token = 3;
-    disconnect.samples[2].generation = 4;
-    disconnect.samples[2].event_code =
-        VD_KERNEL_PMU_PROFILER_EVENT_BRANCH_MISPREDICT;
-    disconnect.samples[2].core_id =
-        VD_KERNEL_PMU_PROFILER_FIXED_CORE;
-    disconnect.samples[2].physical_counter =
-        VD_KERNEL_PMU_PROFILER_FIXED_COUNTER;
+    set_disconnect_evidence(&disconnect);
     seal(&disconnect);
     CHECK(vdPmuCleanupRecordValid(&disconnect),
-          "disconnect completion preserves its post-error PMU sample");
-    disconnect.samples[2].generation = 5;
-    seal(&disconnect);
-    CHECK(!vdPmuCleanupRecordValid(&disconnect),
+          "disconnect completion preserves complete execution evidence");
+
+    static const size_t required_success_results[] = {
+        GATE_RESULT_OPEN,
+        GATE_RESULT_READ,
+        GATE_RESULT_NET_START,
+        GATE_RESULT_NET_CONNECT,
+        GATE_RESULT_NET_PRELUDE,
+    };
+    for(size_t i = 0;
+        i < sizeof(required_success_results) /
+                sizeof(required_success_results[0]); ++i)
+    {
+        struct vd_pmu_cleanup_record invalid = disconnect;
+        invalid.results[required_success_results[i]] =
+            VD_PMU_CLEANUP_RESULT_NOT_RUN;
+        seal(&invalid);
+        CHECK(!vdPmuCleanupRecordValid(&invalid),
+              "disconnect rejects a required result left NOT_RUN");
+        invalid = disconnect;
+        invalid.results[required_success_results[i]] = -1;
+        seal(&invalid);
+        CHECK(!vdPmuCleanupRecordValid(&invalid),
+              "disconnect rejects a failed required result");
+    }
+
+    struct vd_pmu_cleanup_record invalid = disconnect;
+    invalid.samples[0].owner_token = 5;
+    seal(&invalid);
+    CHECK(!vdPmuCleanupRecordValid(&invalid),
+          "disconnect rejects initial sample owner mismatch");
+    invalid = disconnect;
+    invalid.samples[0].generation = 5;
+    seal(&invalid);
+    CHECK(!vdPmuCleanupRecordValid(&invalid),
+          "disconnect rejects initial sample generation mismatch");
+    invalid = disconnect;
+    invalid.samples[0].event_code =
+        VD_KERNEL_PMU_PROFILER_EVENT_DCACHE_MISS;
+    seal(&invalid);
+    CHECK(!vdPmuCleanupRecordValid(&invalid),
+          "disconnect rejects initial sample event mismatch");
+    invalid = disconnect;
+    invalid.samples[0].core_id =
+        VD_KERNEL_PMU_PROFILER_FIXED_CORE + 1;
+    seal(&invalid);
+    CHECK(!vdPmuCleanupRecordValid(&invalid),
+          "disconnect rejects initial sample core mismatch");
+    invalid = disconnect;
+    invalid.samples[0].physical_counter =
+        VD_KERNEL_PMU_PROFILER_FIXED_COUNTER - 1;
+    seal(&invalid);
+    CHECK(!vdPmuCleanupRecordValid(&invalid),
+          "disconnect rejects initial sample counter mismatch");
+
+    invalid = disconnect;
+    invalid.samples[2].generation = 5;
+    seal(&invalid);
+    CHECK(!vdPmuCleanupRecordValid(&invalid),
           "disconnect completion rejects an unauthenticated post-error sample");
-    disconnect.samples[2].generation = 4;
-    disconnect.handles[0].owner_token = 0;
-    disconnect.samples[2].owner_token = 0;
-    seal(&disconnect);
-    CHECK(!vdPmuCleanupRecordValid(&disconnect),
+    invalid = disconnect;
+    invalid.handles[0].owner_token = 0;
+    invalid.samples[0].owner_token = 0;
+    invalid.samples[2].owner_token = 0;
+    seal(&invalid);
+    CHECK(!vdPmuCleanupRecordValid(&invalid),
           "disconnect completion rejects zero sample identity");
-    disconnect.handles[0].owner_token = 3;
-    disconnect.samples[2].owner_token = 3;
-    disconnect.results[VD_PMU_CLEANUP_RESULT_NET_FAILURE] = 0;
-    seal(&disconnect);
-    CHECK(!vdPmuCleanupRecordValid(&disconnect),
+    invalid = disconnect;
+    invalid.results[GATE_RESULT_NET_FAILURE] = 0;
+    seal(&invalid);
+    CHECK(!vdPmuCleanupRecordValid(&invalid),
           "disconnect completion requires the exact socket I/O error");
-    disconnect.results[VD_PMU_CLEANUP_RESULT_NET_FAILURE] =
-        VD_PMU_CLEANUP_EXPECTED_NET_FAILURE;
-    disconnect.results[VD_PMU_CLEANUP_RESULT_CLOSE] = -1;
-    seal(&disconnect);
-    CHECK(!vdPmuCleanupRecordValid(&disconnect),
+    invalid = disconnect;
+    invalid.results[GATE_RESULT_CLOSE] = -1;
+    seal(&invalid);
+    CHECK(!vdPmuCleanupRecordValid(&invalid),
           "disconnect completion requires authenticated PMU close");
-    disconnect.results[VD_PMU_CLEANUP_RESULT_CLOSE] = 0;
-    disconnect.results[VD_PMU_CLEANUP_RESULT_NET_CLOSE] = -1;
-    seal(&disconnect);
-    CHECK(!vdPmuCleanupRecordValid(&disconnect),
+    invalid = disconnect;
+    invalid.results[GATE_RESULT_NET_CLOSE] = -1;
+    seal(&invalid);
+    CHECK(!vdPmuCleanupRecordValid(&invalid),
           "disconnect completion requires socket close");
-    disconnect.results[VD_PMU_CLEANUP_RESULT_NET_CLOSE] = 0;
-    disconnect.results[VD_PMU_CLEANUP_RESULT_NET_STOP] = -1;
-    seal(&disconnect);
-    CHECK(!vdPmuCleanupRecordValid(&disconnect),
+    invalid = disconnect;
+    invalid.results[GATE_RESULT_NET_STOP] = -1;
+    seal(&invalid);
+    CHECK(!vdPmuCleanupRecordValid(&invalid),
           "disconnect completion requires network cleanup");
 
     records[2] = attempted(VD_PMU_CLEANUP_STAGE_ABRUPT_EXIT);
