@@ -3,13 +3,18 @@
 from __future__ import annotations
 
 import argparse
-import ipaddress
 import json
-import socket
 from pathlib import Path
 
 from .protocol import AUTH_TOKEN_SIZE, ProtocolError
-from .receiver import LatestFrameStore, ReceiverLimits, read_latest, receive_connection
+from .receiver import (
+    DEFAULT_LISTENER_PORT,
+    LatestFrameStore,
+    ReceiverLimits,
+    listen_once,
+    read_latest,
+    validate_listener_port,
+)
 
 
 def _load_token(path: Path) -> bytes:
@@ -25,16 +30,7 @@ def _load_token(path: Path) -> bytes:
     return raw
 
 
-def _is_loopback(bind: str) -> bool:
-    try:
-        return ipaddress.ip_address(bind).is_loopback
-    except ValueError:
-        return bind.lower() == "localhost"
-
-
 def _receive(args: argparse.Namespace) -> int:
-    if not _is_loopback(args.bind) and not args.allow_lan:
-        raise ValueError("non-loopback bind requires --allow-lan")
     limits = ReceiverLimits(
         max_width=args.max_width,
         max_height=args.max_height,
@@ -47,14 +43,15 @@ def _receive(args: argparse.Namespace) -> int:
     limits.validate()
     token = _load_token(args.token_file)
     store = LatestFrameStore(args.output)
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
-        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        listener.bind((args.bind, args.port))
-        listener.listen(1)
-        listener.settimeout(args.accept_timeout)
-        connection, peer = listener.accept()
-    stats = receive_connection(
-        connection, token=token, store=store, limits=limits, peer=peer)
+    stats = listen_once(
+        bind=args.bind,
+        port=args.port,
+        allow_lan=args.allow_lan,
+        accept_timeout_seconds=args.accept_timeout,
+        token=token,
+        store=store,
+        limits=limits,
+    )
     print(json.dumps(vars(stats), sort_keys=True))
     return 0
 
@@ -72,7 +69,7 @@ def _parser() -> argparse.ArgumentParser:
     receive.add_argument("--token-file", type=Path, required=True)
     receive.add_argument("--output", type=Path, required=True)
     receive.add_argument("--bind", default="127.0.0.1")
-    receive.add_argument("--port", type=int, default=18197)
+    receive.add_argument("--port", type=int, default=DEFAULT_LISTENER_PORT)
     receive.add_argument("--allow-lan", action="store_true")
     receive.add_argument("--max-width", type=int, default=960)
     receive.add_argument("--max-height", type=int, default=544)
@@ -91,8 +88,10 @@ def _parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     args = _parser().parse_args()
-    if getattr(args, "port", 18197) not in range(1, 65536):
-        raise SystemExit("port must be between 1 and 65535")
+    try:
+        validate_listener_port(getattr(args, "port", DEFAULT_LISTENER_PORT))
+    except ValueError as error:
+        raise SystemExit(f"vdscreen: {error}") from error
     if not 0 < getattr(args, "accept_timeout", 30.0) <= 3600:
         raise SystemExit("accept timeout must be between 0 and 3600 seconds")
     try:

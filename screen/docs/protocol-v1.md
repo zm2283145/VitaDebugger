@@ -69,3 +69,9 @@ Only a checksum-valid complete frame is published. Two fixed PPM slots bound
 disk usage; `latest.json` is atomically replaced to select a slot. Consumers
 must verify `image_sha256` and reread `latest.json`, as implemented by
 `vdscreen.receiver.read_latest`, to avoid racing a later slot rotation.
+
+The host listener defaults to TCP 18197. It accepts overrides only from 18000
+through 18999 and reserves 18194-18196 for existing VitaDebugger services.
+VitaCompanion's 1337/1338 and vita-agent-bridge's 1348 are outside the accepted
+range. A bind conflict returns an error and closes the failed listener; it
+never falls back to a different port.

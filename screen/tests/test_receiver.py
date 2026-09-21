@@ -17,14 +17,23 @@ from vdscreen.protocol import (
     encode_frame,
 )
 from vdscreen.receiver import (
+    DEFAULT_LISTENER_PORT,
+    MAX_LISTENER_PORT,
+    MIN_LISTENER_PORT,
     LatestFrameStore,
     ReceiverLimits,
+    listen_once,
     read_latest,
     receive_connection,
+    validate_listener_port,
 )
 
 
 TOKEN = bytes(range(1, 33))
+SIDE_BY_SIDE_CONFIG = (
+    Path(__file__).resolve().parents[1] /
+    "config" / "hardware-gate-side-by-side.json"
+)
 PIXELS = bytes((
     255, 0, 0, 255,
     0, 255, 0, 255,
@@ -80,6 +89,66 @@ def run_connection(data: bytes, output: Path,
 
 
 class ReceiverTests(unittest.TestCase):
+    def test_hardware_gate_manifest_has_distinct_identities(self) -> None:
+        manifest = json.loads(SIDE_BY_SIDE_CONFIG.read_text())
+        self.assertEqual(manifest["schema_version"], 1)
+        host = manifest["host"]
+        vita = manifest["vita"]
+        coexistence = manifest["coexistence"]
+        validate_listener_port(host["listener_port"])
+        self.assertEqual(host["listener_port"], vita["connect_port"])
+        self.assertEqual(host["service"], "vdscreen-v1")
+        self.assertEqual(vita["title_id"], "VDSCRN001")
+        self.assertEqual(vita["application_module"], "vitadebug_screen_gate")
+        self.assertEqual(vita["archive"], "libvitadebug_screen.a")
+        self.assertEqual(vita["artifact"], "vitadebug-screen-gate.vpk")
+        self.assertIsNone(vita["resident_module"])
+        self.assertEqual(
+            set(coexistence["forbidden_ports"]), {1337, 1338, 1348})
+        self.assertNotIn(host["listener_port"],
+                         coexistence["forbidden_ports"])
+        self.assertIs(coexistence["mutate_fallback_configuration"], False)
+
+    def test_side_by_side_listener_port_contract(self) -> None:
+        for port in (MIN_LISTENER_PORT, DEFAULT_LISTENER_PORT,
+                     MAX_LISTENER_PORT):
+            validate_listener_port(port)
+        for port in (0, 1337, 1338, 1348, 17999, 18194, 18195, 18196,
+                     19000, 65535):
+            with self.subTest(port=port), self.assertRaises(ValueError):
+                validate_listener_port(port)
+
+    def test_bind_conflict_closes_failed_listener(self) -> None:
+        occupied = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        port = None
+        try:
+            for candidate in range(18200, 18300):
+                try:
+                    occupied.bind(("127.0.0.1", candidate))
+                    port = candidate
+                    break
+                except OSError:
+                    continue
+            self.assertIsNotNone(port, "no test port available")
+            occupied.listen(1)
+            with tempfile.TemporaryDirectory() as directory:
+                with self.assertRaises(OSError):
+                    listen_once(
+                        bind="127.0.0.1",
+                        port=port,
+                        allow_lan=False,
+                        accept_timeout_seconds=0.1,
+                        token=TOKEN,
+                        store=LatestFrameStore(Path(directory)),
+                    )
+        finally:
+            occupied.close()
+        probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            probe.bind(("127.0.0.1", port))
+        finally:
+            probe.close()
+
     def test_complete_frame_publishes_atomic_ppm_and_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory)

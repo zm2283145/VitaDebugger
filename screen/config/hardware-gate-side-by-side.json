@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "host": {
+    "service": "vdscreen-v1",
+    "bind": "HOST_PRIVATE_IPV4",
+    "listener_port": 18197
+  },
+  "vita": {
+    "connect_port": 18197,
+    "title_id": "VDSCRN001",
+    "application_module": "vitadebug_screen_gate",
+    "archive": "libvitadebug_screen.a",
+    "artifact": "vitadebug-screen-gate.vpk",
+    "resident_module": null
+  },
+  "coexistence": {
+    "fallback": "VitaCompanion",
+    "forbidden_ports": [
+      1337,
+      1338,
+      1348
+    ],
+    "mutate_fallback_configuration": false
+  }
+}

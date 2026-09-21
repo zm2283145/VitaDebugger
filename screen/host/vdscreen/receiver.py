@@ -26,6 +26,15 @@ from .protocol import (
     decode_header,
 )
 
+DEFAULT_LISTENER_PORT = 18197
+MIN_LISTENER_PORT = 18000
+MAX_LISTENER_PORT = 18999
+RESERVED_LISTENER_PORTS = frozenset({
+    18194,  # VitaDebugger DebugNet gate
+    18195,  # VitaProfiler TCP gate
+    18196,  # VitaDevDeploy direct TCP
+})
+
 
 @dataclasses.dataclass(frozen=True)
 class ReceiverLimits:
@@ -61,6 +70,24 @@ class ReceiveStats:
     duplicates_dropped: int = 0
     sequence_gaps: int = 0
     bytes_received: int = 0
+
+
+def validate_listener_port(port: int) -> None:
+    if not MIN_LISTENER_PORT <= port <= MAX_LISTENER_PORT:
+        raise ValueError(
+            f"listener port must be between {MIN_LISTENER_PORT} and "
+            f"{MAX_LISTENER_PORT}")
+    if port in RESERVED_LISTENER_PORTS:
+        raise ValueError("listener port is reserved by another VitaDebugger service")
+
+
+def _is_loopback(bind: str) -> bool:
+    import ipaddress
+
+    try:
+        return ipaddress.ip_address(bind).is_loopback
+    except ValueError:
+        return bind.lower() == "localhost"
 
 
 class _RateGate:
@@ -268,6 +295,30 @@ def receive_connection(
             pass
         connection.close()
     return stats
+
+
+def listen_once(
+    *,
+    bind: str,
+    port: int,
+    allow_lan: bool,
+    accept_timeout_seconds: float,
+    token: bytes,
+    store: LatestFrameStore,
+    limits: ReceiverLimits = ReceiverLimits(),
+) -> ReceiveStats:
+    validate_listener_port(port)
+    if not _is_loopback(bind) and not allow_lan:
+        raise ValueError("non-loopback bind requires explicit LAN authorization")
+    if not 0 < accept_timeout_seconds <= 3600:
+        raise ValueError("accept timeout must be between 0 and 3600 seconds")
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+        listener.bind((bind, port))
+        listener.listen(1)
+        listener.settimeout(accept_timeout_seconds)
+        connection, peer = listener.accept()
+    return receive_connection(
+        connection, token=token, store=store, limits=limits, peer=peer)
 
 
 def read_latest(output: Path, attempts: int = 3) -> tuple[dict, bytes]:

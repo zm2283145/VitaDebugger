@@ -122,7 +122,8 @@ The receiver binds loopback by default. A mock/local producer can use:
 ```powershell
 py -3 .\screen\tools\vdscreen.py receive `
   --token-file .\screen-token.bin `
-  --output .\screen-capture
+  --output .\screen-capture `
+  --port 18197
 ```
 
 A Vita cannot reach loopback. A supervised hardware gate must explicitly bind
@@ -132,8 +133,57 @@ the host's private-LAN address and acknowledge the exposure:
 py -3 .\screen\tools\vdscreen.py receive `
   --token-file .\screen-token.bin `
   --output .\screen-capture `
-  --bind 192.168.1.10 --allow-lan
+  --bind 192.168.1.10 --port 18197 --allow-lan
 ```
+
+### Side-by-side hardware-test identity
+
+The screen receiver permits only ports 18000 through 18999 and rejects
+VitaDebugger's existing 18194 DebugNet, 18195 profiler, and 18196 deployment
+ports. This range also cannot collide with VitaCompanion defaults 1337/1338 or
+vita-agent-bridge 1348. A bind failure is terminal for that invocation and the
+failed listener is closed before the error returns.
+
+Use these exact identities for the first serialized hardware gate:
+
+| Surface | Hardware-gate identity |
+| --- | --- |
+| Host listener/service | `vdscreen-v1`, TCP `18197` |
+| Application archive | `libvitadebug_screen.a` |
+| Disposable application title ID | `VDSCRN001` |
+| Disposable application/module name | `vitadebug_screen_gate` |
+| Candidate VPK artifact | `vitadebug-screen-gate.vpk` |
+| Resident SUPRX/SKPRX | none |
+
+The same values are machine-checked in
+[`config/hardware-gate-side-by-side.json`](config/hardware-gate-side-by-side.json).
+`HOST_PRIVATE_IPV4` is a required placeholder, not a default address; replace
+it only in process-local run configuration after hardware authorization.
+
+The current foundation intentionally does not build the candidate VPK or
+install a module. The gate application must remain a normal source-owned
+user-mode title and set the matching profiler TCP sink endpoint explicitly:
+
+```c
+tcp_config.endpoint.port = 18197u;
+```
+
+Host build/run override:
+
+```powershell
+.\tools\invoke-vita-env.ps1 make -C screen vita-check
+py -3 .\screen\tools\vdscreen.py receive `
+  --token-file .\screen-token.bin `
+  --output .\screen-capture `
+  --bind 192.168.1.10 --port 18197 --allow-lan
+```
+
+Do not reuse `VitaCompanion`, `vitacompanion.suprx`, `vitacompanion.skprx`,
+`VITA_COM`, ports 1337/1338, or any of its paths/artifacts. This work neither
+reads nor changes VitaCompanion configuration or files, so it can remain
+installed as a separately invoked fallback. Any later resident companion is a
+new reviewed feature and must use distinct module names plus exact ABI
+negotiation; it is not authorized by this gate.
 
 The deterministic consumer entry point verifies the atomic manifest and image:
 
