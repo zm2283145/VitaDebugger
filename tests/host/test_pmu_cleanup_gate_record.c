@@ -162,6 +162,18 @@ int main(void)
     }
 
     struct vd_pmu_cleanup_record invalid = disconnect;
+    invalid.samples[0].struct_size =
+        sizeof(invalid.samples[0]) - 1;
+    seal(&invalid);
+    CHECK(!vdPmuCleanupRecordValid(&invalid),
+          "disconnect rejects initial sample size mismatch");
+    invalid = disconnect;
+    invalid.samples[0].abi_version =
+        VD_KERNEL_PMU_PROFILER_ABI_VERSION + 1;
+    seal(&invalid);
+    CHECK(!vdPmuCleanupRecordValid(&invalid),
+          "disconnect rejects initial sample ABI mismatch");
+    invalid = disconnect;
     invalid.samples[0].owner_token = 5;
     seal(&invalid);
     CHECK(!vdPmuCleanupRecordValid(&invalid),
