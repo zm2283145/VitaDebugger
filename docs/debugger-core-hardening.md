@@ -133,6 +133,13 @@ hardware-pending; rerun the stopped RST, connected cancellation, owner
 exclusion, command-specific disconnect, and bounded soak matrix before
 claiming retail closure.
 
+The terminal retail verdict is **RSP NOT QUALIFIED**. Admission-side successes
+do not establish a hardware pass: the final completion connection received
+neither an ACK nor a response to its first valid `qSupported`, and the remaining
+matrix was not run. See the
+[canonical terminal record](hardware/rsp-completion-terminal-3.65.json) and
+[curation scope](rsp-curation-record.md).
+
 Stop-token acquisition/recovery, thread-context snapshots, cache maintenance,
 and exception-slot replacement still execute inside the global state lock.
 Those calls protect coupled breakpoint/lease/handler invariants, and moving
