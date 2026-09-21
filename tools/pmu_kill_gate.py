@@ -7,17 +7,22 @@ import argparse
 import ftplib
 import json
 import os
+import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+
 from deploy.host.vitadevdeploy.companion import VitaCompanionClient
 from tools.decode_pmu_cleanup_record import SIZE, decode_record
+from tools.pmu_cleanup_journal_paths import ftp_journal_path
 
 TITLE_ID = "VDCP00013"
-ARMED_PATH = "ux0:/data/VitaDebugger/pmu-cleanup-v2-abrupt-exit-b.bin"
-FAILED_PATH = "ux0:/data/VitaDebugger/pmu-cleanup-v2-abrupt-exit-c.bin"
+ARMED_PATH = ftp_journal_path(5, "b")
+FAILED_PATH = ftp_journal_path(5, "c")
 MAX_KILL_DELAY_SECONDS = 2.0
 
 

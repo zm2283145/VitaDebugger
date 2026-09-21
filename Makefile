@@ -246,7 +246,7 @@ host-test-pmu-cleanup-gate-record: test-pmu-cleanup-gate-record$(HOST_EXEEXT)
 	./test-pmu-cleanup-gate-record$(HOST_EXEEXT)
 
 host-test-pmu-cleanup-evidence:
-	$(HOST_PYTHON) -m unittest tests.host.test_decode_pmu_cleanup_record tests.host.test_pmu_disconnect_receiver tests.host.test_pmu_kill_gate
+	$(HOST_PYTHON) -m unittest tests.host.test_decode_pmu_cleanup_record tests.host.test_pmu_cleanup_journal_paths tests.host.test_pmu_disconnect_receiver tests.host.test_pmu_kill_gate
 
 host-test-pmu-process-event-pending: test-pmu-process-event-pending$(HOST_EXEEXT)
 	./test-pmu-process-event-pending$(HOST_EXEEXT)
@@ -390,7 +390,7 @@ test-pmu-lifecycle-gate-record$(HOST_EXEEXT): kernel/pmu-profiler-lifecycle-gate
 test-pmu-thread-exit-gate-record$(HOST_EXEEXT): kernel/pmu-profiler-thread-exit-gate/journal.h kernel/include/vitadebug_pmu_profiler.h tests/host/test_pmu_thread_exit_gate_record.c
 	$(HOST_CC_RUN) $(HOST_CFLAGS) -pedantic-errors -Ikernel/pmu-profiler-thread-exit-gate -Ikernel/include tests/host/test_pmu_thread_exit_gate_record.c -o $@
 
-test-pmu-cleanup-gate-record$(HOST_EXEEXT): kernel/pmu-profiler-cleanup-gate/journal.h kernel/include/vitadebug_pmu_profiler.h tests/host/test_pmu_cleanup_gate_record.c
+test-pmu-cleanup-gate-record$(HOST_EXEEXT): kernel/pmu-profiler-cleanup-gate/journal.h kernel/pmu-profiler-cleanup-gate/journal_paths.h kernel/include/vitadebug_pmu_profiler.h tests/host/test_pmu_cleanup_gate_record.c
 	$(HOST_CC_RUN) $(HOST_CFLAGS) -pedantic-errors -Ikernel/pmu-profiler-cleanup-gate -Ikernel/include tests/host/test_pmu_cleanup_gate_record.c -o $@
 
 test-pmu-process-event-pending$(HOST_EXEEXT): kernel/src/pmu_process_event_pending.h tests/host/test_pmu_process_event_pending.c

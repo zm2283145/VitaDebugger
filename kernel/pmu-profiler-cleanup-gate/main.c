@@ -11,6 +11,7 @@
 
 #include "debugScreen.h"
 #include "journal.h"
+#include "journal_paths.h"
 #include "vitadebug_pmu_profiler.h"
 #include "vitaprofiler_tcp_vita.h"
 
@@ -66,31 +67,32 @@ static int gate_net_initialized;
 static int gate_netctl_initialized;
 static int gate_tcp_initialized;
 
-static const char* const record_paths[5][VD_PMU_CLEANUP_SLOT_COUNT] = {
+static const char record_paths[5][VD_PMU_CLEANUP_SLOT_COUNT]
+    [VD_PMU_CLEANUP_JOURNAL_PATH_CAPACITY] = {
     {
-        "ux0:data/VitaDebugger/pmu-cleanup-v2-conflict-a.bin",
-        "ux0:data/VitaDebugger/pmu-cleanup-v2-conflict-b.bin",
-        "ux0:data/VitaDebugger/pmu-cleanup-v2-conflict-c.bin",
+        VD_PMU_CLEANUP_STAGE1_RETRY_A,
+        VD_PMU_CLEANUP_STAGE1_RETRY_B,
+        VD_PMU_CLEANUP_STAGE1_RETRY_C,
     },
     {
-        "ux0:data/VitaDebugger/pmu-cleanup-v2-timeout-a.bin",
-        "ux0:data/VitaDebugger/pmu-cleanup-v2-timeout-b.bin",
-        "ux0:data/VitaDebugger/pmu-cleanup-v2-timeout-c.bin",
+        VD_PMU_CLEANUP_STAGE2_A,
+        VD_PMU_CLEANUP_STAGE2_B,
+        VD_PMU_CLEANUP_STAGE2_C,
     },
     {
-        "ux0:data/VitaDebugger/pmu-cleanup-v2-disconnect-a.bin",
-        "ux0:data/VitaDebugger/pmu-cleanup-v2-disconnect-b.bin",
-        "ux0:data/VitaDebugger/pmu-cleanup-v2-disconnect-c.bin",
+        VD_PMU_CLEANUP_STAGE3_A,
+        VD_PMU_CLEANUP_STAGE3_B,
+        VD_PMU_CLEANUP_STAGE3_C,
     },
     {
-        "ux0:data/VitaDebugger/pmu-cleanup-v2-normal-exit-a.bin",
-        "ux0:data/VitaDebugger/pmu-cleanup-v2-normal-exit-b.bin",
-        "ux0:data/VitaDebugger/pmu-cleanup-v2-normal-exit-c.bin",
+        VD_PMU_CLEANUP_STAGE4_A,
+        VD_PMU_CLEANUP_STAGE4_B,
+        VD_PMU_CLEANUP_STAGE4_C,
     },
     {
-        "ux0:data/VitaDebugger/pmu-cleanup-v2-abrupt-exit-a.bin",
-        "ux0:data/VitaDebugger/pmu-cleanup-v2-abrupt-exit-b.bin",
-        "ux0:data/VitaDebugger/pmu-cleanup-v2-abrupt-exit-c.bin",
+        VD_PMU_CLEANUP_STAGE5_A,
+        VD_PMU_CLEANUP_STAGE5_B,
+        VD_PMU_CLEANUP_STAGE5_C,
     },
 };
 

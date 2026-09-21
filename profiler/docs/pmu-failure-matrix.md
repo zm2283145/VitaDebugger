@@ -107,6 +107,13 @@ Every attempted hardware row needs two durable, checksummed journal phases:
 The cleanup record mirrors the compiled C ABI, including four zero alignment
 bytes before `samples[]`: handles end at offset 284 and samples begin at 288.
 Both C and Python validators reject the obsolete unaligned sample placement.
+The current competing-owner retry writes only the explicit
+`pmu-cleanup-v2-conflict-r2-{a,b,c}.bin` namespace. Host tests require all 15
+stage/slot paths to be unique, ASCII, within the fixed C storage bound, and
+mirrored exactly by the producer and Python tools. Hardware decoding records
+the exact remote source name plus expected stage and slot; the immutable
+historical `pmu-cleanup-v2-conflict-{a,b,c}.bin` names fail that provenance
+check and cannot satisfy the retry.
 
 For a refusal row, success means the follow-up open is refused and the exact
 restoration/owner obligation remains observable.  For an acceptance row,

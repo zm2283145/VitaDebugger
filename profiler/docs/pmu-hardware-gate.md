@@ -154,7 +154,10 @@ stage's cleanup and its re-arm proof:
 
 1. stage `1`: competing-owner refusal and first-owner exact close; accept only
    raw host `-42` or exact retail syscall encoding `0xBFFFFFD6` as provider
-   `BUSY`, then require the bounded same-boot re-arm;
+   `BUSY`, then require the bounded same-boot re-arm. The retry uses only the
+   fresh `pmu-cleanup-v2-conflict-r2-{a,b,c}.bin` namespace; historical
+   `pmu-cleanup-v2-conflict-{a,b,c}.bin` evidence remains immutable and is not
+   accepted as retry evidence;
 2. stage `2`: 250 ms timeout/watchdog restore and matching acknowledgement;
 3. stage `3`: production TCP sink receiver disconnect under a 5 s live lease,
    with successful initial PMU open/read and network start/connect/prelude,
@@ -207,12 +210,16 @@ curl.exe --fail --show-error `
   --output ".\evidence\$Record"
 Get-FileHash ".\evidence\$Record" -Algorithm SHA256
 py -3 tools/decode_pmu_cleanup_record.py `
-  ".\evidence\$Record" --output ".\evidence\$Record.json"
+  ".\evidence\$Record" `
+  --source-journal-name $Record `
+  --expected-stage $Stage --expected-slot $Suffix `
+  --output ".\evidence\$Record.json"
 ```
 
 Use the exact stage/suffix loop and hash-addressed immutable archive naming
 from the cleanup-gate runbook. Device journal slots are never deleted or
-reused during this matrix; each later stage uses its distinct paths.
+reused during this matrix; stage 1 uses the collision-free `conflict-r2`
+namespace and each later stage uses its distinct paths.
 
 An accepted terminal record contains idle baseline, restored, and final
 snapshots that match byte-for-byte; zero recovery/restore/reference-uncertainty

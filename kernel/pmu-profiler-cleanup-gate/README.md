@@ -74,17 +74,21 @@ watchdog context still restores exactly but permanently quarantines re-arm.
 
 ## Evidence contract
 
-Each stage owns three exclusive 1,024-byte slots:
+Each stage owns three exclusive 1,024-byte slots. The current stage-1 retry
+uses an explicit `conflict-r2` namespace so the immutable historical
+`conflict` slots cannot be deleted, reused, or mistaken for new evidence:
 
 ```text
-ux0:data/VitaDebugger/pmu-cleanup-v2-<stage>-a.bin
-ux0:data/VitaDebugger/pmu-cleanup-v2-<stage>-b.bin
-ux0:data/VitaDebugger/pmu-cleanup-v2-<stage>-c.bin
+ux0:data/VitaDebugger/pmu-cleanup-v2-conflict-r2-a.bin
+ux0:data/VitaDebugger/pmu-cleanup-v2-conflict-r2-b.bin
+ux0:data/VitaDebugger/pmu-cleanup-v2-conflict-r2-c.bin
+ux0:data/VitaDebugger/pmu-cleanup-v2-<later-stage>-<slot>.bin
 ```
 
-`<stage>` is `conflict`, `timeout`, `disconnect`, `normal-exit`, or
-`abrupt-exit`. Ordinary stages write attempted and terminal records. Exit
-stages write attempted, armed, and terminal records across two launches.
+`<later-stage>` is `timeout`, `disconnect`, `normal-exit`, or `abrupt-exit`;
+`<slot>` is `a`, `b`, or `c`. Ordinary stages write attempted and terminal
+records. Exit stages write attempted, armed, and terminal records across two
+launches.
 Every write uses create-exclusive, file sync, volume sync, reopen,
 schema/checksum validation, and byte comparison. Any present invalid slot,
 duplicate revision, unexpected state, or write failure locks the stage.
@@ -122,13 +126,19 @@ Decode each retrieved slot offline:
 
 ```powershell
 py -3 tools/decode_pmu_cleanup_record.py `
-  .\evidence\pmu-cleanup-v2-conflict-b.bin `
-  --output .\evidence\pmu-cleanup-v2-conflict-b.json
+  .\evidence\stage-1-b-<sha256>.bin `
+  --source-journal-name pmu-cleanup-v2-conflict-r2-b.bin `
+  --expected-stage 1 --expected-slot b `
+  --output .\evidence\pmu-cleanup-v2-conflict-r2-b.json
 ```
 
 The decoder exits nonzero for a malformed header, checksum mismatch, nonzero
 layout padding, unknown field, non-idle state, uncertainty flag, missing exact
-snapshot, mismatched snapshot, or incomplete state transition.
+snapshot, mismatched snapshot, incomplete state transition, or journal
+provenance that does not match the exact current stage/slot namespace. Its CLI
+requires bound source-name/stage/slot provenance by default. The explicit
+`--allow-unbound-source` option exists only to inspect previously archived
+historical records; such output is not hardware acceptance evidence.
 
 ## Serialized retail procedure
 
@@ -161,7 +171,7 @@ never copy key material into the repository or evidence directory.
 ```powershell
 $VitaIp = "10.1.1.217"
 $Stage = 1
-$StageName = @("conflict", "timeout", "disconnect",
+$StageName = @("conflict-r2", "timeout", "disconnect",
                "normal-exit", "abrupt-exit")[$Stage - 1]
 $Build = Resolve-Path "kernel\build-cleanup-stage$Stage"
 $StageVpk = Join-Path $Build "vitadebug-pmu-profiler-cleanup-gate.vpk"
@@ -196,6 +206,8 @@ foreach ($Suffix in $Suffixes) {
     ("stage-{0}-{1}-{2}.bin" -f $Stage, $Suffix, $Hash)
   Move-Item -LiteralPath $Raw -Destination $Immutable
   py -3 tools/decode_pmu_cleanup_record.py $Immutable `
+    --source-journal-name $Record `
+    --expected-stage $Stage --expected-slot $Suffix `
     --output "$Immutable.json"
 }
 ```

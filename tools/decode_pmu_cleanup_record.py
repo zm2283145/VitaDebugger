@@ -9,6 +9,11 @@ import json
 import struct
 from pathlib import Path
 
+try:
+    from tools.pmu_cleanup_journal_paths import journal_filename
+except ModuleNotFoundError:
+    from pmu_cleanup_journal_paths import journal_filename
+
 MAGIC = 0x56504347
 VERSION = 2
 SIZE = 1024
@@ -188,9 +193,27 @@ def _sample_matches_handle(
     )
 
 
-def decode_record(data: bytes) -> dict[str, object]:
+def decode_record(
+    data: bytes,
+    *,
+    source_journal_name: str | None = None,
+    expected_stage: int | None = None,
+    expected_slot: str | None = None,
+) -> dict[str, object]:
     if len(data) != SIZE:
         raise ValueError(f"expected {SIZE} bytes, got {len(data)}")
+    provenance_values = (
+        source_journal_name,
+        expected_stage,
+        expected_slot,
+    )
+    if any(value is not None for value in provenance_values) and not all(
+        value is not None for value in provenance_values
+    ):
+        raise ValueError(
+            "source journal name, expected stage, and expected slot "
+            "must be provided together"
+        )
     header = struct.unpack_from("<8I2Q", data, 0)
     info_result, capabilities, baseline_result, restored_result, final_result = (
         struct.unpack_from("<iIiii", data, 48)
@@ -244,6 +267,51 @@ def decode_record(data: bytes) -> dict[str, object]:
         "file_sha256": hashlib.sha256(data).hexdigest(),
     }
     errors: list[str] = []
+    if source_journal_name is not None:
+        assert expected_stage is not None
+        assert expected_slot is not None
+        expected_name = journal_filename(expected_stage, expected_slot)
+        record["journal_provenance"] = {
+            "source_journal_name": source_journal_name,
+            "expected_journal_name": expected_name,
+            "expected_stage": expected_stage,
+            "expected_slot": expected_slot,
+        }
+        expected_revision = ord(expected_slot) - ord("a") + 1
+        expected_state = (
+            STATE_ATTEMPTED
+            if expected_slot == "a"
+            else (
+                STATE_ARMED
+                if expected_slot == "b" and expected_stage >= 4
+                else None
+            )
+        )
+        if (
+            source_journal_name != expected_name
+            or header[6] != expected_stage
+            or header[4] != expected_revision
+            or (
+                expected_state is not None
+                and header[5] != expected_state
+            )
+            or (
+                expected_slot == "b"
+                and expected_stage <= 3
+                and header[5] not in (STATE_COMPLETE, STATE_FAILED)
+            )
+            or (
+                expected_slot == "c"
+                and (
+                    expected_stage <= 3
+                    or header[5] not in (
+                        STATE_COMPLETE,
+                        STATE_FAILED,
+                    )
+                )
+            )
+        ):
+            errors.append("journal_provenance")
     if header[0] != MAGIC or header[1] != VERSION or header[2] != SIZE:
         errors.append("header")
     if header[3] != _fnv1a(data):
@@ -385,8 +453,50 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("record", type=Path)
     parser.add_argument("--output", type=Path)
+    parser.add_argument("--source-journal-name")
+    parser.add_argument(
+        "--expected-stage", type=int, choices=range(1, 6)
+    )
+    parser.add_argument(
+        "--expected-slot", choices=("a", "b", "c")
+    )
+    parser.add_argument(
+        "--allow-unbound-source",
+        action="store_true",
+        help="decode historical evidence without accepting its journal provenance",
+    )
     args = parser.parse_args()
-    decoded = decode_record(args.record.read_bytes())
+    provenance_values = (
+        args.source_journal_name,
+        args.expected_stage,
+        args.expected_slot,
+    )
+    if any(value is not None for value in provenance_values) and not all(
+        value is not None for value in provenance_values
+    ):
+        parser.error(
+            "--source-journal-name, --expected-stage, and "
+            "--expected-slot must be supplied together"
+        )
+    if args.allow_unbound_source and all(
+        value is not None for value in provenance_values
+    ):
+        parser.error(
+            "--allow-unbound-source cannot be combined with bound provenance"
+        )
+    if not args.allow_unbound_source and not all(
+        value is not None for value in provenance_values
+    ):
+        parser.error(
+            "bound journal provenance is required; use "
+            "--allow-unbound-source only for historical analysis"
+        )
+    decoded = decode_record(
+        args.record.read_bytes(),
+        source_journal_name=args.source_journal_name,
+        expected_stage=args.expected_stage,
+        expected_slot=args.expected_slot,
+    )
     rendered = json.dumps(decoded, indent=2, sort_keys=True) + "\n"
     if args.output:
         args.output.write_text(rendered, encoding="utf-8")

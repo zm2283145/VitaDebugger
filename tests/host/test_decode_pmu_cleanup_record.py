@@ -45,6 +45,10 @@ from tools.decode_pmu_cleanup_record import (
     _fnv1a,
     decode_record,
 )
+from tools.pmu_cleanup_journal_paths import (
+    historical_stage1_filename,
+    journal_filename,
+)
 
 CAPTURED_STAGE1_SAMPLE = bytes.fromhex(
     "300000000100000001000000010000000100000000000000"
@@ -218,6 +222,64 @@ class CleanupRecordTests(unittest.TestCase):
         decoded = decode_record(bytes(complete_record()))
         self.assertTrue(decoded["valid"])
         self.assertEqual(decoded["title_id"], "VDCP00013")
+
+    def test_stage_one_retry_provenance_rejects_historical_slots(
+        self,
+    ) -> None:
+        current = decode_record(
+            bytes(complete_record()),
+            source_journal_name=journal_filename(1, "b"),
+            expected_stage=1,
+            expected_slot="b",
+        )
+        self.assertTrue(current["valid"])
+        self.assertEqual(
+            current["journal_provenance"]["expected_journal_name"],
+            "pmu-cleanup-v2-conflict-r2-b.bin",
+        )
+
+        historical = decode_record(
+            bytes(complete_record()),
+            source_journal_name=historical_stage1_filename("b"),
+            expected_stage=1,
+            expected_slot="b",
+        )
+        self.assertFalse(historical["valid"])
+        self.assertIn(
+            "journal_provenance",
+            historical["validation_errors"],
+        )
+
+    def test_journal_provenance_requires_exact_stage_slot_state(
+        self,
+    ) -> None:
+        wrong_stage = decode_record(
+            bytes(complete_record()),
+            source_journal_name=journal_filename(2, "b"),
+            expected_stage=2,
+            expected_slot="b",
+        )
+        self.assertIn(
+            "journal_provenance",
+            wrong_stage["validation_errors"],
+        )
+
+        wrong_slot = decode_record(
+            bytes(complete_record()),
+            source_journal_name=journal_filename(1, "a"),
+            expected_stage=1,
+            expected_slot="a",
+        )
+        self.assertIn(
+            "journal_provenance",
+            wrong_slot["validation_errors"],
+        )
+
+        with self.assertRaises(ValueError):
+            decode_record(
+                bytes(complete_record()),
+                source_journal_name=journal_filename(1, "b"),
+            )
 
     def test_stage_one_accepts_only_raw_or_exact_syscall_busy(self) -> None:
         for accepted in (VP_ERROR_BUSY, VITA_SYSCALL_VP_ERROR_BUSY):

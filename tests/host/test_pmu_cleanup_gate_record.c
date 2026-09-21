@@ -3,6 +3,7 @@
 #include <string.h>
 
 #include "journal.h"
+#include "journal_paths.h"
 
 static int failures;
 
@@ -155,6 +156,28 @@ int main(void)
         records[VD_PMU_CLEANUP_SLOT_COUNT];
     int present[VD_PMU_CLEANUP_SLOT_COUNT] = {0};
     int valid[VD_PMU_CLEANUP_SLOT_COUNT] = {0};
+
+    CHECK(strcmp(
+              VD_PMU_CLEANUP_STAGE1_RETRY_A,
+              VD_PMU_CLEANUP_HISTORICAL_STAGE1_A) != 0 &&
+          strcmp(
+              VD_PMU_CLEANUP_STAGE1_RETRY_B,
+              VD_PMU_CLEANUP_HISTORICAL_STAGE1_B) != 0 &&
+          strcmp(
+              VD_PMU_CLEANUP_STAGE1_RETRY_C,
+              VD_PMU_CLEANUP_HISTORICAL_STAGE1_C) != 0,
+          "stage-1 retry paths cannot collide with historical slots");
+    CHECK(strstr(VD_PMU_CLEANUP_STAGE1_RETRY_A, "conflict-r2-a") &&
+          strstr(VD_PMU_CLEANUP_STAGE1_RETRY_B, "conflict-r2-b") &&
+          strstr(VD_PMU_CLEANUP_STAGE1_RETRY_C, "conflict-r2-c"),
+          "stage-1 retry namespace is explicit and versioned");
+    CHECK(sizeof(VD_PMU_CLEANUP_STAGE1_RETRY_A) <=
+              VD_PMU_CLEANUP_JOURNAL_PATH_CAPACITY &&
+          sizeof(VD_PMU_CLEANUP_STAGE1_RETRY_B) <=
+              VD_PMU_CLEANUP_JOURNAL_PATH_CAPACITY &&
+          sizeof(VD_PMU_CLEANUP_STAGE1_RETRY_C) <=
+              VD_PMU_CLEANUP_JOURNAL_PATH_CAPACITY,
+          "stage-1 retry paths remain within the fixed C bound");
 
     CHECK(offsetof(struct vd_pmu_cleanup_record, results) ==
               VD_PMU_CLEANUP_RESULTS_OFFSET,
