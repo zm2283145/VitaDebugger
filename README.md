@@ -7,6 +7,7 @@ profiling PlayStation Vita homebrew. It currently provides:
 - an optional, narrow kernel companion (`vitadebug.skprx`) for process all-stop
   and caller-process thread inspection;
 - a standalone, allocation-free profiler (`libvitaprofiler.a`);
+- a default-off, source-owned screen stream (`libvitadebug_screen.a`);
 - bounded GDB-console, UDP-log, and profiler-trace transports; and
 - the separately licensed [VitaDevDeploy](deploy/README.md) remote deployment
   helper and a [VS Code workflow](examples/vscode-debug-demo/README.md).
@@ -35,6 +36,7 @@ Choose the smallest mode that supplies the data you need:
 | [2. Debugger + kernel companion](#2-debugger--kernel-companion) | Kernel-enabled `libuvdb.a` + import stub | Normal companion build | Coherent process all-stop, complete caller-process thread inventory, foreign-thread register reads |
 | [3. Profiler library only](#3-profiler-library-only) | `libvitaprofiler.a` | No | Zones, counters, frame pacing, memory/known-thread snapshots, TCP traces |
 | [4. Profiler + kernel PMU](#4-profiler--kernel-pmu-experimental) | Profiler + PMU import stub | Separately gated PMU build | Fixed-core, fixed-lane experimental PMU samples |
+| [5. Source-owned screen stream](screen/README.md) | Separate screen archive + application framebuffer callback | No | Opt-in local tooling access to the application's displayed buffer |
 
 Debugger stops distort timing, so normal profiling should use mode 3 or 4
 without an active GDB session.
@@ -52,6 +54,7 @@ This distinction is important: “implemented” does not automatically mean
 | User-mode profiler | Named zones/counters, frames, memory and known-thread snapshots, bounded name dictionary, loss accounting, TCP capture, decoded JSON, Chrome Trace/Perfetto export, and a dependency-free desktop viewer | Arbitrary thread PC/call-stack sampling, true GPU timestamps, and embedded live timeline rendering remain unavailable |
 | Kernel PMU | Fixed core 0/lane 5 normal-close gates for events `0x01`, `0x03`, and `0x10`, each with exact restoration; same-boot dormant-owner-thread safe re-arm also passed | Process exit, crash, receiver disconnect, timeout, and competing-owner recovery are still pending; cycles, arbitrary events/cores/lanes, and unrestricted production sampling are disabled |
 | External application attach | Read-only protocol and broker boundaries have host tests and a Vita cross-build | No resident listener, trusted foreign-target identity provider, module injection, process mutation, or live GDB attach exists |
+| Source-owned screen stream | Protocol, bounded producer, strict receiver, atomic PPM output, and Vita compile/link gate have host coverage | No Vita hardware evidence yet; no system-process capture, public-display pixel adapter, encryption, or continuous-capture claim |
 
 The application-linked stub must therefore be compiled into the program being
 debugged. The [`attach/` scaffold](attach/README.md) does **not** attach to an
