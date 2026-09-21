@@ -171,18 +171,14 @@ def make_run_clocks_v2_capture(
         samples: list[tuple[int, int, int]],
         producer_dropped: int = 0,
         timer_source: str = "sceKernelGetProcessTimeWide",
+        session_id: int = 0x0102030405060708,
+        thread_generations: list[tuple[int, int, int]] | None = None,
         ) -> bytes:
     dictionary = encode_dictionary([])
-    events = b"".join(
-        encode_event(timestamp, value, trace.RUN_CLOCKS_METRIC_ID, thread_id,
-                     0, trace.EVENT_THREAD_SAMPLE,
-                     trace.EVENT_FLAG_RAW_VALUE)
-        for timestamp, value, thread_id in samples
-    )
     source = timer_source.encode()
     unit = b"microseconds"
     session = trace.STREAM_V2_SESSION.pack(
-        0x0102030405060708, 0, 900, 0,
+        session_id, 0, 900, 0,
         trace.STREAM_V2_SESSION_TIMER_SOURCE |
         trace.STREAM_V2_SESSION_TIMER_UNIT,
         len(source), len(unit), 0,
@@ -191,8 +187,31 @@ def make_run_clocks_v2_capture(
     chunks = [
         (trace.STREAM_V2_CHUNK_SESSION, session),
         (trace.STREAM_V2_CHUNK_DICTIONARY, dictionary),
-        (trace.STREAM_V2_CHUNK_EVENTS, events),
     ]
+    if thread_generations is None:
+        first_by_thread: dict[int, int] = {}
+        for index, (_, _, thread_id) in enumerate(samples):
+            first_by_thread.setdefault(thread_id, index)
+        thread_generations = [
+            (thread_id, 0, first_index)
+            for thread_id, first_index in first_by_thread.items()
+        ]
+    by_first_index: dict[int, list[tuple[int, int]]] = {}
+    for thread_id, generation, first_index in thread_generations:
+        by_first_index.setdefault(first_index, []).append(
+            (thread_id, generation))
+    for index, (timestamp, value, thread_id) in enumerate(samples):
+        for identity_index, (identity_thread, generation) in enumerate(
+                by_first_index.get(index, [])):
+            identity = trace.STREAM_V2_THREAD.pack(
+                0xAABBCCDD00000000 | (index << 8) | identity_index | 1,
+                identity_thread, generation, 0,
+                trace.STREAM_V2_THREAD_IDENTITY, 0)
+            chunks.append((trace.STREAM_V2_CHUNK_THREAD, identity))
+        event = encode_event(
+            timestamp, value, trace.RUN_CLOCKS_METRIC_ID, thread_id,
+            0, trace.EVENT_THREAD_SAMPLE, trace.EVENT_FLAG_RAW_VALUE)
+        chunks.append((trace.STREAM_V2_CHUNK_EVENTS, event))
     prefix = b"".join(encode_v2_chunk(kind, sequence, payload)
                       for sequence, (kind, payload) in enumerate(chunks))
     final_size = (len(prefix) + trace.STREAM_V2_CHUNK_HEADER_SIZE +
@@ -210,6 +229,7 @@ def make_run_clocks_metadata(**overrides: object) -> dict[str, object]:
         "captured_at_utc": "2026-09-18T05:00:00Z",
         "device_model": "PCH-2000",
         "device_id": "lab-vita-slim-a",
+        "capture_session_id": "0x0102030405060708",
         "firmware": "3.65",
         "title_id": "VDPR00001",
         "build_id": "test-fixture",
@@ -958,7 +978,7 @@ class CommandLineTests(unittest.TestCase):
             capture_path = root / "capture.vptrace"
             metadata_path = root / "experiment.json"
             output_path = root / "runclocks.json"
-            raw = make_run_clocks_capture([
+            raw = make_run_clocks_v2_capture([
                 (1000, 100, 0x40010003),
                 (2000, 140, 0x40010003),
                 (3000, 170, 0x40010003),
@@ -978,6 +998,9 @@ class CommandLineTests(unittest.TestCase):
                 report["provenance"]["capture_sha256"],
                 __import__("hashlib").sha256(raw).hexdigest())
             self.assertEqual(
+                report["provenance"]["capture_session_id"],
+                0x0102030405060708)
+            self.assertEqual(
                 report["provenance"]["source_storage_type"],
                 "SceKernelSysClock (uint64_t)")
             self.assertEqual(
@@ -989,7 +1012,7 @@ class CommandLineTests(unittest.TestCase):
                 report["observed"]["sample_span_us"], 2000)
 
     def test_runclocks_command_rejects_unmapped_or_over_limit_samples(self):
-        raw = make_run_clocks_capture([
+        raw = make_run_clocks_v2_capture([
             (1000, 100, 0x40010003),
             (2000, 140, 0x40010003),
             (3000, 170, 0x40010003),
@@ -1005,7 +1028,7 @@ class CommandLineTests(unittest.TestCase):
         experiment = trace.decode_run_clocks_experiment(
             json.dumps(unmapped).encode())
         with self.assertRaisesRegex(trace.TraceFormatError,
-                                    "does not identify sample events"):
+                                    "not mapped by both"):
             trace.run_clocks_characterization_report(
                 capture, raw, experiment)
 
@@ -1066,8 +1089,8 @@ class CommandLineTests(unittest.TestCase):
         metadata = make_run_clocks_metadata()
         metadata["format"] = trace.RUN_CLOCKS_EXPERIMENT_FORMAT_V1
         for field in (
-                "device_id", "transport_lost_events", "reference_timer",
-                "phases"):
+                "device_id", "capture_session_id", "transport_lost_events",
+                "reference_timer", "phases"):
             metadata.pop(field)
         experiment = trace.decode_run_clocks_experiment(
             json.dumps(metadata).encode())
@@ -1075,9 +1098,18 @@ class CommandLineTests(unittest.TestCase):
                          trace.RUN_CLOCKS_EXPERIMENT_FORMAT_V1)
         self.assertEqual(experiment.metadata["transport_lost_events"], 0)
         self.assertEqual(experiment.phases, ())
+        raw = make_run_clocks_capture([
+            (1000, 10, 0x40010003),
+            (2000, 20, 0x40010003),
+            (3000, 30, 0x40010003),
+        ])
+        report = trace.run_clocks_characterization_report(
+            trace.decode_capture(raw), raw, experiment)
+        self.assertEqual(report["format"],
+                         trace.RUN_CLOCKS_REPORT_FORMAT_V1)
 
     def test_runclocks_report_rejects_phase_worker_mismatch(self):
-        raw = make_run_clocks_capture([
+        raw = make_run_clocks_v2_capture([
             (1000, 10, 0x40010003),
             (2000, 20, 0x40010003),
             (3000, 30, 0x40010003),
@@ -1112,6 +1144,111 @@ class CommandLineTests(unittest.TestCase):
                                     "loss counters do not match"):
             trace.run_clocks_characterization_report(
                 trace.decode_capture(lossy), lossy, experiment)
+
+    def test_runclocks_v2_rejects_v1_and_cross_session_evidence(self):
+        samples = [
+            (1000, 10, 0x40010003),
+            (2000, 20, 0x40010003),
+            (3000, 30, 0x40010003),
+        ]
+        experiment = trace.decode_run_clocks_experiment(
+            json.dumps(make_run_clocks_metadata()).encode())
+        wire_v1 = make_run_clocks_capture(samples)
+        with self.assertRaisesRegex(trace.TraceFormatError,
+                                    "requires a complete wire-v2 capture"):
+            trace.run_clocks_characterization_report(
+                trace.decode_capture(wire_v1), wire_v1, experiment)
+
+        other_session = make_run_clocks_v2_capture(
+            samples, session_id=0x1111111111111111)
+        with self.assertRaisesRegex(trace.TraceFormatError,
+                                    "session_id does not match"):
+            trace.run_clocks_characterization_report(
+                trace.decode_capture(other_session), other_session,
+                experiment)
+
+    def test_runclocks_v2_binds_wire_thread_generations(self):
+        thread_id = 0x40010003
+        samples = [
+            (1000, 10, thread_id),
+            (2000, 20, thread_id),
+            (3000, 5, thread_id),
+            (4000, 15, thread_id),
+        ]
+        raw = make_run_clocks_v2_capture(
+            samples,
+            thread_generations=[
+                (thread_id, 0, 0),
+                (thread_id, 1, 2),
+            ])
+        metadata = make_run_clocks_metadata(
+            threads=[
+                {
+                    "thread_id": "0x40010003",
+                    "generation": 0,
+                    "label": "worker-generation-0",
+                    "first_event_index": 0,
+                    "last_event_index": 1,
+                },
+                {
+                    "thread_id": "0x40010003",
+                    "generation": 1,
+                    "label": "worker-generation-1",
+                    "first_event_index": 2,
+                    "last_event_index": 3,
+                },
+            ],
+            phases=[
+                {
+                    "phase_id": "busy-generation-0",
+                    "condition": "integer workload",
+                    "repeat": 1,
+                    "target_duration_us": 2000,
+                    "worker_count": 1,
+                    "first_event_index": 0,
+                    "last_event_index": 1,
+                },
+                {
+                    "phase_id": "busy-generation-1",
+                    "condition": "integer workload",
+                    "repeat": 2,
+                    "target_duration_us": 2000,
+                    "worker_count": 1,
+                    "first_event_index": 2,
+                    "last_event_index": 3,
+                },
+            ])
+        experiment = trace.decode_run_clocks_experiment(
+            json.dumps(metadata).encode())
+        report = trace.run_clocks_characterization_report(
+            trace.decode_capture(raw), raw, experiment)
+        self.assertEqual(
+            [sample["thread_generation"] for sample in
+             report["run_clocks_analysis"]["samples"]],
+            [0, 0, 1, 1])
+
+        metadata["threads"][0]["last_event_index"] = 0
+        metadata["threads"][1]["first_event_index"] = 1
+        experiment = trace.decode_run_clocks_experiment(
+            json.dumps(metadata).encode())
+        with self.assertRaisesRegex(trace.TraceFormatError,
+                                    "thread range disagrees"):
+            trace.run_clocks_characterization_report(
+                trace.decode_capture(raw), raw, experiment)
+
+    def test_runclocks_v2_requires_wire_thread_identity(self):
+        samples = [
+            (1000, 10, 0x40010003),
+            (2000, 20, 0x40010003),
+            (3000, 30, 0x40010003),
+        ]
+        raw = make_run_clocks_v2_capture(samples, thread_generations=[])
+        experiment = trace.decode_run_clocks_experiment(
+            json.dumps(make_run_clocks_metadata()).encode())
+        with self.assertRaisesRegex(trace.TraceFormatError,
+                                    "lacks matching wire-v2 THREAD identity"):
+            trace.run_clocks_characterization_report(
+                trace.decode_capture(raw), raw, experiment)
 
     def test_cli_rejects_non_finite_timeouts(self):
         parser = trace.build_argument_parser()

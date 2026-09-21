@@ -60,6 +60,12 @@ metadata repeats that contract and records the RTC-derived UTC capture time,
 device alias/model, firmware, title, build, clock profile, power state, phase
 plan, generation map, and all loss counters.
 
+The Makefile generates a content-stable configuration header containing every
+embedded enable/identity/environment value. Changing any value updates that
+header and forces the application object and package to rebuild; unchanged
+content preserves incremental builds. `make runclocks-config-test` checks this
+dependency path without running or contacting a Vita.
+
 After an authorized trial, preserve both source files and generate the report:
 
    ```sh
@@ -69,11 +75,16 @@ After an authorized trial, preserve both source files and generate the report:
 
 The receiver retains its 16-MiB and 262,144-event defaults. The characterization
 command additionally rejects incomplete/truncated captures, fewer than two raw
-samples, samples outside declared thread generations or phases, mismatched
-phase worker counts, samples above declared count/duration bounds, timer
-metadata that disagrees with the capture, timestamp regressions, missing
-`raw_value` flags, nonzero loss, and metadata loss counts that disagree with
-wire-v2 final statistics. Metadata is capped at 64 KiB, phases and generations
+samples, samples outside declared thread generations or phases, experiment
+thread ranges/generations that disagree with wire-v2 `THREAD` identities,
+mismatched phase worker counts, samples above declared count/duration bounds,
+session IDs or timer metadata that disagree with the capture, timestamp
+regressions, missing `raw_value` flags, nonzero loss, and metadata loss counts
+that disagree with wire-v2 `END` statistics. Schema-v2 metadata requires a
+complete wire-v2 `SESSION`/`END` lifecycle, final loss statistics, and
+identity-bearing `THREAD` metadata for every declared worker. Schema-v1
+metadata remains readable only with the v1 report contract and does not gain
+these v2 certifications. Metadata is capped at 64 KiB, phases and generations
 at 64, workers per phase at 16, and total declared duration at ten minutes.
 
 The report includes the source capture's SHA-256 digest, wire version, actual
@@ -99,6 +110,7 @@ condition that was not measured.
   "captured_at_utc": "2026-09-18T05:00:00Z",
   "device_model": "PCH-2000",
   "device_id": "lab-vita-slim-a",
+  "capture_session_id": "0x0102030405060708",
   "firmware": "3.65",
   "title_id": "VDPR00001",
   "build_id": "git-ee6c799+instrumentation-build",

@@ -35,6 +35,7 @@ VITA_RUNCLOCKS_FIRMWARE ?= unknown
 VITA_RUNCLOCKS_BUILD_ID ?= unknown
 VITA_RUNCLOCKS_CLOCK_PROFILE ?= unknown
 VITA_RUNCLOCKS_POWER_STATE ?= unknown
+VITA_RUNCLOCKS_CONFIG_HEADER = $(VITA_RUNCLOCKS_BUILD)/config.h
 -include local/vita-tcp-gate.mk
 VITA_TCP_GATE_HOST_A ?= 127
 VITA_TCP_GATE_HOST_B ?= 0
@@ -85,15 +86,6 @@ VITA_TCP_GATE_LDLIBS := \
 	-lSceProcessmgr_stub \
 	-lSceSysmem_stub \
 	-lSceLibKernel_stub
-VITA_RUNCLOCKS_CPPFLAGS := \
-	-DVP_RUNCLOCKS_EXPERIMENT_ENABLED=$(VITA_RUNCLOCKS_ENABLE) \
-	-DVP_RUNCLOCKS_EXPERIMENT_ID=\"$(VITA_RUNCLOCKS_EXPERIMENT_ID)\" \
-	-DVP_RUNCLOCKS_DEVICE_MODEL=\"$(VITA_RUNCLOCKS_DEVICE_MODEL)\" \
-	-DVP_RUNCLOCKS_DEVICE_ID=\"$(VITA_RUNCLOCKS_DEVICE_ID)\" \
-	-DVP_RUNCLOCKS_FIRMWARE=\"$(VITA_RUNCLOCKS_FIRMWARE)\" \
-	-DVP_RUNCLOCKS_BUILD_ID=\"$(VITA_RUNCLOCKS_BUILD_ID)\" \
-	-DVP_RUNCLOCKS_CLOCK_PROFILE=\"$(VITA_RUNCLOCKS_CLOCK_PROFILE)\" \
-	-DVP_RUNCLOCKS_POWER_STATE=\"$(VITA_RUNCLOCKS_POWER_STATE)\"
 VITA_RUNCLOCKS_OBJECTS := \
 	$(VITA_RUNCLOCKS_BUILD)/main.o \
 	$(VITA_RUNCLOCKS_BUILD)/debugScreen.o
@@ -107,7 +99,7 @@ VITA_RUNCLOCKS_LDLIBS := \
 	-lSceSysmem_stub \
 	-lSceLibKernel_stub
 
-.PHONY: all vita vita-check vita-probe vita-pmu-discovery vita-tcp-gate vita-runclocks-experiment desktop host-test check clean
+.PHONY: all vita vita-check vita-probe vita-pmu-discovery vita-tcp-gate vita-runclocks-experiment runclocks-config-test desktop host-test check clean FORCE
 
 all: vita
 
@@ -122,6 +114,8 @@ vita-pmu-discovery: $(VITA_PMU_DISCOVERY_BUILD)/vitaprofiler-pmu-discovery.vpk
 vita-tcp-gate: $(VITA_TCP_GATE_BUILD)/vitaprofiler-tcp-gate.vpk
 
 vita-runclocks-experiment: $(VITA_RUNCLOCKS_BUILD)/vitaprofiler-runclocks-experiment.vpk
+
+FORCE:
 
 desktop:
 	$(PYTHON) tools/vitaprofiler_gui.py
@@ -243,9 +237,23 @@ $(VITA_TCP_GATE_BUILD)/param.sfo:
 $(VITA_TCP_GATE_BUILD)/vitaprofiler-tcp-gate.vpk: $(VITA_TCP_GATE_BUILD)/eboot.bin $(VITA_TCP_GATE_BUILD)/param.sfo
 	$(VITA_PACK_VPK) -s $(VITA_TCP_GATE_BUILD)/param.sfo -b $(VITA_TCP_GATE_BUILD)/eboot.bin $@
 
-$(VITA_RUNCLOCKS_BUILD)/main.o: runclocks-experiment/main.c include/vitaprofiler.h include/vitaprofiler_stream.h Makefile
+$(VITA_RUNCLOCKS_CONFIG_HEADER): FORCE
 	mkdir -p $(VITA_RUNCLOCKS_BUILD)
-	$(VITA_CC) $(CPPFLAGS) -I$(VITA_COMMON_DIR) $(VITA_RUNCLOCKS_CPPFLAGS) $(VITA_PROBE_CFLAGS) -c $< -o $@
+	{ \
+		printf '%s\n' '#define VP_RUNCLOCKS_EXPERIMENT_ENABLED $(VITA_RUNCLOCKS_ENABLE)'; \
+		printf '%s\n' '#define VP_RUNCLOCKS_EXPERIMENT_ID "$(VITA_RUNCLOCKS_EXPERIMENT_ID)"'; \
+		printf '%s\n' '#define VP_RUNCLOCKS_DEVICE_MODEL "$(VITA_RUNCLOCKS_DEVICE_MODEL)"'; \
+		printf '%s\n' '#define VP_RUNCLOCKS_DEVICE_ID "$(VITA_RUNCLOCKS_DEVICE_ID)"'; \
+		printf '%s\n' '#define VP_RUNCLOCKS_FIRMWARE "$(VITA_RUNCLOCKS_FIRMWARE)"'; \
+		printf '%s\n' '#define VP_RUNCLOCKS_BUILD_ID "$(VITA_RUNCLOCKS_BUILD_ID)"'; \
+		printf '%s\n' '#define VP_RUNCLOCKS_CLOCK_PROFILE "$(VITA_RUNCLOCKS_CLOCK_PROFILE)"'; \
+		printf '%s\n' '#define VP_RUNCLOCKS_POWER_STATE "$(VITA_RUNCLOCKS_POWER_STATE)"'; \
+	} > $@.tmp
+	if test -r $@ && cmp -s $@.tmp $@; then rm -f $@.tmp; else mv -f $@.tmp $@; fi
+
+$(VITA_RUNCLOCKS_BUILD)/main.o: runclocks-experiment/main.c include/vitaprofiler.h include/vitaprofiler_stream.h Makefile $(VITA_RUNCLOCKS_CONFIG_HEADER)
+	mkdir -p $(VITA_RUNCLOCKS_BUILD)
+	$(VITA_CC) $(CPPFLAGS) -I$(VITA_COMMON_DIR) -include $(VITA_RUNCLOCKS_CONFIG_HEADER) $(VITA_PROBE_CFLAGS) -c $< -o $@
 
 $(VITA_RUNCLOCKS_BUILD)/debugScreen.o: $(VITA_COMMON_DIR)/debugScreen.c
 	mkdir -p $(VITA_RUNCLOCKS_BUILD)
@@ -266,6 +274,16 @@ $(VITA_RUNCLOCKS_BUILD)/param.sfo:
 
 $(VITA_RUNCLOCKS_BUILD)/vitaprofiler-runclocks-experiment.vpk: $(VITA_RUNCLOCKS_BUILD)/eboot.bin $(VITA_RUNCLOCKS_BUILD)/param.sfo
 	$(VITA_PACK_VPK) -s $(VITA_RUNCLOCKS_BUILD)/param.sfo -b $(VITA_RUNCLOCKS_BUILD)/eboot.bin $@
+
+runclocks-config-test:
+	$(MAKE) build/vita-runclocks-experiment-1/main.o VITA_RUNCLOCKS_ENABLE=1 VITA_RUNCLOCKS_EXPERIMENT_ID=config-a VITA_RUNCLOCKS_DEVICE_MODEL=model-a VITA_RUNCLOCKS_DEVICE_ID=device-a VITA_RUNCLOCKS_FIRMWARE=firmware-a VITA_RUNCLOCKS_BUILD_ID=build-a VITA_RUNCLOCKS_CLOCK_PROFILE=clock-a VITA_RUNCLOCKS_POWER_STATE=power-a
+	grep -Fq '#define VP_RUNCLOCKS_EXPERIMENT_ID "config-a"' build/vita-runclocks-experiment-1/config.h
+	cp build/vita-runclocks-experiment-1/main.o build/vita-runclocks-experiment-1/main-config-a.o
+	$(MAKE) build/vita-runclocks-experiment-1/main.o VITA_RUNCLOCKS_ENABLE=1 VITA_RUNCLOCKS_EXPERIMENT_ID=config-b VITA_RUNCLOCKS_DEVICE_MODEL=model-b VITA_RUNCLOCKS_DEVICE_ID=device-b VITA_RUNCLOCKS_FIRMWARE=firmware-b VITA_RUNCLOCKS_BUILD_ID=build-b VITA_RUNCLOCKS_CLOCK_PROFILE=clock-b VITA_RUNCLOCKS_POWER_STATE=power-b
+	grep -Fq '#define VP_RUNCLOCKS_EXPERIMENT_ID "config-b"' build/vita-runclocks-experiment-1/config.h
+	grep -Fq '#define VP_RUNCLOCKS_BUILD_ID "build-b"' build/vita-runclocks-experiment-1/config.h
+	if cmp -s build/vita-runclocks-experiment-1/main-config-a.o build/vita-runclocks-experiment-1/main.o; then echo "runClocks config change did not rebuild main.o"; rm -f build/vita-runclocks-experiment-1/main-config-a.o; exit 1; fi
+	rm -f build/vita-runclocks-experiment-1/main-config-a.o
 
 $(HOST_BUILD)/test_vitaprofiler: src/vitaprofiler.c tests/test_vitaprofiler.c include/vitaprofiler.h
 	mkdir -p $(HOST_BUILD)

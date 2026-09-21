@@ -116,6 +116,7 @@ RUN_CLOCKS_SOURCE = "SceKernelThreadInfo.runClocks"
 RUN_CLOCKS_UNIT = "unknown"
 RUN_CLOCKS_EXPERIMENT_FORMAT_V1 = "vitaprofiler-runclocks-experiment-v1"
 RUN_CLOCKS_EXPERIMENT_FORMAT = "vitaprofiler-runclocks-experiment-v2"
+RUN_CLOCKS_REPORT_FORMAT_V1 = "vitaprofiler-runclocks-characterization-v1"
 RUN_CLOCKS_REPORT_FORMAT = "vitaprofiler-runclocks-characterization-v2"
 MAX_EXPERIMENT_METADATA_BYTES = 64 * 1024
 MAX_EXPERIMENT_THREADS = 64
@@ -1741,6 +1742,19 @@ def _metadata_thread_id(value: object, field: str) -> int:
     return parsed
 
 
+def _metadata_uint64_id(value: object, field: str) -> int:
+    try:
+        parsed = int(value, 0) if isinstance(value, str) else value
+    except ValueError as error:
+        raise TraceFormatError(
+            f"runClocks metadata {field} is not a uint64 ID") from error
+    if (isinstance(parsed, bool) or not isinstance(parsed, int) or
+            not 0 < parsed <= 0xFFFFFFFFFFFFFFFF):
+        raise TraceFormatError(
+            f"runClocks metadata {field} must be a nonzero uint64 ID")
+    return parsed
+
+
 def decode_run_clocks_experiment(data: bytes) -> RunClocksExperiment:
     if len(data) > MAX_EXPERIMENT_METADATA_BYTES:
         raise TraceFormatError(
@@ -1766,7 +1780,8 @@ def decode_run_clocks_experiment(data: bytes) -> RunClocksExperiment:
         raise TraceFormatError("unsupported runClocks experiment format")
     v2 = format_name == RUN_CLOCKS_EXPERIMENT_FORMAT
     required = common_required | (
-        {"device_id", "transport_lost_events", "reference_timer", "phases"}
+        {"device_id", "capture_session_id", "transport_lost_events",
+         "reference_timer", "phases"}
         if v2 else set())
     allowed = required | {"notes"}
     missing = required - set(decoded)
@@ -1789,6 +1804,11 @@ def decode_run_clocks_experiment(data: bytes) -> RunClocksExperiment:
     if v2:
         normalized["device_id"] = _metadata_text(
             decoded["device_id"], "device_id")
+        capture_session_id = _metadata_uint64_id(
+            decoded["capture_session_id"], "capture_session_id")
+        normalized["capture_session_id"] = capture_session_id
+        normalized["capture_session_id_hex"] = (
+            f"0x{capture_session_id:016x}")
     captured_at = str(normalized["captured_at_utc"])
     if not captured_at.endswith("Z"):
         raise TraceFormatError(
@@ -2012,6 +2032,60 @@ def run_clocks_characterization_report(
         capture_data: bytes,
         experiment: RunClocksExperiment,
         ) -> dict[str, object]:
+    is_v2_experiment = (
+        experiment.metadata["format"] == RUN_CLOCKS_EXPERIMENT_FORMAT)
+    if is_v2_experiment:
+        if (capture.header.version != STREAM_V2_VERSION or
+                capture.session is None or not capture.complete or
+                capture.loss is None):
+            raise TraceFormatError(
+                "runClocks v2 metadata requires a complete wire-v2 capture "
+                "with SESSION, END, and final loss stats")
+        if (capture.session.session_id !=
+                experiment.metadata["capture_session_id"]):
+            raise TraceFormatError(
+                "runClocks capture session_id does not match metadata")
+        wire_threads = _wire_thread_generations(capture)
+        wire_identities = {
+            (identity.thread_id, identity.generation): identity
+            for identity in capture.thread_identities
+        }
+        for declared in experiment.threads:
+            key = (declared.thread_id, declared.generation)
+            identity = wire_identities.get(key)
+            if identity is None or identity.identity is None:
+                raise TraceFormatError(
+                    "runClocks experiment worker lacks matching wire-v2 "
+                    f"THREAD identity: 0x{declared.thread_id:08x} "
+                    f"generation {declared.generation}")
+            wire_declared = next(
+                (item for item in wire_threads
+                 if item.thread_id == declared.thread_id and
+                 item.generation == declared.generation),
+                None)
+            if (wire_declared is None or
+                    declared.first_event_index <
+                    wire_declared.first_event_index or
+                    declared.last_event_index > wire_declared.last_event_index):
+                raise TraceFormatError(
+                    "runClocks experiment thread range disagrees with "
+                    f"wire-v2 THREAD boundary for 0x{declared.thread_id:08x} "
+                    f"generation {declared.generation}")
+        for event in capture.events:
+            if event.name_id != RUN_CLOCKS_METRIC_ID:
+                continue
+            metadata_thread = _thread_generation_for_event(
+                event, experiment.threads)
+            wire_thread = _thread_generation_for_event(event, wire_threads)
+            if metadata_thread is None or wire_thread is None:
+                raise TraceFormatError(
+                    f"runClocks event {event.index} is not mapped by both "
+                    "experiment and wire-v2 THREAD metadata")
+            if metadata_thread.generation != wire_thread.generation:
+                raise TraceFormatError(
+                    f"runClocks event {event.index} generation disagrees "
+                    "between experiment and wire-v2 THREAD metadata")
+
     analysis = analyze_run_clocks(capture, experiment)
     samples = analysis["samples"]
     summary = analysis["summary"]
@@ -2137,11 +2211,18 @@ def run_clocks_characterization_report(
         if sample["elapsed_us"] is not None
     ]
     return {
-        "format": RUN_CLOCKS_REPORT_FORMAT,
+        "format": (
+            RUN_CLOCKS_REPORT_FORMAT if is_v2_experiment
+            else RUN_CLOCKS_REPORT_FORMAT_V1),
         "provenance": {
             "capture_sha256": hashlib.sha256(capture_data).hexdigest(),
             "capture_bytes": len(capture_data),
             "wire_version": capture.header.version,
+            "capture_session_id": (
+                capture.session.session_id if capture.session else None),
+            "capture_session_id_hex": (
+                f"0x{capture.session.session_id:016x}"
+                if capture.session else None),
             "source_api": "sceKernelGetThreadInfo",
             "source_field": RUN_CLOCKS_SOURCE,
             "source_storage_type": "SceKernelSysClock (uint64_t)",

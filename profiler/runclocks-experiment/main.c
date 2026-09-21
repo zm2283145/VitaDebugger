@@ -129,6 +129,7 @@ static SceUID rc_capture_fd = -1;
 static uint32_t rc_generation_count;
 static uint32_t rc_active_worker_count;
 static char rc_captured_at_utc[32];
+static uint64_t rc_session_id;
 
 static int rc_write_all(SceUID fd, const void* data, size_t size)
 {
@@ -516,12 +517,14 @@ static int rc_write_metadata(
     RC_WRITE_STRING_FIELD("power_state", VP_RUNCLOCKS_POWER_STATE, ",");
     if (rc_write_format(
             fd,
+            "  \"capture_session_id\": \"0x%016llx\",\n"
             "  \"sample_interval_us\": %u,\n"
             "  \"sample_count_limit\": %u,\n"
             "  \"capture_duration_limit_us\": %u,\n"
             "  \"producer_dropped_events\": %u,\n"
             "  \"transport_lost_events\": %u,\n"
             "  \"sink_lost_events\": %u,\n",
+            (unsigned long long)rc_session_id,
             RC_SAMPLE_INTERVAL_US, RC_SAMPLE_LIMIT,
             RC_CAPTURE_LIMIT_US, ring->dropped,
             writer->transport_events_lost, writer->events_lost_to_sink) < 0)
@@ -662,7 +665,8 @@ static int rc_run_experiment(void)
         goto close_capture;
     stream_start = (uint64_t)sceKernelGetProcessTimeWide();
     memset(&session, 0, sizeof(session));
-    session.session_id = stream_start | UINT64_C(1);
+    rc_session_id = stream_start | UINT64_C(1);
+    session.session_id = rc_session_id;
     session.timer_source = "sceKernelGetProcessTimeWide";
     session.timer_unit = "microseconds";
     session.flags = VP_STREAM_V2_SESSION_TIMER_SOURCE |

@@ -200,9 +200,12 @@ deltas, and discontinuity status. Perfetto uses explicit
 The `runclocks` command creates the stricter, reproducible characterization
 artifact described in
 [`run-clocks-characterization.md`](run-clocks-characterization.md). It binds
-the source capture hash to bounded experiment metadata, explicit thread
-generations, raw values, raw deltas, and the wrap/reset policy. It does not
-alter or reinterpret the captured wire data.
+the source capture hash and session ID to bounded experiment metadata, requires
+schema-v2 evidence to contain a complete wire-v2 SESSION/END lifecycle and
+final loss statistics, cross-checks experiment generations against wire
+THREAD identities, and preserves raw values, raw deltas, and the wrap/reset
+policy. Explicit schema-v1 metadata retains the legacy v1 report behavior. The
+command does not alter or reinterpret the captured wire data.
 
 For an interactive desktop workflow using these same APIs, launch:
 
