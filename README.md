@@ -721,6 +721,11 @@ comparator. The detailed record is
   [the poll diagnostic record](docs/hardware/rsp-poll-diagnostic-3.65.json),
   [the endpoint diagnostic record](docs/hardware/rsp-endpoint-diagnostic-3.65.json),
   and [the corrected self-probe record](docs/hardware/rsp-self-probe-confirmation-3.65.json).
+  The final bounded completion attempt reached a fresh independently-ready
+  title, but its first `qSupported` received neither ACK nor response. It
+  stopped fail-closed before the remaining matrix and soak. The retail RSP
+  gate is therefore not qualified; see
+  [the terminal completion record](docs/hardware/rsp-completion-terminal-3.65.json).
 
 ## Documentation map
 

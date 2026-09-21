@@ -1,0 +1,78 @@
+{
+  "schema": 1,
+  "tested_at": "2026-09-21T00:39:43.829475Z",
+  "firmware": "3.65",
+  "device_class": "retail-handheld",
+  "title_id": "SLRS00001",
+  "target_source_commit": "a5165a95d39464624c89b876173d4b75ff896a4d",
+  "evidence_baseline_commit": "c6cf98029d70e29717e593ac30573cdbefee59a4",
+  "artifacts": {
+    "vpk_sha256": "1c903521da5a6c38c2ac87e9d13ad40515c4b5563f969b8bd0b438a85bc1084b",
+    "elf_sha256": "3a35cb32e47a5269107a77d18593a499e1c9b443a13eeca62cb03a3a5ce53563",
+    "eboot_sha256": "afdc4ef43f7277778e00d4c0946b63fc174db84309ed11fe5e8b1f8788152b39",
+    "startup_runner_sha256": "930fd9b65357d978ec40d18cb0bd26dccaeabc838b7d6f552a6b2af48d5bd9f2",
+    "lifecycle_runner_sha256": "d51048266cb07033462a39022608d279eff1f6a5718611feaff85e8107721fd1",
+    "original_freeze_manifest_sha256": "2d2f9ee76d06a766282939382c657750cac3b1e3693a3af51dd0e0d42c1a5311",
+    "completion_freeze_manifest_sha256": "7d4a3f4feee417f5be0785699aaef9d3f1f7bf43d6d876c9ba05ecb870dc600f",
+    "kubridge_source_commit": "417ddde9a744eba98d769382c1c1372b8e119139",
+    "kubridge_stub_sha256": "fe05a117421b375d77bdc5102d5753f5dcf300e33176222688e490f2d03f5796"
+  },
+  "deployment": {
+    "job": "41b41fc424d485c53f860e4ad30361c2",
+    "signed_manifest_sha256": "5b27f9d8deb00e98cda302f5904501e4057f2f3238adf8d6844fa8110a718783",
+    "installed_identity": "pass"
+  },
+  "explicit_ready": {
+    "transport": "companion-ftp-journal",
+    "status": "pass",
+    "run_id": 73328567157,
+    "stage": "main_loop_heartbeat",
+    "route_address": "10.1.1.217",
+    "bound_address": "0.0.0.0",
+    "bound_port": 1235,
+    "self_probe_received": true,
+    "self_probe_result": 0,
+    "failed_stage_mask": 0
+  },
+  "attempt": {
+    "case": "disconnect-g",
+    "tcp_connect": "pass",
+    "qSupported_send": "pass",
+    "qSupported_ack": "timeout",
+    "qSupported_response": "timeout",
+    "failure_telemetry": "udp_unavailable",
+    "stop_policy": "first-anomaly-no-retry",
+    "result": "fail"
+  },
+  "accepted_prior_cases": [
+    "ACK raw--35 reset sentinel",
+    "no-ack raw--35 reset sentinel",
+    "disconnect-m",
+    "disconnect-M",
+    "two-session qSupported/qOffsets/detach prerequisite"
+  ],
+  "not_run_after_stop": [
+    "disconnect-g",
+    "disconnect-p",
+    "disconnect-G",
+    "disconnect-P",
+    "second-owner exclusion",
+    "receive cancellation",
+    "send cancellation",
+    "intentional connected HUP",
+    "detach/reconnect",
+    "50-cycle reconnect/fault/console/shutdown soak"
+  ],
+  "verdict": "rsp-retail-gate-not-qualified",
+  "interpretation": "The exact title was alive and independently ready, but the first valid qSupported on the completion connection received neither ACK nor response. The unavailable host-to-Vita UDP path prevented an admission snapshot. Per user direction, no further diagnostic implementation or hardware attempt will be made; RSP remains unsupported by this retail gate rather than passed.",
+  "sealed_evidence_manifest_sha256": "94960b8b1064f18bd3facb80732eda30cc8a0effad8967881673815957ae6272",
+  "final_state": {
+    "livearea_wait_seconds": 3,
+    "test_title_running": false,
+    "rsp_port_1234_open": false,
+    "diagnostic_port_1235_responding": false,
+    "rebooted": false,
+    "kernel_configuration_changed": false,
+    "device_ownership_released": true
+  }
+}

@@ -360,6 +360,15 @@ with matching run ID, clean startup stages, successful self-probe, and live
 poll heartbeat, is the independent explicit-ready signal for the remaining
 TCP RSP gate.
 
+The final bounded completion attempt used that fresh FTP-backed readiness
+signal and verified the installed eboot identity. TCP connect and the complete
+`qSupported` send succeeded, but the peer returned neither ACK nor response
+before the bounded deadline. The run stopped immediately; no remaining matrix
+or soak case was started. Because UDP admission telemetry is unavailable on
+this network and further diagnosis was explicitly ended, the retail RSP gate
+is **not qualified**. Earlier individual passes remain evidence for those
+cases, but they do not constitute an end-to-end RSP pass.
+
 The corrected diagnostic passed this boundary on retail 3.65. The out-of-band
 ready snapshot showed listener 88, no candidate or connected socket, the test
 title ready, and no closing/stopped/owner state. The first request then produced
