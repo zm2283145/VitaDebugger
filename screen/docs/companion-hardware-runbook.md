@@ -1,8 +1,9 @@
 # Future companion hardware qualification
 
-**Current status:** host-qualified and Vita compile/link-qualified foundation
-only. This runbook does not authorize contacting a Vita, installing an
-artifact, opening a listener on hardware, or publishing a build.
+**Current status:** host-qualified endpoint and Vita compile/archive/link/VPK
+package-qualified, with no hardware contact. This runbook does not authorize
+contacting a Vita, installing an artifact, opening a listener on hardware, or
+publishing a build.
 
 The candidate is one normal source-owned user-mode title linked with
 `libvitadebug_companion.a`. It has no resident SUPRX/SKPRX, kernel API, module
@@ -22,9 +23,8 @@ throughout qualification.
 | Candidate artifact | `vitadebug-companion-gate.vpk` |
 | Resident modules | none |
 
-Both ports may be changed only within 18000-18999 after validation, must
-remain distinct, and must not collide with 18194-18196 or each other. The
-screen receiver additionally reserves the default control port 18198.
+The endpoint ports are fixed at 18197/18198 and must remain distinct. They
+must not collide with 18194-18196 or each other.
 VitaCompanion 1337/1338 and agent-bridge 1348 are forbidden. Do not use an
 address assigned to another hardware effort. A bind conflict is terminal;
 do not probe for or silently select another port.
@@ -40,8 +40,10 @@ do not probe for or silently select another port.
    `screen/config/hardware-gate-side-by-side.json`, verify VitaCompanion files
    and configuration are untouched, and verify its ordinary fallback path is
    still available before installing the disposable source-owned title.
-4. Start loopback-only. Moving control or screen traffic to a private LAN
-   requires the explicit LAN consent value and one specific private interface.
+4. Generate `config.bin` offline using the
+   [endpoint VPK guide](companion-endpoint-vpk.md). Start loopback-only.
+   Moving control or screen traffic to a private LAN requires the explicit LAN
+   consent value, exact host destination, and exact Vita interface address.
    Never bind a wildcard/public interface or use port forwarding.
 
 ## Serialized checks

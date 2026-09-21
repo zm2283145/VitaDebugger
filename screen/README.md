@@ -21,8 +21,9 @@ The same layer can explicitly record physical controller/touch samples handed
 to it by that application and replay a verified trace only through the
 registered application callback.
 
-This revision is a host-tested foundation, **not a claim of continuous
-capture or control support on Vita hardware**.
+This revision includes a host-tested concrete endpoint and separately
+installable VPK, **not a claim of continuous capture or control support on
+Vita hardware**.
 
 ## Architecture and safety choice
 
@@ -214,13 +215,12 @@ The same values are machine-checked in
 `HOST_PRIVATE_IPV4` is a required placeholder, not a default address; replace
 it only in process-local run configuration after hardware authorization.
 
-The current foundation intentionally does not build the candidate VPK or
-install a module. The gate application must remain a normal source-owned
-user-mode title and set the matching profiler TCP sink endpoint explicitly:
-
-```c
-tcp_config.endpoint.port = 18197u;
-```
+`make -C screen endpoint-package` builds the normal source-owned user-mode
+candidate at
+`screen/build/endpoint-vita/vitadebug-companion-gate.vpk`. It contains no
+resident module and is default-off unless its exact offline configuration is
+present. See the [endpoint VPK guide](docs/companion-endpoint-vpk.md) for the
+fixed config format, safe build, package identity, and known limitations.
 
 Host build/run override:
 
@@ -295,7 +295,9 @@ is bounded to two image slots plus metadata.
 
 ## Validation status and future hardware gate
 
-Host tests cover wire compatibility, ownership/bounds checks, producer
+Host tests cover wire compatibility, endpoint config parsing, partial-record
+deadlines, bounded short sends, synthetic debug files, ownership/bounds
+checks, producer
 drop-old behavior, terminal partial writes, authentication, CRC, malformed and
 truncated frames, duplicate/gap handling, rate rejection, PPM conversion,
 atomic publication, control framing/replay/deadline rejection, confined file
@@ -303,6 +305,10 @@ operations, input leases, trace round trips, button/analog/touch fidelity,
 markers, overflow, malformed traces, wrong identities, bounded replay drift,
 cancel/failure/disconnect cleanup, and exact neutral release. `vita-check`
 compiles with `-Wall -Wextra -Werror` and links a Vita ELF.
+
+`vita-check` also compiles, archives, and links the endpoint with
+`-Wall -Wextra -Werror`, creates a safe fSELF, packages the VPK, and verifies
+the package target exists.
 
 Hardware validation remains serialized and must not begin while another task
 owns the device. The full control, Wi-Fi/suspend, malformed-client,

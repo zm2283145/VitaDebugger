@@ -340,7 +340,7 @@ class ReceiverTests(unittest.TestCase):
 
     def test_hardware_gate_manifest_has_distinct_identities(self) -> None:
         manifest = json.loads(SIDE_BY_SIDE_CONFIG.read_text())
-        self.assertEqual(manifest["schema_version"], 2)
+        self.assertEqual(manifest["schema_version"], 3)
         host = manifest["host"]
         vita = manifest["vita"]
         coexistence = manifest["coexistence"]
@@ -357,6 +357,9 @@ class ReceiverTests(unittest.TestCase):
                          "vitadebug_companion_gate")
         self.assertEqual(vita["archive"], "libvitadebug_companion.a")
         self.assertEqual(vita["artifact"], "vitadebug-companion-gate.vpk")
+        self.assertEqual(vita["config_format"], "VDCG-v1-128-byte")
+        self.assertEqual(vita["control_bind"], "VITA_PRIVATE_IPV4")
+        self.assertEqual(vita["screen_host"], "HOST_PRIVATE_IPV4")
         self.assertIsNone(vita["resident_suprx"])
         self.assertIsNone(vita["resident_skprx"])
         self.assertIs(vita["kernel_api"], False)
