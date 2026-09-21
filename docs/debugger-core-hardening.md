@@ -287,6 +287,8 @@ The focused host suite covers:
 - production live `M` multi-chunk commit, overlap with a software breakpoint,
   partial-copy rollback, retained failure, and later disconnect/shutdown-style
   retry;
+- rejection of same-start size changes and partially overlapping software
+  breakpoint slots so every patch owns pristine underlying instruction bytes;
 - same-thread global-lock interruption and protocol-gate contention proving
   the real exception handler returns without spinning, leaves the context and
   stopped state untouched, releases only ownership it acquired, and chains

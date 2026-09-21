@@ -1274,6 +1274,12 @@ int uvdb_stop_server(void)
         uvdb_lock();
         int cleanup_required = uvdb_memory_write_has_pending() ||
                                breakpoint_active_count() != 0;
+#ifdef UVDB_KERNEL_THREAD_CONTROL
+        cleanup_required =
+            cleanup_required ||
+            __atomic_load_n(&uvdb_stop_token, __ATOMIC_SEQ_CST) != 0 ||
+            __atomic_load_n(&uvdb_stop_failed, __ATOMIC_SEQ_CST) != 0;
+#endif
         int cleanup_result = 0;
         if(cleanup_required)
         {
@@ -2193,8 +2199,20 @@ static int breakpoint_insert_internal(uintptr_t address, size_t size, int tempor
         return -1;
     struct uvdb_breakpoint* existing = breakpoint_find(address);
     if(existing)
+    {
+        if(existing->patch.size != size)
+            return -1;
         return existing->patch.state == UVDB_BREAKPOINT_PATCH_INSTALLED
             ? 0 : UVDB_BREAKPOINT_PATCH_ERROR_RESTORE_PENDING;
+    }
+    for(size_t i = 0; i < UVDB_MAX_BREAKPOINTS; ++i)
+    {
+        const struct uvdb_breakpoint_patch_slot* patch =
+            &uvdb_breakpoints[i].patch;
+        if(patch->state != UVDB_BREAKPOINT_PATCH_EMPTY &&
+           uvdb_ranges_overlap(address, size, patch->address, patch->size))
+            return -1;
+    }
 
     struct uvdb_breakpoint* bp = NULL;
     for(size_t i = 0; i < UVDB_MAX_BREAKPOINTS; ++i)

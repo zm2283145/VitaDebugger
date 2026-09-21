@@ -77,6 +77,10 @@ static int fake_stress_console_attempts;
 static int fake_ku_copy_calls;
 static int fake_ku_copy_fail_call;
 static int fake_ku_copy_fail_from;
+#ifdef UVDB_KERNEL_THREAD_CONTROL
+static int fake_end_stop_calls;
+static int fake_end_stop_fail_count;
+#endif
 
 char __executable_start[1];
 
@@ -169,6 +173,10 @@ static void reset_core(void)
     fake_ku_copy_calls = 0;
     fake_ku_copy_fail_call = 0;
     fake_ku_copy_fail_from = 0;
+#ifdef UVDB_KERNEL_THREAD_CONTROL
+    fake_end_stop_calls = 0;
+    fake_end_stop_fail_count = 0;
+#endif
     memset(&fake_predecessor_context, 0, sizeof(fake_predecessor_context));
     __atomic_store_n(&uvdb_remote_syscall_pending, NULL, __ATOMIC_RELEASE);
     if(!uvdb_memory_write_has_pending())
@@ -560,6 +568,30 @@ static void test_live_memory_transaction(void)
           "disconnect or shutdown retry restores durable live M bytes");
 }
 
+static void test_overlapping_breakpoints_are_rejected(void)
+{
+    _Alignas(4) unsigned char target[16];
+    for(size_t i = 0; i < sizeof(target); ++i)
+        target[i] = (unsigned char)(0x40u + i);
+    unsigned char original[sizeof(target)];
+    memcpy(original, target, sizeof(original));
+
+    reset_core();
+    check(breakpoint_insert_internal(
+              (uintptr_t)target, 4u, 0) == 0,
+          "install primary overlapping-breakpoint fixture");
+    check(breakpoint_insert_internal(
+              (uintptr_t)target, 2u, 0) < 0 &&
+              breakpoint_insert_internal(
+                  (uintptr_t)(target + 2), 2u, 0) < 0 &&
+              breakpoint_active_count() == 1u,
+          "same-start and partial-overlap breakpoint slots are rejected");
+    check(breakpoint_remove((uintptr_t)target) == 0 &&
+              breakpoint_active_count() == 0u &&
+              memcmp(target, original, sizeof(target)) == 0,
+          "rejected overlap leaves pristine program bytes after removal");
+}
+
 static void test_remote_fileio_interrupt_uses_real_stop(void)
 {
     reset_core();
@@ -682,6 +714,31 @@ static void test_shutdown_retries_memory_cleanup(void)
               memcmp(target + 16, original, sizeof(original)) == 0,
           "later terminal shutdown restores bytes before releasing storage");
 }
+
+#ifdef UVDB_KERNEL_THREAD_CONTROL
+static void test_stop_retries_retained_kernel_stop(void)
+{
+    reset_core();
+    uvdb_server_thread = -1;
+    fake_end_stop_fail_count = 1;
+    check(uvdb_stop_server() < 0 &&
+              fake_end_stop_calls == 1 &&
+              __atomic_load_n(&uvdb_stop_token,
+                              __ATOMIC_ACQUIRE) == 1u &&
+              uvdb_state == UVDB_STATE_ERROR &&
+              __atomic_load_n(&uvdb_target_stopped,
+                              __ATOMIC_ACQUIRE),
+          "failed EndStop retains coherent all-stop for retry");
+    check(uvdb_stop_server() == 0 &&
+              fake_end_stop_calls == 2 &&
+              __atomic_load_n(&uvdb_stop_token,
+                              __ATOMIC_ACQUIRE) == 0u &&
+              uvdb_state == UVDB_STATE_IDLE &&
+              !__atomic_load_n(&uvdb_target_stopped,
+                               __ATOMIC_ACQUIRE),
+          "later stop retries EndStop before reporting target running");
+}
+#endif
 
 static void test_stop_start_exception_quiescence(void)
 {
@@ -1437,9 +1494,13 @@ int main(void)
     test_exception_lock_contention_handoff();
     test_nested_exception_exact_predecessor();
     test_live_memory_transaction();
+    test_overlapping_breakpoints_are_rejected();
     test_remote_fileio_interrupt_uses_real_stop();
     test_stop_retries_memory_and_breakpoint_cleanup();
     test_shutdown_retries_memory_cleanup();
+#ifdef UVDB_KERNEL_THREAD_CONTROL
+    test_stop_retries_retained_kernel_stop();
+#endif
     test_stop_start_exception_quiescence();
     test_shutdown_does_not_synthesize_trap();
     test_server_join_timeout_is_bounded_and_retryable();
@@ -1872,6 +1933,12 @@ int vdKernelEndStop(unsigned int token, int* resumed_count)
 {
     if(token != 1u)
         return -1;
+    ++fake_end_stop_calls;
+    if(fake_end_stop_fail_count)
+    {
+        --fake_end_stop_fail_count;
+        return -1;
+    }
     if(resumed_count)
         *resumed_count = 1;
     return 0;
