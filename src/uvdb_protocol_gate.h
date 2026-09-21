@@ -16,8 +16,8 @@ enum uvdb_protocol_gate_result {
  * parser, callback, and buffer resize until its exact owner releases it.
  */
 struct uvdb_protocol_gate {
-    volatile uint32_t owner;
-    volatile uint32_t closing;
+    /* Bit 31 closes admission; bits 0-30 hold the nonzero owner token. */
+    volatile uint32_t state;
 };
 
 void uvdb_protocol_gate_init(struct uvdb_protocol_gate* gate);

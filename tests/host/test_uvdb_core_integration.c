@@ -1,7 +1,9 @@
+#include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #define UVDB_HOST_INTEGRATION_TEST 1
 #include "../../src/uvdb.c"
@@ -19,7 +21,10 @@ static size_t fake_receive_offset;
 static unsigned char fake_transmit[2048];
 static size_t fake_transmit_size;
 static int fake_framed_send_while_borrowed;
-static SceUID fake_thread = FAKE_THREAD;
+static _Thread_local SceUID fake_thread = FAKE_THREAD;
+static unsigned char fake_target_memory[256];
+static unsigned char fake_pipe_data[64];
+static size_t fake_pipe_size;
 static unsigned int fake_delay_calls;
 static int fake_release_guard_on_delay;
 static uint32_t fake_guard_type;
@@ -41,6 +46,24 @@ static int fake_accept_calls;
 static int fake_epoll_socket;
 static int fake_probe_socket_closed;
 static int fake_probe_socket_shutdown;
+static int fake_connected_socket_closed;
+static int fake_connected_socket_shutdown;
+static int fake_block_receive;
+static int fake_receive_blocked;
+static int fake_release_receive;
+static int fake_block_send;
+static int fake_send_blocked;
+static int fake_release_send;
+static int fake_epoll_block;
+static int fake_epoll_wait_blocked;
+static int fake_epoll_release;
+static unsigned int fake_epoll_events;
+static int fake_server_main_exited;
+static int fake_stress_running;
+static int fake_stress_gate_violation;
+static int fake_stress_protocol_entries;
+static int fake_stress_fault_entries;
+static int fake_stress_console_attempts;
 
 char __executable_start[1];
 
@@ -69,6 +92,10 @@ static void reset_core(void)
     memset(output_storage, 0, sizeof(output_storage));
     memset(fake_receive, 0, sizeof(fake_receive));
     memset(fake_transmit, 0, sizeof(fake_transmit));
+    for(size_t i = 0; i < sizeof(fake_target_memory); ++i)
+        fake_target_memory[i] = (unsigned char)i;
+    memset(fake_pipe_data, 0, sizeof(fake_pipe_data));
+    fake_pipe_size = 0;
     fake_receive_size = 0;
     fake_receive_offset = 0;
     fake_transmit_size = 0;
@@ -92,6 +119,24 @@ static void reset_core(void)
     fake_epoll_socket = -1;
     fake_probe_socket_closed = 0;
     fake_probe_socket_shutdown = 0;
+    fake_connected_socket_closed = 0;
+    fake_connected_socket_shutdown = 0;
+    fake_block_receive = 0;
+    fake_receive_blocked = 0;
+    fake_release_receive = 0;
+    fake_block_send = 0;
+    fake_send_blocked = 0;
+    fake_release_send = 0;
+    fake_epoll_block = 0;
+    fake_epoll_wait_blocked = 0;
+    fake_epoll_release = 0;
+    fake_epoll_events = 0;
+    fake_server_main_exited = 0;
+    fake_stress_running = 0;
+    fake_stress_gate_violation = 0;
+    fake_stress_protocol_entries = 0;
+    fake_stress_fault_entries = 0;
+    fake_stress_console_attempts = 0;
     memset(&fake_predecessor_context, 0, sizeof(fake_predecessor_context));
 
     in_buf = (struct buffer){
@@ -108,6 +153,9 @@ static void reset_core(void)
     uvdb_candidate_socket = -1;
     uvdb_listen_socket = -1;
     uvdb_socket_generation = 1u;
+    uvdb_pipe = 80;
+    uvdb_server_thread = -1;
+    uvdb_server_thread_ended = 0;
     uvdb_lock_owner = 0;
     uvdb_lifecycle_lock_state = 0;
     uvdb_socket_lifecycle_lock_state = 0;
@@ -134,12 +182,65 @@ static void reset_core(void)
     uvdb_selection.stopped = FAKE_THREAD;
     uvdb_exception_thread = FAKE_THREAD;
     fake_thread = FAKE_THREAD;
+#ifdef UVDB_KERNEL_THREAD_CONTROL
+    __atomic_store_n(&uvdb_lease_stop, 0, __ATOMIC_RELEASE);
+    __atomic_store_n(&uvdb_stop_failed, 0, __ATOMIC_RELEASE);
+    __atomic_store_n(
+        &uvdb_stop_owner, UVDB_STOP_OWNER_NONE, __ATOMIC_RELEASE);
+    __atomic_store_n(&uvdb_stop_token, 1u, __ATOMIC_RELEASE);
+    uvdb_lease_thread = -1;
+    uvdb_lease_thread_ended = 0;
+#endif
 }
 
 static void queue_receive(const char* bytes)
 {
     fake_receive_size = strlen(bytes);
     memcpy(fake_receive, bytes, fake_receive_size);
+}
+
+static void queue_rsp_payload(
+    const char* payload,
+    size_t payload_size,
+    int append_ack)
+{
+    check(payload != NULL && payload_size + 4u + (size_t)append_ack <=
+              sizeof(fake_receive),
+          "RSP fixture fits fake receive storage");
+    unsigned int checksum = 0;
+    fake_receive[0] = '$';
+    memcpy(fake_receive + 1u, payload, payload_size);
+    for(size_t i = 0; i < payload_size; ++i)
+        checksum += (unsigned char)payload[i];
+    static const char digits[] = "0123456789abcdef";
+    fake_receive[1u + payload_size] = '#';
+    fake_receive[2u + payload_size] = digits[(checksum >> 4) & 0xfu];
+    fake_receive[3u + payload_size] = digits[checksum & 0xfu];
+    fake_receive_size = payload_size + 4u;
+    if(append_ack)
+        fake_receive[fake_receive_size++] = '+';
+}
+
+static int wait_for_atomic_value(const int* value, int expected)
+{
+    for(unsigned int attempt = 0; attempt < 2000u; ++attempt)
+    {
+        if(__atomic_load_n(value, __ATOMIC_ACQUIRE) == expected)
+            return 0;
+        usleep(1000);
+    }
+    return -1;
+}
+
+static int wait_for_atomic_nonzero(const int* value)
+{
+    for(unsigned int attempt = 0; attempt < 2000u; ++attempt)
+    {
+        if(__atomic_load_n(value, __ATOMIC_ACQUIRE) != 0)
+            return 0;
+        usleep(1000);
+    }
+    return -1;
 }
 
 static void test_real_status_query_ordering(void)
@@ -418,6 +519,407 @@ static void test_candidate_socket_cleanup(void)
           "server stop cancels and retires a pending admission socket");
 }
 
+static void test_production_frame_boundaries_and_escapes(void)
+{
+    reset_core();
+    char maximum_payload[1020];
+    memset(maximum_payload, 'q', sizeof(maximum_payload));
+    queue_rsp_payload(maximum_payload, sizeof(maximum_payload), 0);
+    uvdb_lock();
+    char* packet = NULL;
+    size_t packet_size = recv_packet(&packet);
+    check(packet_size == sizeof(maximum_payload) &&
+              packet && packet[0] == 'q' &&
+              packet[packet_size - 1u] == 'q' &&
+              fake_transmit_size == 1u && fake_transmit[0] == '+',
+          "production receiver accepts the exact maximum RSP frame");
+    discard_packet(packet, packet_size);
+    check(!uvdb_rsp_request_lifetime_is_active(&uvdb_request_lifetime) &&
+              in_buf.size == 0u && !uvdb_has_io_failure(),
+          "maximum RSP frame releases its exact borrowed wire span");
+    uvdb_unlock();
+
+    reset_core();
+    static const unsigned char escaped_frame[] = {
+        '$', 'q', '}', 0x04, '}', 0x03, '#', '7', '2',
+    };
+    memcpy(fake_receive, escaped_frame, sizeof(escaped_frame));
+    fake_receive_size = sizeof(escaped_frame);
+    uvdb_lock();
+    packet = NULL;
+    packet_size = recv_packet(&packet);
+    check(packet_size == 5u && packet &&
+              !memcmp(packet, escaped_frame + 1u, packet_size),
+          "production receiver retains escaped delimiters in one frame");
+    discard_packet(packet, packet_size);
+    check(in_buf.size == 0u && !uvdb_has_io_failure(),
+          "escaped frame discard consumes its complete wire packet");
+    uvdb_unlock();
+
+    reset_core();
+    uvdb_max_buffer = sizeof(fake_receive);
+    memset(fake_receive, 'x', sizeof(fake_receive));
+    fake_receive[0] = '$';
+    fake_receive_size = sizeof(fake_receive);
+    uvdb_lock();
+    packet = NULL;
+    check(recv_packet(&packet) == 0u && uvdb_has_io_failure() &&
+              fake_transmit_size == 1u && fake_transmit[0] == '-',
+          "production receiver rejects oversized unterminated input once");
+    uvdb_unlock();
+}
+
+static void run_disconnect_during_command(
+    const char* command,
+    size_t command_size,
+    const char* expected_reply_prefix,
+    size_t expected_reply_prefix_size,
+    size_t expected_reply_size,
+    int check_r0,
+    uint32_t expected_r0,
+    int check_memory,
+    unsigned char expected_memory,
+    const char* name)
+{
+    reset_core();
+    queue_rsp_payload(command, command_size, 0);
+    KuKernelExceptionContext context = {
+        .r0 = UINT32_C(0x11223344),
+        .r1 = UINT32_C(0x55667788),
+        .pc = UINT32_C(0x81001234),
+        .SPSR = UINT32_C(0x60000010),
+    };
+    uvdb_lock();
+    uvdb_main_loop(&context, SIGTRAP, UVDB_FILEIO_CONTEXT_REAL_STOP);
+    struct uvdb_rsp_frame response = {0};
+    int response_result = fake_transmit_size > 1u
+        ? uvdb_rsp_scan_frame(
+              fake_transmit + 1u, fake_transmit_size - 1u,
+              sizeof(fake_transmit), &response)
+        : UVDB_RSP_FRAME_INCOMPLETE;
+    check(response_result == UVDB_RSP_FRAME_COMPLETE &&
+              response.payload_size == expected_reply_size &&
+              response.payload_size >= expected_reply_prefix_size &&
+              !memcmp(
+                  fake_transmit + 1u + response.payload_offset,
+                  expected_reply_prefix, expected_reply_prefix_size),
+          "disconnect fixture reaches its command-specific response");
+    check((!check_r0 || context.r0 == expected_r0) &&
+              (!check_memory ||
+               fake_target_memory[0] == expected_memory),
+          "disconnect fixture applies its command-specific mutation");
+    check(uvdb_state == UVDB_STATE_ERROR && uvdb_socket < 0 &&
+              uvdb_has_io_failure() &&
+              !uvdb_rsp_request_lifetime_is_active(
+                  &uvdb_request_lifetime) &&
+              __atomic_load_n(&uvdb_target_stopped,
+                              __ATOMIC_ACQUIRE) == 0,
+          name);
+    uvdb_unlock();
+}
+
+static void test_disconnect_command_matrix(void)
+{
+    run_disconnect_during_command(
+        "m1000,4", strlen("m1000,4"),
+        "00010203", strlen("00010203"), strlen("00010203"),
+        0, 0, 0, 0,
+        "disconnect during m fails closed and releases the target");
+    run_disconnect_during_command(
+        "M1000,1:aa", strlen("M1000,1:aa"),
+        "OK", 2u, 2u, 0, 0, 1, 0xaa,
+        "disconnect during M fails closed and releases the target");
+    run_disconnect_during_command(
+        "g", 1u, "44332211", 8u,
+        UVDB_RSP_CORE_PACKET_HEX_SIZE, 0, 0, 0, 0,
+        "disconnect during g fails closed and releases the target");
+    run_disconnect_during_command(
+        "p0", 2u, "44332211", 8u, 8u, 0, 0, 0, 0,
+        "disconnect during p fails closed and releases the target");
+
+    struct uvdb_rsp_core_registers registers = {0};
+    registers.r[0] = UINT32_C(0x12345678);
+    registers.r[15] = UINT32_C(0x81000000);
+    registers.cpsr = UINT32_C(0x60000010);
+    char encoded[UVDB_RSP_CORE_PACKET_HEX_SIZE];
+    size_t encoded_size = 0;
+    check(uvdb_rsp_encode_register_packet(
+              encoded, sizeof(encoded), &registers, NULL, 0,
+              &encoded_size) == 0,
+          "encode disconnect G fixture");
+    char command[1u + UVDB_RSP_CORE_PACKET_HEX_SIZE];
+    command[0] = 'G';
+    memcpy(command + 1u, encoded, encoded_size);
+    run_disconnect_during_command(
+        command, sizeof(command), "OK", 2u, 2u,
+        1, UINT32_C(0x12345678), 0, 0,
+        "disconnect during G fails closed and releases the target");
+    run_disconnect_during_command(
+        "P0=78563412", strlen("P0=78563412"),
+        "OK", 2u, 2u, 1, UINT32_C(0x12345678), 0, 0,
+        "disconnect during P fails closed and releases the target");
+}
+
+struct fake_packet_io_thread {
+    int send;
+    int result;
+};
+
+static void* run_blocked_packet_io(void* opaque)
+{
+    struct fake_packet_io_thread* operation = opaque;
+    fake_thread = FAKE_OTHER_THREAD;
+    uint32_t owner = uvdb_protocol_owner_for_thread(fake_thread);
+    operation->result = uvdb_protocol_gate_try_acquire(
+        &uvdb_protocol_gate, owner);
+    if(operation->result != UVDB_PROTOCOL_GATE_ACQUIRED)
+        return NULL;
+
+    uvdb_lock();
+    if(operation->send)
+    {
+        buffer_write(&out_buf, "blocked send", strlen("blocked send"));
+        buffer_flush(&out_buf);
+    }
+    else
+    {
+        char* destination = NULL;
+        (void)buffer_poll(&in_buf, &destination);
+    }
+    uvdb_unlock();
+    operation->result = uvdb_protocol_gate_release(
+        &uvdb_protocol_gate, owner);
+    return NULL;
+}
+
+static void test_connected_io_cancellation_and_exclusion(void)
+{
+    reset_core();
+    fake_block_receive = 1;
+    struct fake_packet_io_thread receive = {0};
+    pthread_t receive_thread;
+    check(pthread_create(
+              &receive_thread, NULL, run_blocked_packet_io,
+              &receive) == 0,
+          "start blocked connected receive");
+    check(wait_for_atomic_value(&fake_receive_blocked, 1) == 0 &&
+              __atomic_load_n(&uvdb_packet_io_active,
+                              __ATOMIC_ACQUIRE) == 1,
+          "connected receive publishes its cancellation lifetime");
+    check(uvdb_protocol_gate_try_acquire(
+              &uvdb_protocol_gate,
+              uvdb_protocol_owner_for_thread(FAKE_THREAD)) ==
+              UVDB_PROTOCOL_GATE_BUSY,
+          "blocked receive excludes a second protocol owner");
+    int stop_result = uvdb_stop_server();
+    check(stop_result == 0,
+          "connected receive cancellation completes bounded shutdown");
+    check(pthread_join(receive_thread, NULL) == 0 &&
+              receive.result == 0 &&
+              fake_connected_socket_shutdown &&
+              __atomic_load_n(&uvdb_packet_io_active,
+                              __ATOMIC_ACQUIRE) == 0 &&
+              uvdb_protocol_gate_is_idle(&uvdb_protocol_gate),
+          "receive cancellation drains I/O and protocol ownership");
+
+    reset_core();
+    fake_block_send = 1;
+    struct fake_packet_io_thread send = {.send = 1};
+    pthread_t send_thread;
+    check(pthread_create(
+              &send_thread, NULL, run_blocked_packet_io, &send) == 0,
+          "start blocked connected send");
+    check(wait_for_atomic_value(&fake_send_blocked, 1) == 0 &&
+              __atomic_load_n(&uvdb_packet_io_active,
+                              __ATOMIC_ACQUIRE) == 1,
+          "connected send publishes its cancellation lifetime");
+    check(uvdb_protocol_gate_try_acquire(
+              &uvdb_protocol_gate,
+              uvdb_protocol_owner_for_thread(FAKE_THREAD)) ==
+              UVDB_PROTOCOL_GATE_BUSY,
+          "blocked send excludes a second protocol owner");
+    stop_result = uvdb_stop_server();
+    check(stop_result == 0,
+          "connected send cancellation completes bounded shutdown");
+    check(pthread_join(send_thread, NULL) == 0 &&
+              send.result == 0 &&
+              fake_connected_socket_shutdown &&
+              __atomic_load_n(&uvdb_packet_io_active,
+                              __ATOMIC_ACQUIRE) == 0 &&
+              uvdb_protocol_gate_is_idle(&uvdb_protocol_gate),
+          "send cancellation drains I/O and protocol ownership");
+}
+
+static void* run_fake_server_main(void* unused)
+{
+    (void)unused;
+    fake_thread = FAKE_OTHER_THREAD;
+    (void)uvdb_server_main(0, NULL);
+    __atomic_store_n(&fake_server_main_exited, 1, __ATOMIC_RELEASE);
+    return NULL;
+}
+
+static void test_connected_hup_during_shutdown(void)
+{
+    reset_core();
+    __atomic_store_n(&uvdb_target_stopped, 0, __ATOMIC_RELEASE);
+    __atomic_store_n(&uvdb_server_stop, 0, __ATOMIC_RELEASE);
+    uvdb_server_thread = FAKE_OTHER_THREAD;
+    fake_epoll_block = 1;
+    pthread_t server;
+    check(pthread_create(&server, NULL, run_fake_server_main, NULL) == 0,
+          "start connected HUP server fixture");
+    check(wait_for_atomic_value(&fake_epoll_wait_blocked, 1) == 0,
+          "server reaches connected epoll wait");
+    __atomic_store_n(&uvdb_server_stop, 1, __ATOMIC_RELEASE);
+    fake_epoll_events = SCE_NET_EPOLLHUP;
+    __atomic_store_n(&fake_epoll_release, 1, __ATOMIC_RELEASE);
+    check(pthread_join(server, NULL) == 0 &&
+              fake_server_main_exited &&
+              fake_connected_socket_closed &&
+              uvdb_socket < 0 &&
+              uvdb_state == UVDB_STATE_IDLE &&
+              __atomic_load_n(&uvdb_target_stopped,
+                              __ATOMIC_ACQUIRE) == 0 &&
+              fake_accept_calls == 0,
+          "intentional connected HUP retires without a synthetic trap");
+    uvdb_server_thread = -1;
+}
+
+static int fake_stress_critical;
+
+static void* run_stress_protocol_faults(void* opaque)
+{
+    const uintptr_t index = (uintptr_t)opaque;
+    fake_thread = FAKE_OTHER_THREAD + (SceUID)index;
+    const uint32_t owner = uvdb_protocol_owner_for_thread(fake_thread);
+    while(__atomic_load_n(&fake_stress_running, __ATOMIC_ACQUIRE))
+    {
+        if(uvdb_protocol_gate_try_acquire(
+               &uvdb_protocol_gate, owner) ==
+           UVDB_PROTOCOL_GATE_ACQUIRED)
+        {
+            if(__atomic_add_fetch(
+                   &fake_stress_critical, 1, __ATOMIC_ACQ_REL) != 1)
+                __atomic_store_n(
+                    &fake_stress_gate_violation, 1, __ATOMIC_RELEASE);
+            __atomic_add_fetch(
+                &fake_stress_protocol_entries, 1, __ATOMIC_RELAXED);
+            int entry = uvdb_exception_guard_enter(
+                &uvdb_exception_guard,
+                (uint32_t)(index % 3u));
+            if(entry != UVDB_EXCEPTION_GUARD_INVALID)
+            {
+                __atomic_add_fetch(
+                    &fake_stress_fault_entries, 1, __ATOMIC_RELAXED);
+                (void)uvdb_exception_guard_leave(
+                    &uvdb_exception_guard,
+                    (uint32_t)(index % 3u), entry);
+            }
+            __atomic_sub_fetch(
+                &fake_stress_critical, 1, __ATOMIC_ACQ_REL);
+            (void)uvdb_protocol_gate_release(
+                &uvdb_protocol_gate, owner);
+        }
+        else
+            usleep(1);
+    }
+    return NULL;
+}
+
+static void* run_stress_console_pressure(void* unused)
+{
+    (void)unused;
+    static const char message[] = "deterministic console pressure\n";
+    while(__atomic_load_n(&fake_stress_running, __ATOMIC_ACQUIRE))
+    {
+        (void)uvdb_console_capture(message, sizeof(message) - 1u);
+        __atomic_add_fetch(
+            &fake_stress_console_attempts, 1, __ATOMIC_RELAXED);
+    }
+    return NULL;
+}
+
+static void test_deterministic_multithread_lifecycle_stress(void)
+{
+    reset_core();
+    uvdb_socket = -1;
+    uvdb_state = UVDB_STATE_IDLE;
+    uvdb_server_thread = -1;
+    check(uvdb_start_server() == 0,
+          "start first stress server generation");
+    __atomic_store_n(&fake_stress_running, 1, __ATOMIC_RELEASE);
+    pthread_t protocol_workers[3];
+    pthread_t console_worker;
+    for(uintptr_t i = 0; i < 3u; ++i)
+        check(pthread_create(
+                  &protocol_workers[i], NULL,
+                  run_stress_protocol_faults,
+                  (void*)(i + 1u)) == 0,
+              "start stress protocol/fault worker");
+    check(pthread_create(
+              &console_worker, NULL, run_stress_console_pressure,
+              NULL) == 0,
+          "start stress console worker");
+    check(wait_for_atomic_nonzero(
+              &fake_stress_protocol_entries) == 0 &&
+              wait_for_atomic_nonzero(
+                  &fake_stress_fault_entries) == 0 &&
+              wait_for_atomic_nonzero(
+                  &fake_stress_console_attempts) == 0,
+          "stress workers make progress before reconnect cycling");
+
+    for(unsigned int cycle = 0; cycle < 1000u; ++cycle)
+    {
+        check(uvdb_publish_socket(&uvdb_socket, FAKE_SOCKET) == 0,
+              "stress publishes a fresh connected socket generation");
+        uvdb_state = UVDB_STATE_CONNECTED;
+        __atomic_store_n(
+            &fake_connected_socket_shutdown, 0, __ATOMIC_RELEASE);
+        fake_connected_socket_closed = 0;
+        check(uvdb_console_transport_begin_connection(
+                  &uvdb_console_transport) == UVDB_CONSOLE_READY &&
+                  uvdb_console_transport_enable_no_ack(
+                      &uvdb_console_transport) == UVDB_CONSOLE_READY,
+              "stress opens a bounded console generation");
+        check(uvdb_stop_server() == 0 &&
+                  uvdb_socket < 0 &&
+                  uvdb_state == UVDB_STATE_IDLE &&
+                  fake_connected_socket_shutdown &&
+                  fake_connected_socket_closed &&
+                  uvdb_protocol_gate_is_idle(&uvdb_protocol_gate) &&
+                  uvdb_protocol_gate_is_closing(&uvdb_protocol_gate),
+              "stress shutdown cancels, joins, and retires one generation");
+        if(cycle + 1u < 1000u)
+            check(uvdb_start_server() == 0 &&
+                      !uvdb_protocol_gate_is_closing(
+                          &uvdb_protocol_gate),
+                  "stress restart reopens a quiescent protocol generation");
+        usleep(1);
+    }
+
+    __atomic_store_n(&fake_stress_running, 0, __ATOMIC_RELEASE);
+    for(size_t i = 0; i < 3u; ++i)
+        check(pthread_join(protocol_workers[i], NULL) == 0,
+              "join stress protocol/fault worker");
+    check(pthread_join(console_worker, NULL) == 0,
+          "join stress console worker");
+    struct uvdb_console_stats console_stats;
+    check(uvdb_console_get_stats(&console_stats) == 0 &&
+              console_stats.accepted_records > 0 &&
+              console_stats.queued_records <= UVDB_CONSOLE_QUEUE_SLOTS &&
+              console_stats.dropped_full_records +
+                  console_stats.dropped_disconnected_records > 0,
+          "stress console pressure remains bounded with explicit loss");
+    check(uvdb_protocol_gate_is_idle(&uvdb_protocol_gate) &&
+              uvdb_exception_guard_is_idle(&uvdb_exception_guard) &&
+              !fake_stress_gate_violation &&
+              fake_stress_protocol_entries > 0 &&
+              fake_stress_fault_entries > 0 &&
+              fake_stress_console_attempts > 0,
+          "stress preserves exclusive ownership and drains fault/console work");
+}
+
 int main(void)
 {
     test_real_status_query_ordering();
@@ -429,6 +931,11 @@ int main(void)
     test_non_rsp_probe_does_not_consume_session();
     test_silent_probe_timeout_is_bounded();
     test_candidate_socket_cleanup();
+    test_production_frame_boundaries_and_escapes();
+    test_disconnect_command_matrix();
+    test_connected_io_cancellation_and_exclusion();
+    test_connected_hup_during_shutdown();
+    test_deterministic_multithread_lifecycle_stress();
     if(failures)
         return 1;
     puts("PASS: integrated uvdb.c protocol, exception, and lifecycle ordering");
@@ -473,8 +980,11 @@ int sceKernelFreeMemBlock(SceUID uid)
 
 int sceKernelDelayThread(unsigned int microseconds)
 {
-    (void)microseconds;
     ++fake_delay_calls;
+    if(__atomic_load_n(&fake_receive_blocked, __ATOMIC_ACQUIRE) ||
+       __atomic_load_n(&fake_send_blocked, __ATOMIC_ACQUIRE) ||
+       __atomic_load_n(&fake_stress_running, __ATOMIC_ACQUIRE))
+        usleep(microseconds > 1000u ? 1000u : microseconds);
     if(fake_release_guard_on_delay &&
        !uvdb_exception_guard_is_idle(&uvdb_exception_guard))
     {
@@ -540,6 +1050,17 @@ ssize_t sceNetSyscallRecvfrom(void* arguments)
     uvdb_net_syscall_arg* args = arguments;
     if(!args)
         return -1;
+    if((int)args[0] == FAKE_SOCKET &&
+       !(args[3] & MSG_PEEK) &&
+       __atomic_load_n(&fake_block_receive, __ATOMIC_ACQUIRE))
+    {
+        __atomic_store_n(&fake_receive_blocked, 1, __ATOMIC_RELEASE);
+        while(!__atomic_load_n(&fake_release_receive, __ATOMIC_ACQUIRE) &&
+              !__atomic_load_n(&fake_connected_socket_shutdown,
+                               __ATOMIC_ACQUIRE))
+            usleep(1000);
+        return -1;
+    }
     unsigned char* source;
     size_t* offset;
     size_t source_size;
@@ -574,6 +1095,15 @@ ssize_t sceNetSyscallSendto(void* arguments)
     uvdb_net_syscall_arg* args = arguments;
     if(!args || (int)args[0] != FAKE_SOCKET)
         return -1;
+    if(__atomic_load_n(&fake_block_send, __ATOMIC_ACQUIRE))
+    {
+        __atomic_store_n(&fake_send_blocked, 1, __ATOMIC_RELEASE);
+        while(!__atomic_load_n(&fake_release_send, __ATOMIC_ACQUIRE) &&
+              !__atomic_load_n(&fake_connected_socket_shutdown,
+                               __ATOMIC_ACQUIRE))
+            usleep(1000);
+        return -1;
+    }
     const unsigned char* source = (const unsigned char*)(uintptr_t)args[1];
     size_t size = (size_t)args[2];
     if(size && source[0] == '$' &&
@@ -603,6 +1133,9 @@ int sceNetSyscallShutdown(int socket, int how)
     (void)socket; (void)how;
     if(socket == 9)
         fake_probe_socket_shutdown = 1;
+    if(socket == FAKE_SOCKET)
+        __atomic_store_n(
+            &fake_connected_socket_shutdown, 1, __ATOMIC_RELEASE);
     ++fake_lifecycle_sequence;
     if(!fake_shutdown_sequence)
         fake_shutdown_sequence = fake_lifecycle_sequence;
@@ -618,6 +1151,8 @@ int sceNetSyscallClose(int socket)
 {
     if(socket == 9)
         fake_probe_socket_closed = 1;
+    if(socket == FAKE_SOCKET)
+        fake_connected_socket_closed = 1;
     return 0;
 }
 int* sceNetErrnoLoc(void) { static int error; return &error; }
@@ -636,6 +1171,15 @@ int sceNetEpollWait(
     int epoll, SceNetEpollEvent* events, int maximum, int timeout)
 {
     (void)epoll; (void)maximum; (void)timeout;
+    if(__atomic_load_n(&fake_epoll_block, __ATOMIC_ACQUIRE))
+    {
+        __atomic_store_n(&fake_epoll_wait_blocked, 1, __ATOMIC_RELEASE);
+        while(!__atomic_load_n(&fake_epoll_release, __ATOMIC_ACQUIRE))
+            usleep(1000);
+        events[0].events = fake_epoll_events;
+        events[0].data.fd = fake_epoll_socket;
+        return 1;
+    }
     size_t available = 0;
     if(fake_epoll_socket == 9)
         available = fake_probe_receive_size - fake_probe_receive_offset;
@@ -651,7 +1195,18 @@ int sceNetEpollDestroy(int epoll) { (void)epoll; return 0; }
 
 int kuKernelCpuUnrestrictedMemcpy(
     void* destination, const void* source, size_t size)
-{ memcpy(destination, source, size); return 0; }
+{
+    uintptr_t address = (uintptr_t)destination;
+    if(size <= sizeof(fake_target_memory) &&
+       address >= UINT32_C(0x1000) &&
+       address - UINT32_C(0x1000) <=
+           sizeof(fake_target_memory) - size)
+        memcpy(fake_target_memory + address - UINT32_C(0x1000),
+               source, size);
+    else
+        memcpy(destination, source, size);
+    return 0;
+}
 void kuKernelFlushCaches(const void* address, size_t size)
 { (void)address; (void)size; }
 int kuKernelRegisterExceptionHandler(
@@ -670,11 +1225,114 @@ void _sceKernelExitProcessForUser(int status) { (void)status; }
 int _sceKernelSendMsgPipeVector(
     SceUID uid, const SceKernelAddrPair* pairs, unsigned int count,
     uvdb_net_syscall_arg* rest)
-{ (void)uid; (void)pairs; (void)count; (void)rest; return -1; }
+{
+    if(uid < 0 || !pairs || count != 1u || !rest ||
+       pairs[0].length > sizeof(fake_pipe_data))
+        return -1;
+    uintptr_t address = (uintptr_t)pairs[0].addr;
+    if(pairs[0].length > sizeof(fake_target_memory) ||
+       address < UINT32_C(0x1000) ||
+       address - UINT32_C(0x1000) >
+           sizeof(fake_target_memory) - pairs[0].length)
+        return -1;
+    fake_pipe_size = pairs[0].length;
+    memcpy(fake_pipe_data,
+           fake_target_memory + address - UINT32_C(0x1000),
+           fake_pipe_size);
+    *(size_t*)(uintptr_t)rest[1] = fake_pipe_size;
+    return 0;
+}
 int _sceKernelReceiveMsgPipeVector(
     SceUID uid, const SceKernelAddrPair* pairs, unsigned int count,
     uvdb_net_syscall_arg* rest)
-{ (void)uid; (void)pairs; (void)count; (void)rest; return -1; }
+{
+    if(uid < 0 || !pairs || count != 1u || !rest ||
+       pairs[0].length > fake_pipe_size)
+        return -1;
+    memcpy((void*)(uintptr_t)pairs[0].addr,
+           fake_pipe_data, pairs[0].length);
+    memmove(fake_pipe_data, fake_pipe_data + pairs[0].length,
+            fake_pipe_size - pairs[0].length);
+    fake_pipe_size -= pairs[0].length;
+    *(size_t*)(uintptr_t)rest[1] = pairs[0].length;
+    return 0;
+}
+
+#ifdef UVDB_KERNEL_THREAD_CONTROL
+int vdKernelGetStatus(struct vd_kernel_status* status)
+{
+    if(!status)
+        return -1;
+    *status = (struct vd_kernel_status){
+        .abi_version = VD_KERNEL_ABI_VERSION,
+        .capabilities =
+            VD_KERNEL_REQUIRED_THREAD_CONTROL_CAPABILITIES,
+        .max_threads = VD_KERNEL_MAX_THREADS,
+    };
+    return 0;
+}
+
+int vdKernelBeginStop(
+    unsigned int lease_ms,
+    SceUID exempt_user_thread,
+    struct vd_kernel_stop_result* stop_result)
+{
+    (void)lease_ms;
+    (void)exempt_user_thread;
+    if(!stop_result)
+        return -1;
+    *stop_result = (struct vd_kernel_stop_result){
+        .token = 1u,
+        .suspended_count = 1,
+        .failed_thread = -1,
+    };
+    return 0;
+}
+
+int vdKernelRenewStop(unsigned int token, unsigned int lease_ms)
+{
+    return token == 1u && lease_ms == 2000u ? 0 : -1;
+}
+
+int vdKernelEndStop(unsigned int token, int* resumed_count)
+{
+    if(token != 1u)
+        return -1;
+    if(resumed_count)
+        *resumed_count = 1;
+    return 0;
+}
+
+int vdKernelGetThreadList(
+    SceUID* ids,
+    int capacity,
+    int* copied_count,
+    int* total_count)
+{
+    if(!ids || capacity < 1 || !copied_count || !total_count)
+        return -1;
+    ids[0] = FAKE_THREAD;
+    *copied_count = 1;
+    *total_count = 1;
+    return 0;
+}
+
+int vdKernelGetThreadRegisters(
+    unsigned int token,
+    SceUID target_user_thread,
+    struct vd_thread_registers* registers)
+{
+    if(token != 1u || target_user_thread != FAKE_THREAD || !registers)
+        return -1;
+    memset(registers, 0, sizeof(*registers));
+    registers->entry[0].r[0] = UINT32_C(0x11223344);
+    registers->entry[0].sp = UINT32_C(0x8100f000);
+    registers->entry[0].lr = UINT32_C(0x81000100);
+    registers->entry[0].pc = UINT32_C(0x81001234);
+    registers->entry[0].cpsr = UINT32_C(0x60000010);
+    return 0;
+}
+#endif
 
 int uvdb_stdio_is_internal_thread(int thread_id)
 { (void)thread_id; return 0; }

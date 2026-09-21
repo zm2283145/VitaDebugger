@@ -126,6 +126,10 @@ static void test_invalid_inputs(void)
     check(uvdb_protocol_gate_try_acquire(&gate, 0) ==
               UVDB_PROTOCOL_GATE_INVALID,
           "zero owner token rejected");
+    check(uvdb_protocol_gate_try_acquire(
+              &gate, UINT32_C(0x80000000)) ==
+              UVDB_PROTOCOL_GATE_INVALID,
+          "reserved closing bit cannot be used as an owner token");
     check(uvdb_protocol_gate_try_acquire(NULL, 1) ==
               UVDB_PROTOCOL_GATE_INVALID &&
               uvdb_protocol_gate_release(NULL, 1) < 0 &&

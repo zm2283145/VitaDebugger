@@ -11,7 +11,9 @@ exception-return, or socket-cancellation behavior.
   malformed checksum digits, superseded start markers, and oversized frames
   are consumed with forward progress. In ACK mode each malformed frame that
   began with `$` requests exactly one raw `-`; prefix noise does not, and
-  no-ack mode suppresses NACKs. An incomplete frame is retained.
+  no-ack mode suppresses NACKs. An incomplete frame is retained. Escaped `#`
+  and `$` wire bytes remain payload rather than terminating or superseding a
+  frame, and their encoded bytes remain part of the checksum and size bound.
 - Memory addresses and lengths are strict hexadecimal fields. Empty fields,
   trailing data, fields wider than ARM32, address-range wrap, payload-length
   mismatches, and requests above the reply limit are rejected.
@@ -74,6 +76,13 @@ current frame, and File-I/O resume follows the same rule. A second borrow,
 double release, or response send while a borrow remains active fails closed.
 The whole-protocol gate serializes this small state machine.
 
+Close/reopen and owner publication share one 32-bit atomic state: its high bit
+closes admission and its remaining bits hold the exact owner. This is distinct
+from holding a lock across packet work. One compare/exchange claims an open,
+idle generation, while close atomically adds the closed bit without disturbing
+an owner that still must drain. No transition spin or scheduler progress is
+required. Restart succeeds only from the closed-and-idle value.
+
 Server stop first closes the protocol gate and publishes `network_closing`,
 preventing a new owner or network operation from appearing after the
 quiescence check, then uses socket shutdown/abort to wake the current
@@ -96,9 +105,14 @@ drain, socket retirement, and restoration checks succeed, public stop
 normalizes the lifecycle state to `IDLE` even if shutdown woke a blocked
 receive through its ordinary transport-error return.
 
-The timeout and cancellation contract still needs a Vita test covering a
-blocked accept, blocked receive, partial send, peer disconnect, immediate
-stop/start, and reconnect.
+The timeout and cancellation contract has production-translation-unit host
+coverage for connected blocked receive, connected blocked send, whole-protocol
+exclusion during each wait, and an intentional connected HUP during shutdown.
+The fake shutdown syscall releases the exact blocked network operation, after
+which stop proves the per-call lifetime and protocol owner are both idle before
+retiring the descriptor. A Vita test is still required for firmware-level
+blocked receive/send cancellation timing, partial send, peer disconnect,
+immediate stop/start, and reconnect.
 
 Stop-token acquisition/recovery, thread-context snapshots, cache maintenance,
 and exception-slot replacement still execute inside the global state lock.
@@ -203,8 +217,10 @@ transitioning through a real exception/all-stop and remains future work.
 
 The focused host suite covers:
 
-- exact RSP boundaries plus 25,000 deterministic arbitrary byte streams,
-  including parser output immutability for breakpoint packets;
+- exact RSP wire boundaries plus 25,000 deterministic arbitrary byte streams,
+  including escaped delimiter handling, trailing escapes, exact-maximum and
+  one-byte-oversized payloads, and parser output immutability for breakpoint
+  packets;
 - ACK/no-ack malformed-frame disposition, bounded corrupt-to-valid
   resynchronization, request-borrow reuse/release rejection, and the exact
   minimum `Z0`/`z0` forms;
@@ -221,7 +237,11 @@ The focused host suite covers:
 - an integrated host translation unit that includes the production `uvdb.c`
   and drives its real `recv_packet`, `discard_packet`, `send_packet`, status
   branch in `uvdb_main_loop`, exception handler, and public stop/start paths
-  through scripted socket, thread, KuBridge, and kernel shims;
+  through scripted socket, thread, KuBridge, and kernel shims; the same suite
+  is compiled and executed in forced library-only and kernel-assisted variants;
+- production-loop disconnect injection after `m`, `M`, `g`, `p`, `G`, and `P`
+  processing, proving each path closes the generation, releases the request
+  borrow, reports transport failure, and returns the target-running state;
 - same-thread global-lock interruption and protocol-gate contention proving
   the real exception handler returns without spinning, leaves the context and
   stopped state untouched, releases only ownership it acquired, and chains
@@ -230,8 +250,14 @@ The focused host suite covers:
   next-primary admission, socket-cancel-before-join ordering, stopped-state
   normalization only after patch obligations clear, and suppression of a
   shutdown-induced synthetic trap while a connected fd is still published;
-- a whole-protocol fake-buffer race proving close blocks a second owner and
-  retains storage until the dropped-lock owner drains;
+- connected receive and send cancellation races proving close blocks a second
+  owner, shutdown wakes the exact operation, and storage/descriptors remain
+  live until both packet I/O and whole-protocol ownership drain;
+- an intentional connected-HUP shutdown interleaving proving the server retires
+  the descriptor without opening a listener or synthesizing a target trap; and
+- a deterministic 1,000-generation stress run with three concurrent
+  protocol/fault workers plus console pressure, checking exclusive ownership,
+  guard quiescence, reconnect publication, and bounded shutdown drain;
 - File-I/O literal-C/attachment fuzzing and a transition gate proving one T02
   only for real all-stop while the synthetic context fails closed; and
 - per-slot fake exception-handler install, partial rollback, exact restore,
@@ -241,21 +267,26 @@ The focused host suite covers:
 
 ## Remaining hardware gates
 
-1. Exercise malformed and maximum-size RSP packets over a real connection,
-   including disconnects during `m`, `M`, and register packets.
-2. Verify accept/receive/send cancellation, whole-protocol exclusion, and the
-   bounded stop/start/reconnect lifecycle on Vita, including a connected HUP
-   caused by intentional shutdown and immediate restart.
-3. Install alongside a known user exception handler, prove per-type chaining,
+1. Repeat the host malformed/escaped/exact-maximum RSP matrix over a real Vita
+   connection, including disconnects during `m`, `M`, `g`, `p`, `G`, and `P`.
+2. Verify client admission, candidate cancellation, Ctrl-C, detach, reconnect,
+   connected receive/send cancellation, whole-protocol exclusion, and an
+   intentional connected HUP on Vita. Treat title relaunch as a separate
+   lifecycle operation and wait two seconds after kill before relaunch.
+3. Run the deterministic reconnect/fault/console/shutdown matrix for an
+   equivalent long-duration window on retail hardware and confirm bounded
+   cancellation latency, no launch lock, no stale stopped target, and no
+   descriptor or thread leak.
+4. Install alongside a known user exception handler, prove per-type chaining,
    then prove exact slot restoration and late default redispatch at terminal
    shutdown. Do not attempt dynamic unload.
-4. Trigger a nested exception with a real predecessor and verify it is invoked
+5. Trigger a nested exception with a real predecessor and verify it is invoked
    once without deadlock.
-5. Treat NULL-predecessor nested behavior as blocked until the opt-in fatal
+6. Treat NULL-predecessor nested behavior as blocked until the opt-in fatal
    trampoline has its dedicated destructive hardware test.
-6. Add durable live `M` rollback storage before claiming arbitrary memory
+7. Add durable live `M` rollback storage before claiming arbitrary memory
    writes are transactionally recoverable.
-7. Add a KuBridge/kernel dispatcher-lifetime fence before supporting safe
+8. Add a KuBridge/kernel dispatcher-lifetime fence before supporting safe
    runtime reset or unload of an injected debugger module.
-8. Route remote File-I/O Ctrl-C through a real saved exception context and
+9. Route remote File-I/O Ctrl-C through a real saved exception context and
    coherent all-stop before enabling T02 for `uvdb_remote_syscall()`.
