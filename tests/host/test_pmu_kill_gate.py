@@ -7,9 +7,12 @@ from pathlib import Path
 
 from tests.host.test_decode_pmu_cleanup_record import _fnv1a, put_status
 from tools.decode_pmu_cleanup_record import (
+    BASELINE_OFFSET,
     FLAG_OWNER_ARMED,
+    HANDLES_OFFSET,
     MAGIC,
     NOT_RUN,
+    RESULTS_OFFSET,
     VERSION,
 )
 from tools.pmu_kill_gate import (
@@ -39,9 +42,11 @@ def armed_record() -> bytes:
         200,
     )
     struct.pack_into("<iIiii", data, 48, 0, 0x6B, 0, NOT_RUN, NOT_RUN)
-    struct.pack_into("<24i", data, 68, 0, 0, *([NOT_RUN] * 22))
-    struct.pack_into("<II", data, 164 + 8, 1, 2)
-    put_status(data, 440, 2)
+    struct.pack_into(
+        "<24i", data, RESULTS_OFFSET, 0, 0, *([NOT_RUN] * 22)
+    )
+    struct.pack_into("<II", data, HANDLES_OFFSET + 8, 1, 2)
+    put_status(data, BASELINE_OFFSET, 2)
     struct.pack_into("<I", data, 12, _fnv1a(data))
     return bytes(data)
 

@@ -13,7 +13,7 @@ Set `VITADEBUG_PMU_CLEANUP_GATE_STAGE` to exactly one value:
 
 | Value | Stage | Required observation |
 | --- | --- | --- |
-| 1 | Competing owner | A second thread receives `BUSY`, cannot obtain a handle, the first owner closes exactly, and a new lease opens and closes. |
+| 1 | Competing owner | A second thread receives provider `BUSY` (raw host `-42` or the exact Vita syscall-boundary encoding `0xBFFFFFD6`), cannot obtain a handle, the first owner closes exactly, and a new lease opens and closes. Neighboring or unrelated errors are rejected. |
 | 2 | Watchdog timeout | A 250 ms lease expires, a late read reports `RESTORE_REQUIRED`, the matching handle acknowledges cleanup, and a new lease opens and closes. |
 | 3 | Receiver disconnect | A live 5 s lease outlasts the forced disconnect: the initial PMU open/read and network start/connect/prelude all succeed, the initial sample authenticates against the nonzero handle and fixed event/core/lane, and the production Vita TCP sink writes `VDPMU-DROP-V1\n`; the host sends an RST, a bounded later write reports `VP_ERROR_IO`, a required PMU read still succeeds before the matching handle closes, and a new lease opens and closes. |
 | 4 | Normal process exit | The application returns normally with a live 5 s lease. Relaunch in the same boot proves process-event cleanup and opens/closes a new lease. |
@@ -106,6 +106,18 @@ and final status snapshots. PASS requires:
   timeout-first restoration or a callback arriving after the deadline cannot
   satisfy either process gate.
 
+The 1,024-byte record ABI fixes `results` at offset 68, `handles` at 164,
+four zero alignment bytes at 284--287, `samples` at 288, re-arm duration at
+432, and the three status snapshots at 440, 624, and 808. The C layout has
+compile-time offset checks and the Python decoder uses the same named
+constants. A sample written at the old unaligned offset 284 is invalid.
+
+Stage 1 accepts exactly two representations of provider `BUSY`: raw `-42`
+from the host model and `0xBFFFFFD6` observed across the Vita user/kernel
+syscall boundary. It does not mask or generally normalize negative results.
+The durable completion validator requires that exact result, complete
+first-owner evidence, and the subsequent bounded re-arm open/read/close.
+
 Decode each retrieved slot offline:
 
 ```powershell
@@ -114,9 +126,9 @@ py -3 tools/decode_pmu_cleanup_record.py `
   --output .\evidence\pmu-cleanup-v2-conflict-b.json
 ```
 
-The decoder exits nonzero for a malformed header, checksum mismatch, unknown
-field, non-idle state, uncertainty flag, missing exact snapshot, mismatched
-snapshot, or incomplete state transition.
+The decoder exits nonzero for a malformed header, checksum mismatch, nonzero
+layout padding, unknown field, non-idle state, uncertainty flag, missing exact
+snapshot, mismatched snapshot, or incomplete state transition.
 
 ## Serialized retail procedure
 

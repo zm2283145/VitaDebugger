@@ -11,6 +11,9 @@
 #define VD_PMU_CLEANUP_RESULT_NOT_RUN ((int32_t)-799)
 #define VD_PMU_CLEANUP_SLOT_COUNT 3u
 #define VD_PMU_CLEANUP_EXPECTED_NET_FAILURE ((int32_t)-13)
+#define VD_PMU_CLEANUP_VITA_SYSCALL_BUSY_RESULT \
+    ((int32_t)UINT32_C(0xbfffffd6))
+#define VD_PMU_CLEANUP_REARM_DEADLINE_US UINT64_C(2000000)
 
 enum gate_result_index {
     GATE_RESULT_OPEN = 0,
@@ -103,9 +106,55 @@ struct vd_pmu_cleanup_record {
     uint32_t reserved[7];
 };
 
+#define VD_PMU_CLEANUP_RESULTS_OFFSET 68u
+#define VD_PMU_CLEANUP_HANDLES_OFFSET 164u
+#define VD_PMU_CLEANUP_HANDLE_SIZE 40u
+#define VD_PMU_CLEANUP_SAMPLE_PADDING_OFFSET 284u
+#define VD_PMU_CLEANUP_SAMPLES_OFFSET 288u
+#define VD_PMU_CLEANUP_SAMPLE_SIZE 48u
+#define VD_PMU_CLEANUP_REARM_ELAPSED_OFFSET 432u
+#define VD_PMU_CLEANUP_BASELINE_OFFSET 440u
+#define VD_PMU_CLEANUP_RESTORED_OFFSET 624u
+#define VD_PMU_CLEANUP_FINAL_OFFSET 808u
+#define VD_PMU_CLEANUP_RESERVED_OFFSET 992u
+
 typedef char vd_pmu_cleanup_record_size_must_be_1024[
     sizeof(struct vd_pmu_cleanup_record) ==
         VD_PMU_CLEANUP_RECORD_SIZE ? 1 : -1];
+typedef char vd_pmu_cleanup_results_offset_must_be_68[
+    offsetof(struct vd_pmu_cleanup_record, results) ==
+        VD_PMU_CLEANUP_RESULTS_OFFSET ? 1 : -1];
+typedef char vd_pmu_cleanup_handles_offset_must_be_164[
+    offsetof(struct vd_pmu_cleanup_record, handles) ==
+        VD_PMU_CLEANUP_HANDLES_OFFSET ? 1 : -1];
+typedef char vd_pmu_cleanup_handle_size_must_be_40[
+    sizeof(struct vd_kernel_pmu_profiler_handle) ==
+        VD_PMU_CLEANUP_HANDLE_SIZE ? 1 : -1];
+typedef char vd_pmu_cleanup_sample_padding_must_start_at_284[
+    VD_PMU_CLEANUP_HANDLES_OFFSET +
+        VD_PMU_CLEANUP_SLOT_COUNT * VD_PMU_CLEANUP_HANDLE_SIZE ==
+        VD_PMU_CLEANUP_SAMPLE_PADDING_OFFSET ? 1 : -1];
+typedef char vd_pmu_cleanup_samples_offset_must_be_288[
+    offsetof(struct vd_pmu_cleanup_record, samples) ==
+        VD_PMU_CLEANUP_SAMPLES_OFFSET ? 1 : -1];
+typedef char vd_pmu_cleanup_sample_size_must_be_48[
+    sizeof(struct vd_kernel_pmu_profiler_sample) ==
+        VD_PMU_CLEANUP_SAMPLE_SIZE ? 1 : -1];
+typedef char vd_pmu_cleanup_rearm_offset_must_be_432[
+    offsetof(struct vd_pmu_cleanup_record, rearm_elapsed_us) ==
+        VD_PMU_CLEANUP_REARM_ELAPSED_OFFSET ? 1 : -1];
+typedef char vd_pmu_cleanup_baseline_offset_must_be_440[
+    offsetof(struct vd_pmu_cleanup_record, baseline) ==
+        VD_PMU_CLEANUP_BASELINE_OFFSET ? 1 : -1];
+typedef char vd_pmu_cleanup_restored_offset_must_be_624[
+    offsetof(struct vd_pmu_cleanup_record, restored) ==
+        VD_PMU_CLEANUP_RESTORED_OFFSET ? 1 : -1];
+typedef char vd_pmu_cleanup_final_offset_must_be_808[
+    offsetof(struct vd_pmu_cleanup_record, final) ==
+        VD_PMU_CLEANUP_FINAL_OFFSET ? 1 : -1];
+typedef char vd_pmu_cleanup_reserved_offset_must_be_992[
+    offsetof(struct vd_pmu_cleanup_record, reserved) ==
+        VD_PMU_CLEANUP_RESERVED_OFFSET ? 1 : -1];
 
 static inline uint32_t vdPmuCleanupChecksum(
     const struct vd_pmu_cleanup_record* record)
@@ -182,6 +231,51 @@ static inline int vdPmuCleanupSampleMatchesHandle(
             VD_KERNEL_PMU_PROFILER_FIXED_COUNTER;
 }
 
+static inline int vdPmuCleanupResultIsBusy(int32_t result)
+{
+    /*
+     * Vita converts the provider-local -42 return to 0xBFFFFFD6 while
+     * crossing the user/kernel syscall boundary. Accept only that exact
+     * observed encoding and the raw host-model value.
+     */
+    return result == VD_KERNEL_ERROR_PMU_PROFILER_BUSY ||
+        result == VD_PMU_CLEANUP_VITA_SYSCALL_BUSY_RESULT;
+}
+
+static inline int vdPmuCleanupConflictActionPassed(
+    const struct vd_pmu_cleanup_record* record)
+{
+    return record &&
+        record->results[GATE_RESULT_OPEN] == 0 &&
+        record->results[GATE_RESULT_READ] == 0 &&
+        vdPmuCleanupSampleMatchesHandle(
+            &record->samples[0], &record->handles[0],
+            VD_KERNEL_PMU_PROFILER_EVENT_ICACHE_MISS) &&
+        record->results[GATE_RESULT_AUX_CREATE] >= 0 &&
+        record->results[GATE_RESULT_AUX_START] >= 0 &&
+        record->results[GATE_RESULT_AUX_WAIT] >= 0 &&
+        record->results[GATE_RESULT_AUX_DELETE] >= 0 &&
+        vdPmuCleanupResultIsBusy(
+            record->results[GATE_RESULT_AUX_ACTION]) &&
+        record->results[GATE_RESULT_AUX_CLEANUP] ==
+            VD_PMU_CLEANUP_RESULT_NOT_RUN &&
+        record->results[GATE_RESULT_CLOSE] == 0;
+}
+
+static inline int vdPmuCleanupRearmPassed(
+    const struct vd_pmu_cleanup_record* record)
+{
+    return record &&
+        record->results[GATE_RESULT_REARM_OPEN] == 0 &&
+        record->results[GATE_RESULT_REARM_READ] == 0 &&
+        record->results[GATE_RESULT_REARM_CLOSE] == 0 &&
+        vdPmuCleanupSampleMatchesHandle(
+            &record->samples[1], &record->handles[1],
+            VD_KERNEL_PMU_PROFILER_EVENT_ICACHE_MISS) &&
+        record->rearm_elapsed_us <=
+            VD_PMU_CLEANUP_REARM_DEADLINE_US;
+}
+
 static inline int vdPmuCleanupStageValid(uint32_t stage)
 {
     return stage >= VD_PMU_CLEANUP_STAGE_CONFLICT &&
@@ -202,6 +296,11 @@ static inline int vdPmuCleanupRecordValid(
        (record->flags & ~VD_PMU_CLEANUP_KNOWN_FLAGS) != 0 ||
        record->checksum != vdPmuCleanupChecksum(record))
         return 0;
+    const uint8_t* bytes = (const uint8_t*)record;
+    for(size_t i = VD_PMU_CLEANUP_SAMPLE_PADDING_OFFSET;
+        i < VD_PMU_CLEANUP_SAMPLES_OFFSET; ++i)
+        if(bytes[i] != 0)
+            return 0;
     for(size_t i = 0;
         i < sizeof(record->reserved) / sizeof(record->reserved[0]); ++i)
         if(record->reserved[i] != 0)
@@ -237,6 +336,9 @@ static inline int vdPmuCleanupRecordValid(
             vdPmuCleanupStatusIdle(&record->restored) &&
             vdPmuCleanupStatusIdle(&record->final) &&
             record->final.rearm_count > record->baseline.rearm_count &&
+            vdPmuCleanupRearmPassed(record) &&
+            (record->stage != VD_PMU_CLEANUP_STAGE_CONFLICT ||
+             vdPmuCleanupConflictActionPassed(record)) &&
             (record->stage != VD_PMU_CLEANUP_STAGE_DISCONNECT ||
              (record->results[GATE_RESULT_OPEN] == 0 &&
               record->results[GATE_RESULT_READ] == 0 &&

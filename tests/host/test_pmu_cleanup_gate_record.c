@@ -50,6 +50,40 @@ static struct vd_pmu_cleanup_record attempted(uint32_t stage)
     return record;
 }
 
+static void set_sample(
+    struct vd_kernel_pmu_profiler_sample* sample,
+    uint32_t owner_token, uint32_t generation, uint32_t event_code)
+{
+    sample->struct_size = sizeof(*sample);
+    sample->abi_version = VD_KERNEL_PMU_PROFILER_ABI_VERSION;
+    sample->owner_token = owner_token;
+    sample->generation = generation;
+    sample->event_code = event_code;
+    sample->core_id = VD_KERNEL_PMU_PROFILER_FIXED_CORE;
+    sample->physical_counter =
+        VD_KERNEL_PMU_PROFILER_FIXED_COUNTER;
+}
+
+static void set_conflict_evidence(
+    struct vd_pmu_cleanup_record* record, int32_t busy_result)
+{
+    record->results[GATE_RESULT_OPEN] = 0;
+    record->results[GATE_RESULT_READ] = 0;
+    record->results[GATE_RESULT_CLOSE] = 0;
+    record->results[GATE_RESULT_AUX_CREATE] = 1;
+    record->results[GATE_RESULT_AUX_START] = 0;
+    record->results[GATE_RESULT_AUX_WAIT] = 0;
+    record->results[GATE_RESULT_AUX_DELETE] = 0;
+    record->results[GATE_RESULT_AUX_ACTION] = busy_result;
+    record->results[GATE_RESULT_AUX_CLEANUP] =
+        VD_PMU_CLEANUP_RESULT_NOT_RUN;
+    record->handles[0].owner_token = 1;
+    record->handles[0].generation = 1;
+    set_sample(
+        &record->samples[0], 1, 1,
+        VD_KERNEL_PMU_PROFILER_EVENT_ICACHE_MISS);
+}
+
 static void make_complete(struct vd_pmu_cleanup_record* record)
 {
     record->revision =
@@ -60,7 +94,19 @@ static void make_complete(struct vd_pmu_cleanup_record* record)
     record->final_status_result = 0;
     record->restored = record->baseline;
     record->final = record->baseline;
-    if(record->stage == VD_PMU_CLEANUP_STAGE_NORMAL_EXIT)
+    record->results[GATE_RESULT_REARM_OPEN] = 0;
+    record->results[GATE_RESULT_REARM_READ] = 0;
+    record->results[GATE_RESULT_REARM_CLOSE] = 0;
+    record->handles[1].owner_token = 2;
+    record->handles[1].generation = 2;
+    set_sample(
+        &record->samples[1], 2, 2,
+        VD_KERNEL_PMU_PROFILER_EVENT_ICACHE_MISS);
+    record->rearm_elapsed_us = 1000;
+    if(record->stage == VD_PMU_CLEANUP_STAGE_CONFLICT)
+        set_conflict_evidence(
+            record, VD_KERNEL_ERROR_PMU_PROFILER_BUSY);
+    else if(record->stage == VD_PMU_CLEANUP_STAGE_NORMAL_EXIT)
     {
         ++record->restored.active_process_normal_exit_cleanup_count;
         ++record->final.active_process_normal_exit_cleanup_count;
@@ -72,21 +118,6 @@ static void make_complete(struct vd_pmu_cleanup_record* record)
     }
     record->final.rearm_count = record->baseline.rearm_count + 1;
     seal(record);
-}
-
-static void set_sample(
-    struct vd_kernel_pmu_profiler_sample* sample,
-    uint32_t owner_token, uint32_t generation)
-{
-    sample->struct_size = sizeof(*sample);
-    sample->abi_version = VD_KERNEL_PMU_PROFILER_ABI_VERSION;
-    sample->owner_token = owner_token;
-    sample->generation = generation;
-    sample->event_code =
-        VD_KERNEL_PMU_PROFILER_EVENT_BRANCH_MISPREDICT;
-    sample->core_id = VD_KERNEL_PMU_PROFILER_FIXED_CORE;
-    sample->physical_counter =
-        VD_KERNEL_PMU_PROFILER_FIXED_COUNTER;
 }
 
 static void set_disconnect_evidence(
@@ -110,8 +141,12 @@ static void set_disconnect_evidence(
         VD_PMU_CLEANUP_EXPECTED_NET_FAILURE;
     record->handles[0].owner_token = 3;
     record->handles[0].generation = 4;
-    set_sample(&record->samples[0], 3, 4);
-    set_sample(&record->samples[2], 3, 4);
+    set_sample(
+        &record->samples[0], 3, 4,
+        VD_KERNEL_PMU_PROFILER_EVENT_BRANCH_MISPREDICT);
+    set_sample(
+        &record->samples[2], 3, 4,
+        VD_KERNEL_PMU_PROFILER_EVENT_BRANCH_MISPREDICT);
 }
 
 int main(void)
@@ -121,6 +156,28 @@ int main(void)
     int present[VD_PMU_CLEANUP_SLOT_COUNT] = {0};
     int valid[VD_PMU_CLEANUP_SLOT_COUNT] = {0};
 
+    CHECK(offsetof(struct vd_pmu_cleanup_record, results) ==
+              VD_PMU_CLEANUP_RESULTS_OFFSET,
+          "results offset matches the durable ABI");
+    CHECK(offsetof(struct vd_pmu_cleanup_record, handles) ==
+              VD_PMU_CLEANUP_HANDLES_OFFSET,
+          "handles offset matches the durable ABI");
+    CHECK(offsetof(struct vd_pmu_cleanup_record, samples) ==
+              VD_PMU_CLEANUP_SAMPLES_OFFSET,
+          "samples offset includes four-byte ABI alignment padding");
+    CHECK(offsetof(struct vd_pmu_cleanup_record, rearm_elapsed_us) ==
+              VD_PMU_CLEANUP_REARM_ELAPSED_OFFSET,
+          "re-arm duration offset matches the durable ABI");
+    CHECK(offsetof(struct vd_pmu_cleanup_record, baseline) ==
+              VD_PMU_CLEANUP_BASELINE_OFFSET &&
+          offsetof(struct vd_pmu_cleanup_record, restored) ==
+              VD_PMU_CLEANUP_RESTORED_OFFSET &&
+          offsetof(struct vd_pmu_cleanup_record, final) ==
+              VD_PMU_CLEANUP_FINAL_OFFSET &&
+          offsetof(struct vd_pmu_cleanup_record, reserved) ==
+              VD_PMU_CLEANUP_RESERVED_OFFSET,
+          "status and reserved offsets match the durable ABI");
+
     records[0] = attempted(VD_PMU_CLEANUP_STAGE_CONFLICT);
     CHECK(vdPmuCleanupRecordValid(&records[0]),
           "durable pre-mutation attempt validates");
@@ -128,6 +185,93 @@ int main(void)
     make_complete(&records[1]);
     CHECK(vdPmuCleanupRecordValid(&records[1]),
           "exact-restoration completion validates");
+    CHECK(vdPmuCleanupConflictActionPassed(&records[1]),
+          "raw host busy result admits the bounded re-arm path");
+
+    struct vd_pmu_cleanup_record encoded_busy = records[1];
+    encoded_busy.results[GATE_RESULT_AUX_ACTION] =
+        VD_PMU_CLEANUP_VITA_SYSCALL_BUSY_RESULT;
+    seal(&encoded_busy);
+    CHECK(vdPmuCleanupResultIsBusy(
+              VD_PMU_CLEANUP_VITA_SYSCALL_BUSY_RESULT),
+          "exact Vita syscall-encoded busy result is recognized");
+    CHECK(vdPmuCleanupConflictActionPassed(&encoded_busy),
+          "encoded device busy result admits the bounded re-arm path");
+    CHECK(vdPmuCleanupRecordValid(&encoded_busy),
+          "encoded device busy completion validates");
+
+    static const int32_t not_busy_results[] = {
+        VD_KERNEL_ERROR_PMU_PROFILER_INVALID,
+        VD_KERNEL_ERROR_PMU_PROFILER_OWNER,
+        (int32_t)UINT32_C(0xbfffffd5),
+        (int32_t)UINT32_C(0xbfffffd7),
+        (int32_t)UINT32_C(0x80020008),
+    };
+    for(size_t i = 0;
+        i < sizeof(not_busy_results) / sizeof(not_busy_results[0]); ++i)
+    {
+        struct vd_pmu_cleanup_record wrong_busy = records[1];
+        wrong_busy.results[GATE_RESULT_AUX_ACTION] =
+            not_busy_results[i];
+        seal(&wrong_busy);
+        CHECK(!vdPmuCleanupResultIsBusy(not_busy_results[i]),
+              "neighboring and unrelated errors are not busy");
+        CHECK(!vdPmuCleanupConflictActionPassed(&wrong_busy),
+              "non-busy result cannot admit re-arm");
+        CHECK(!vdPmuCleanupRecordValid(&wrong_busy),
+              "non-busy stage-1 completion is rejected");
+    }
+
+    struct vd_pmu_cleanup_record missing_rearm = records[1];
+    missing_rearm.results[GATE_RESULT_REARM_OPEN] =
+        VD_PMU_CLEANUP_RESULT_NOT_RUN;
+    seal(&missing_rearm);
+    CHECK(!vdPmuCleanupRecordValid(&missing_rearm),
+          "completion requires the bounded re-arm operation");
+    missing_rearm = records[1];
+    missing_rearm.samples[1].physical_counter =
+        VD_KERNEL_PMU_PROFILER_FIXED_COUNTER - 1;
+    seal(&missing_rearm);
+    CHECK(!vdPmuCleanupRecordValid(&missing_rearm),
+          "completion requires authenticated re-arm sample metadata");
+    missing_rearm = records[1];
+    missing_rearm.rearm_elapsed_us =
+        VD_PMU_CLEANUP_REARM_DEADLINE_US + 1;
+    seal(&missing_rearm);
+    CHECK(!vdPmuCleanupRecordValid(&missing_rearm),
+          "completion rejects re-arm beyond the bounded deadline");
+
+    static const uint8_t captured_stage1_sample[48] = {
+        0x30, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00,
+        0x01, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00,
+        0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x31, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    };
+    struct vd_pmu_cleanup_record captured = encoded_busy;
+    memcpy(
+        &captured.samples[0], captured_stage1_sample,
+        sizeof(captured_stage1_sample));
+    seal(&captured);
+    CHECK(captured.samples[0].struct_size == 48 &&
+          captured.samples[0].abi_version == 1 &&
+          captured.samples[0].owner_token == 1 &&
+          captured.samples[0].generation == 1 &&
+          captured.samples[0].event_code == 1 &&
+          captured.samples[0].core_id == 0 &&
+          captured.samples[0].physical_counter == 5 &&
+          captured.samples[0].value == 49,
+          "captured hardware sample matches the C ABI at offset 288");
+    CHECK(vdPmuCleanupRecordValid(&captured),
+          "captured hardware sample validates in a complete stage-1 record");
+
+    struct vd_pmu_cleanup_record unaligned_sample = captured;
+    ((uint8_t*)&unaligned_sample)[
+        VD_PMU_CLEANUP_SAMPLE_PADDING_OFFSET] = 0x30;
+    seal(&unaligned_sample);
+    CHECK(!vdPmuCleanupRecordValid(&unaligned_sample),
+          "nonzero legacy offset-284 sample padding is rejected");
 
     struct vd_pmu_cleanup_record disconnect =
         attempted(VD_PMU_CLEANUP_STAGE_DISCONNECT);

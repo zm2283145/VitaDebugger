@@ -38,7 +38,7 @@ hardware-pending.
 | Other send error | Cross-layer fixture injects a non-disconnect I/O error | Native error is retained, socket is closed, and PMU cleanup follows the same fail-closed path | Required |
 | Owner process exits without close | Cross-layer fixture and process-event transport tests prove the callback only releases the retained identity once and records terminal proof; watchdog-only restoration survives failure/retry without querying a torn-down UID; lock-contention deferral restores but quarantines; terminal delivery both before and after watchdog observation of an expired lease is explicitly injected | Process callback remains bounded, watchdog restores exactly, the old handle is retired, and re-arm occurs only after exact reference release; active-exit/kill evidence increments only if the callback observed an `ACTIVE`, unexpired lease, so a prior timeout cannot masquerade as process cleanup; uncertain late release never re-arms | Required |
 | Controller thread exits while process remains | Cross-layer fixture proves the captured thread gone while the process remains | Same result as process exit; process survival must not keep an exited controller's lease live | Required |
-| Competing owner/process/thread | Session, bridge, and cross-layer fixtures attempt concurrent open plus foreign read/close | Open returns busy; foreign read/close returns owner error; no PMU callback or live-owner state mutation is performed for the intruder | Required |
+| Competing owner/process/thread | Session, bridge, and cross-layer fixtures attempt concurrent open plus foreign read/close; cleanup-journal tests cover raw host `-42`, exact Vita syscall encoding `0xBFFFFFD6`, neighboring values, and unrelated errors | Open returns exactly provider busy in one of its two approved representations; foreign read/close returns owner error; no PMU callback or live-owner state mutation is performed for the intruder; only the exact busy result permits the bounded same-boot re-arm | Required |
 | Registers match but independent restore evidence is pending | Cross-layer fixture restores the fake PMU bytes while retaining backend recovery/restore flags | A new Open services one bounded recovery pass, returns `RESTORE_REQUIRED`, leaves the transport `CLEANUP_REQUIRED`, and cannot advertise or grant re-arm | Host passed; retain as a hardware fault-injection stop condition |
 | Lease timeout with owner alive | Bridge and cross-layer fixtures expire a lease without an owner terminal event | Hardware restores exactly, but transport remains `RESTORED_AWAITING_OWNER`; a new real event stays blocked | Required |
 | Lease timeout with owner unknown | Cross-layer fixture makes liveness indeterminate before and after exact restore | Unknown is never treated as gone; quarantine and the original handle remain intact | Required |
@@ -103,6 +103,10 @@ Every attempted hardware row needs two durable, checksummed journal phases:
    old-handle rejection, and the result of the single planned follow-up open.
    Mark `RESTORE_PROVEN` only when the independent complete snapshot comparison
    and every backend/bridge obligation check pass.
+
+The cleanup record mirrors the compiled C ABI, including four zero alignment
+bytes before `samples[]`: handles end at offset 284 and samples begin at 288.
+Both C and Python validators reject the obsolete unaligned sample placement.
 
 For a refusal row, success means the follow-up open is refused and the exact
 restoration/owner obligation remains observable.  For an acceptance row,

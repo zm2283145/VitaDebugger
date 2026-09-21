@@ -152,7 +152,9 @@ details are in the
 Run exactly one package at a time, in this order, without rebooting between a
 stage's cleanup and its re-arm proof:
 
-1. stage `1`: competing-owner refusal and first-owner exact close;
+1. stage `1`: competing-owner refusal and first-owner exact close; accept only
+   raw host `-42` or exact retail syscall encoding `0xBFFFFFD6` as provider
+   `BUSY`, then require the bounded same-boot re-arm;
 2. stage `2`: 250 ms timeout/watchdog restore and matching acknowledgement;
 3. stage `3`: production TCP sink receiver disconnect under a 5 s live lease,
    with successful initial PMU open/read and network start/connect/prelude,

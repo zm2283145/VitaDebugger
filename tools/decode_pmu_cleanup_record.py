@@ -25,9 +25,20 @@ FLAG_OWNER_ARMED = 1 << 3
 FLAG_PASS = 1 << 4
 COMPLETE_FLAGS = FLAG_ACTION | FLAG_RESTORED | FLAG_REARMED | FLAG_PASS
 REQUIRED_CAPABILITIES = 0x6B
+VP_ERROR_BUSY = -42
+VITA_SYSCALL_VP_ERROR_BUSY = -1073741866
 RESULT_OPEN = 0
 RESULT_READ = 1
 RESULT_CLOSE = 2
+RESULT_AUX_CREATE = 3
+RESULT_AUX_START = 4
+RESULT_AUX_WAIT = 5
+RESULT_AUX_DELETE = 6
+RESULT_AUX_ACTION = 7
+RESULT_AUX_CLEANUP = 8
+RESULT_REARM_OPEN = 9
+RESULT_REARM_READ = 10
+RESULT_REARM_CLOSE = 11
 RESULT_NET_START = 14
 RESULT_NET_CONNECT = 15
 RESULT_NET_PRELUDE = 16
@@ -35,6 +46,18 @@ RESULT_NET_FAILURE = 17
 RESULT_NET_CLOSE = 18
 RESULT_NET_STOP = 19
 RESULT_POST_DISCONNECT_READ = 21
+RESULTS_OFFSET = 68
+HANDLES_OFFSET = 164
+HANDLE_SIZE = 40
+SAMPLE_PADDING_OFFSET = 284
+SAMPLES_OFFSET = 288
+SAMPLE_SIZE = 48
+REARM_ELAPSED_OFFSET = 432
+BASELINE_OFFSET = 440
+RESTORED_OFFSET = 624
+FINAL_OFFSET = 808
+RESERVED_OFFSET = 992
+REARM_DEADLINE_US = 2_000_000
 
 
 def _fnv1a(data: bytes) -> int:
@@ -143,6 +166,28 @@ def _status_idle(status: dict[str, object]) -> bool:
     )
 
 
+def _busy_result(result: int) -> bool:
+    return result in (VP_ERROR_BUSY, VITA_SYSCALL_VP_ERROR_BUSY)
+
+
+def _sample_matches_handle(
+    sample: dict[str, int],
+    handle: dict[str, int],
+    event_code: int,
+) -> bool:
+    return (
+        handle["owner_token"] != 0
+        and handle["generation"] != 0
+        and sample["struct_size"] == 48
+        and sample["abi_version"] == 1
+        and sample["owner_token"] == handle["owner_token"]
+        and sample["generation"] == handle["generation"]
+        and sample["event_code"] == event_code
+        and sample["core_id"] == 0
+        and sample["physical_counter"] == 5
+    )
+
+
 def decode_record(data: bytes) -> dict[str, object]:
     if len(data) != SIZE:
         raise ValueError(f"expected {SIZE} bytes, got {len(data)}")
@@ -167,27 +212,35 @@ def decode_record(data: bytes) -> dict[str, object]:
         "baseline_status_result": baseline_result,
         "restored_status_result": restored_result,
         "final_status_result": final_result,
-        "results": list(struct.unpack_from("<24i", data, 68)),
+        "results": list(struct.unpack_from("<24i", data, RESULTS_OFFSET)),
         "handles": [
-            _handle(data, 164 + index * 40)
+            _handle(data, HANDLES_OFFSET + index * HANDLE_SIZE)
             for index in range(3)
         ],
         "samples": [
-            _sample(data, 284 + index * 48)
+            _sample(data, SAMPLES_OFFSET + index * SAMPLE_SIZE)
             for index in range(3)
         ],
         "handles_hex": [
-            data[164 + index * 40 : 204 + index * 40].hex()
+            data[
+                HANDLES_OFFSET + index * HANDLE_SIZE :
+                HANDLES_OFFSET + (index + 1) * HANDLE_SIZE
+            ].hex()
             for index in range(3)
         ],
         "samples_hex": [
-            data[284 + index * 48 : 332 + index * 48].hex()
+            data[
+                SAMPLES_OFFSET + index * SAMPLE_SIZE :
+                SAMPLES_OFFSET + (index + 1) * SAMPLE_SIZE
+            ].hex()
             for index in range(3)
         ],
-        "rearm_elapsed_us": struct.unpack_from("<Q", data, 432)[0],
-        "baseline": _status(data, 440),
-        "restored": _status(data, 624),
-        "final": _status(data, 808),
+        "rearm_elapsed_us": struct.unpack_from(
+            "<Q", data, REARM_ELAPSED_OFFSET
+        )[0],
+        "baseline": _status(data, BASELINE_OFFSET),
+        "restored": _status(data, RESTORED_OFFSET),
+        "final": _status(data, FINAL_OFFSET),
         "file_sha256": hashlib.sha256(data).hexdigest(),
     }
     errors: list[str] = []
@@ -203,7 +256,9 @@ def decode_record(data: bytes) -> dict[str, object]:
         errors.append("capabilities")
     if baseline_result != 0 or not _status_idle(record["baseline"]):
         errors.append("baseline")
-    if any(data[992:1024]):
+    if any(data[SAMPLE_PADDING_OFFSET:SAMPLES_OFFSET]):
+        errors.append("layout_padding")
+    if any(data[RESERVED_OFFSET:SIZE]):
         errors.append("reserved")
     if header[5] == STATE_ATTEMPTED:
         if header[4] != 1 or header[7] != 0 or restored_result != NOT_RUN or final_result != NOT_RUN:
@@ -246,6 +301,30 @@ def decode_record(data: bytes) -> dict[str, object]:
             or restored["snapshot"] != baseline["snapshot"]
             or final["snapshot"] != baseline["snapshot"]
             or final["rearm_count"] <= baseline["rearm_count"]
+            or results[RESULT_REARM_OPEN] != 0
+            or results[RESULT_REARM_READ] != 0
+            or results[RESULT_REARM_CLOSE] != 0
+            or not _sample_matches_handle(
+                samples[1], handles[1], 0x01
+            )
+            or record["rearm_elapsed_us"] > REARM_DEADLINE_US
+            or (
+                header[6] == 1
+                and (
+                    results[RESULT_OPEN] != 0
+                    or results[RESULT_READ] != 0
+                    or results[RESULT_CLOSE] != 0
+                    or results[RESULT_AUX_CREATE] < 0
+                    or results[RESULT_AUX_START] < 0
+                    or results[RESULT_AUX_WAIT] < 0
+                    or results[RESULT_AUX_DELETE] < 0
+                    or not _busy_result(results[RESULT_AUX_ACTION])
+                    or results[RESULT_AUX_CLEANUP] != NOT_RUN
+                    or not _sample_matches_handle(
+                        samples[0], handles[0], 0x01
+                    )
+                )
+            )
             or (
                 header[6] == 3
                 and (
@@ -259,26 +338,12 @@ def decode_record(data: bytes) -> dict[str, object]:
                     or results[RESULT_NET_CLOSE] != 0
                     or results[RESULT_NET_STOP] != 0
                     or results[RESULT_POST_DISCONNECT_READ] != 0
-                    or handles[0]["owner_token"] == 0
-                    or handles[0]["generation"] == 0
-                    or samples[0]["struct_size"] != 48
-                    or samples[0]["abi_version"] != 1
-                    or samples[0]["owner_token"]
-                    != handles[0]["owner_token"]
-                    or samples[0]["generation"]
-                    != handles[0]["generation"]
-                    or samples[0]["event_code"] != 0x10
-                    or samples[0]["core_id"] != 0
-                    or samples[0]["physical_counter"] != 5
-                    or samples[2]["struct_size"] != 48
-                    or samples[2]["abi_version"] != 1
-                    or samples[2]["owner_token"]
-                    != handles[0]["owner_token"]
-                    or samples[2]["generation"]
-                    != handles[0]["generation"]
-                    or samples[2]["event_code"] != 0x10
-                    or samples[2]["core_id"] != 0
-                    or samples[2]["physical_counter"] != 5
+                    or not _sample_matches_handle(
+                        samples[0], handles[0], 0x10
+                    )
+                    or not _sample_matches_handle(
+                        samples[2], handles[0], 0x10
+                    )
                 )
             )
             or (

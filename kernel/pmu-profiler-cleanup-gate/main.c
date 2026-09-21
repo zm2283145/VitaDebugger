@@ -41,7 +41,6 @@
 #define GATE_THREAD_STACK (16u * 1024u)
 #define GATE_WAIT_US 2000000u
 #define GATE_TIMEOUT_WAIT_US 600000u
-#define GATE_REARM_DEADLINE_US UINT64_C(2000000)
 #define GATE_KILL_ARM_WINDOW_US UINT64_C(4000000)
 #define GATE_REARM_POLL_US 20000u
 #define GATE_WORK_WORDS 4096u
@@ -339,18 +338,7 @@ static int run_conflict(struct vd_pmu_cleanup_record* record)
     }
     record->results[GATE_RESULT_CLOSE] =
         vdKernelPmuProfilerClose(&record->handles[0]);
-    return record->results[GATE_RESULT_READ] == 0 &&
-        sample_valid(&record->handles[0], &record->samples[0],
-                     VD_KERNEL_PMU_PROFILER_EVENT_ICACHE_MISS) &&
-        record->results[GATE_RESULT_AUX_CREATE] >= 0 &&
-        record->results[GATE_RESULT_AUX_START] >= 0 &&
-        record->results[GATE_RESULT_AUX_WAIT] >= 0 &&
-        record->results[GATE_RESULT_AUX_DELETE] >= 0 &&
-        record->results[GATE_RESULT_AUX_ACTION] ==
-            VD_KERNEL_ERROR_PMU_PROFILER_BUSY &&
-        record->results[GATE_RESULT_AUX_CLEANUP] ==
-            VD_PMU_CLEANUP_RESULT_NOT_RUN &&
-        record->results[GATE_RESULT_CLOSE] == 0;
+    return vdPmuCleanupConflictActionPassed(record);
 }
 
 static int run_timeout(struct vd_pmu_cleanup_record* record)
@@ -543,7 +531,8 @@ static int run_rearm(struct vd_pmu_cleanup_record* record)
     record->rearm_elapsed_us =
         sceKernelGetProcessTimeWide() - started;
     return passed &&
-        record->rearm_elapsed_us <= GATE_REARM_DEADLINE_US;
+        record->rearm_elapsed_us <=
+            VD_PMU_CLEANUP_REARM_DEADLINE_US;
 }
 
 static int finish_stage(
