@@ -109,6 +109,9 @@ class ViewModelTests(unittest.TestCase):
             gui._put_latest(updates, value)
         self.assertEqual(updates.qsize(), 1)
         self.assertEqual(updates.get_nowait(), 999)
+        gui._put_latest(updates, "stale")
+        gui._discard_pending(updates)
+        self.assertTrue(updates.empty())
 
 
 class ControllerTests(unittest.TestCase):

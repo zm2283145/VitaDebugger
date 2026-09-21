@@ -828,6 +828,29 @@ def _thread_generation_for_event(
     return matches[0] if matches else None
 
 
+def _wire_thread_generations(
+        capture: TraceCapture) -> tuple[ThreadGeneration, ...]:
+    grouped: dict[int, list[ThreadIdentity]] = collections.defaultdict(list)
+    for identity in capture.thread_identities:
+        grouped[identity.thread_id].append(identity)
+    generations: list[ThreadGeneration] = []
+    for thread_id, identities in grouped.items():
+        for index, identity in enumerate(identities):
+            last_event_index = (
+                identities[index + 1].first_event_index - 1
+                if index + 1 < len(identities)
+                else len(capture.events) - 1)
+            if last_event_index < identity.first_event_index:
+                continue
+            name = (capture.resolve_name(identity.name_id)
+                    if identity.name_id else
+                    f"tid-0x{thread_id:08x}")
+            generations.append(ThreadGeneration(
+                thread_id, identity.generation, name,
+                identity.first_event_index, last_event_index))
+    return tuple(generations)
+
+
 def analyze_run_clocks(
         capture: TraceCapture,
         experiment: RunClocksExperiment | None = None,
@@ -835,7 +858,9 @@ def analyze_run_clocks(
     """Preserve runClocks as an unknown-unit raw counter and derive safe deltas."""
     counter_bits = experiment.counter_bits if experiment else None
     max_wrap_delta = experiment.max_wrap_delta_raw if experiment else None
-    threads = experiment.threads if experiment else ()
+    using_experiment_threads = bool(experiment and experiment.threads)
+    threads = (experiment.threads if using_experiment_threads else
+               _wire_thread_generations(capture))
     explicit_state: dict[
         tuple[int, int], tuple[int, int, int, int, int]] = {}
     inferred_state: dict[int, tuple[int, int, int, int, int]] = {}
@@ -861,7 +886,9 @@ def analyze_run_clocks(
         if declared is not None:
             generation = declared.generation
             label = declared.label
-            identity_source = "experiment_metadata"
+            identity_source = (
+                "experiment_metadata" if using_experiment_threads
+                else "wire_v2_metadata")
             state_key = (event.thread_id, generation)
             previous = explicit_state.get(state_key)
         else:

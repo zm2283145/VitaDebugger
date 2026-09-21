@@ -1,4 +1,5 @@
 import contextlib
+import dataclasses
 import io
 import json
 import queue
@@ -638,6 +639,28 @@ class DecodeTests(unittest.TestCase):
         self.assertIsNone(samples[2]["delta_raw"])
         self.assertEqual(samples[2]["thread_generation"], 1)
         self.assertEqual(samples[2]["thread_label"], "worker-b")
+
+    def test_wire_thread_generation_breaks_run_clocks_tid_reuse(self):
+        capture = trace.decode_capture(make_run_clocks_capture([
+            (1000, 10, 0x40010003),
+            (2000, 20, 0x40010003),
+            (3000, 30, 0x40010003),
+        ]))
+        capture = dataclasses.replace(
+            capture,
+            thread_identities=(
+                trace.ThreadIdentity(0x40010003, 4, 0x104, 0, 0),
+                trace.ThreadIdentity(0x40010003, 5, 0x105, 0, 2),
+            ))
+        samples = trace.analyze_run_clocks(capture)["samples"]
+        self.assertEqual(
+            [sample["thread_generation"] for sample in samples],
+            [4, 4, 5])
+        self.assertEqual(samples[1]["delta_raw"], 10)
+        self.assertEqual(samples[2]["delta_status"], "first_observation")
+        self.assertIsNone(samples[2]["delta_raw"])
+        self.assertEqual(samples[2]["identity_source"],
+                         "wire_v2_metadata")
 
     def test_json_and_perfetto_keep_run_clocks_raw(self):
         capture = trace.decode_capture(make_run_clocks_capture([

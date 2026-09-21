@@ -29,6 +29,14 @@ def _put_latest(target: queue.Queue[object], value: object) -> None:
         target.put_nowait(value)
 
 
+def _discard_pending(target: queue.Queue[object]) -> None:
+    while True:
+        try:
+            target.get_nowait()
+        except queue.Empty:
+            return
+
+
 class ProfilerApp:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
@@ -310,6 +318,7 @@ class ProfilerApp:
         if not future.done():
             self.root.after(50, self._poll_task, future, on_success)
             return
+        _discard_pending(self.live_updates)
         self.busy = False
         self.cancellable = False
         self._set_action_state()

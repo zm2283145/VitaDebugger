@@ -118,6 +118,10 @@ establishes it. With unknown effective width, every decrease is
 `reset_or_reuse`, produces no delta, starts a new inferred generation when no
 explicit generation covers it, and increments the counter epoch. This prevents
 a reset or reused thread ID from becoming a huge synthetic delta.
+Wire-v2 thread-generation declarations provide these explicit boundaries when
+no run-clocks experiment supplies an overriding thread-range map. The first
+sample in each supplied generation intentionally has no cross-generation
+delta.
 
 The strict report rejects nonzero `producer_dropped_events` or
 `sink_lost_events`. Read those values from `vp_get_stats()` and
