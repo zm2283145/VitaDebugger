@@ -1,0 +1,53 @@
+{
+  "schema": 1,
+  "tested_at": "2026-09-21T00:19:49.1950178Z",
+  "firmware": "3.65",
+  "device_class": "retail-handheld",
+  "title_id": "SLRS00001",
+  "source_commit": "58a8274e304170c6f7fab1d721c3bcaffb98c6a4",
+  "artifacts": {
+    "vpk_sha256": "59b016cb5cdbf37ec03db3d5adaeed3a478e30b671e48138d5f260461bacf741",
+    "elf_sha256": "4e2e601e5f2830daf42b9d96f87b361e9d0c6801f862d7f0990ba0c60f4e8546",
+    "eboot_sha256": "f9e42d352a7c5a0d40bad2235352ef736fb10ef8733eae56bec871976291986e",
+    "freeze_manifest_sha256": "0255fba41f9b7b068e564851c7af0f3efe29274ea34a4a03580060cb7ac20cf2",
+    "startup_runner_sha256": "ae77923b5ba6891cfe22d4b238b0a96c34e9a47d197a04ae8b113cd1a79a56cc",
+    "kubridge_source_commit": "417ddde9a744eba98d769382c1c1372b8e119139",
+    "kubridge_stub_sha256": "fe05a117421b375d77bdc5102d5753f5dcf300e33176222688e490f2d03f5796"
+  },
+  "deployment": {
+    "job": "6f3fd3526c657710c2c1286c8b837ada",
+    "signed_manifest_sha256": "e28fc84c124db246aee46e60eb1e081222c28854539663366f55d60d2752eb27",
+    "result": "success",
+    "installed_identity": "pass"
+  },
+  "endpoint_telemetry": {
+    "route_address": "10.1.1.217",
+    "effective_bound_address": "0.0.0.0",
+    "effective_bound_port": 1235,
+    "getsockname_result": 0,
+    "self_probe_target": "10.1.1.217:1235",
+    "self_probe_result": -116,
+    "self_probe_received": false,
+    "self_probe_failed": true,
+    "poll_count": 50,
+    "raw_receive_result": -1,
+    "errno": 11,
+    "socket_descriptor": 4,
+    "failed_stage_mask": 0
+  },
+  "outcome": "hard-stop-before-host-udp-or-rsp",
+  "rsp_cases_run": [],
+  "interpretation": "The effective endpoint and route-selected address were correct, but a bounded peer-verified datagram sent on-device to the Vita's own route address timed out before any host UDP request. This localizes the fault to the admission socket binding/delivery setup. The bind sockaddr omitted Vita's required sin_len field. Earlier bind and getsockname success did not prove packet delivery; the self-probe now supports adding that single field.",
+  "precise_local_fix": "Set sockaddr_in.sin_len to sizeof(address) on the admission UDP bind address. Preserve the route-probe baseline. Make a failed self-probe fail the host startup gate.",
+  "sealed_evidence_manifest_sha256": "8078a14ce54f7847ee32cdc48d1f7c88c9de0689f756bb1764dd05557ead50fc",
+  "final_state": {
+    "livearea_wait_seconds": 3,
+    "rsp_port_1234_open": false,
+    "diagnostic_port_1235_responding": false,
+    "test_title_running": false,
+    "kernel_configuration_changed": false,
+    "rebooted": false,
+    "device_ownership_released": true
+  },
+  "remaining_gate": "Validate the precise sin_len fix locally, freeze it, and perform one evidence-justified startup confirmation before resuming RSP."
+}

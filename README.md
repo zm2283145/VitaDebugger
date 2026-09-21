@@ -704,11 +704,15 @@ comparator. The detailed record is
   the unexplained boundary to the admission receive path. A follow-up retained
   100 live polls on descriptor 4, each returning `-1`/errno 11, while none of
   40 valid host datagrams reached parsing and no response was attempted.
-  Effective-bind, route-address, and on-device self-datagram telemetry remain
-  necessary before a local fix is justified. See
+  The next diagnostic proved the route-selected address was `10.1.1.217` and
+  the effective bind was `0.0.0.0:1235`, but a peer-verified on-device
+  datagram to `10.1.1.217:1235` timed out. This supports the precise
+  diagnostic-fixture fix of setting Vita's required `sockaddr_in.sin_len` on
+  the admission bind; production RSP behavior is unchanged. See
   [the confirmation record](docs/hardware/rsp-second-admission-confirmation-3.65.json)
   [the startup diagnostic record](docs/hardware/rsp-startup-diagnostic-3.65.json),
-  and [the poll diagnostic record](docs/hardware/rsp-poll-diagnostic-3.65.json).
+  [the poll diagnostic record](docs/hardware/rsp-poll-diagnostic-3.65.json),
+  and [the endpoint diagnostic record](docs/hardware/rsp-endpoint-diagnostic-3.65.json).
 
 ## Documentation map
 
