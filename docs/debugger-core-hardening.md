@@ -82,13 +82,24 @@ non-closing state still match after reacquiring the debugger lock.
 
 A successful TCP `accept` is only a candidate, not a debugger generation.
 The service leaves the target running and waits for one complete,
-checksum-valid, nonempty RSP frame with a fixed two-second bound. It uses
-`MSG_PEEK`, so an admitted GDB client's first packet remains queued for the
-normal receiver and acknowledgement path. Silent health checks, port scans,
-HTTP probes, malformed frames, and peers which disconnect before that proof
-are closed while the listening socket remains available for the next client.
-Shutdown publishes and cancels the candidate descriptor just like connected
-I/O, so admission cannot add a new unbounded wait.
+checksum-valid, nonempty RSP frame within a bounded, nominally two-second
+admission window. The implementation performs up to 2,000 one-millisecond
+polls; scheduling and network-call overhead can make elapsed wall-clock time
+longer. It uses `MSG_PEEK`, so an admitted GDB client's first packet remains
+queued for the normal receiver and acknowledgement path. Silent health checks,
+port scans, HTTP probes, malformed frames, and peers which disconnect before
+that proof are closed while the listening socket remains available for the
+next client. Shutdown publishes and cancels the candidate descriptor just like
+connected I/O, so admission cannot add a new unbounded wait.
+
+This admission boundary passed on retail 3.65 hardware. Seven silent, HTTP,
+partial, and bad-checksum candidates were rejected without consuming the
+listener; three later GDB cycles completed negotiation, Ctrl-C, clean detach,
+and reconnect. Killing the title with a silent candidate pending reset that
+socket within 155.2 ms. Vita title relaunch still requires a short lifecycle
+settle: an immediate relaunch raced teardown, while a two-second delay restored
+the listener and completed another GDB cycle. See
+[`debugger-client-admission-retail-3.65.json`](hardware/debugger-client-admission-retail-3.65.json).
 
 A completed request also owns an explicit payload-borrow lifetime. Ordinary
 replies discard the request and release that lifetime before `send_packet()`
@@ -401,12 +412,12 @@ The focused host suite covers:
 
 1. Repeat the host malformed/escaped/exact-maximum RSP matrix over a real Vita
    connection, including disconnects during `m`, `M`, `g`, `p`, `G`, and `P`.
-2. Verify client admission, candidate cancellation, Ctrl-C, detach, reconnect,
-   connected receive/send cancellation, whole-protocol exclusion, an
-   intentional connected HUP, and the host-modeled 100-generation alternating
-   ACK/no-ack stopped-RST recovery sequence on Vita. Treat title relaunch as a
-   separate lifecycle operation and wait two seconds after kill before
-   relaunch.
+2. Client admission, candidate cancellation, Ctrl-C, detach, and reconnect have
+   passed on Vita. Still verify connected receive/send cancellation,
+   whole-protocol exclusion, an intentional connected HUP, and the host-modeled
+   100-generation alternating ACK/no-ack stopped-RST recovery sequence on Vita.
+   Treat title relaunch as a separate lifecycle operation and wait two seconds
+   after kill before relaunch.
 3. Run the deterministic reconnect/fault/console/shutdown matrix for an
    equivalent long-duration window on retail hardware and confirm bounded
    cancellation latency, no launch lock, no stale stopped target, and no

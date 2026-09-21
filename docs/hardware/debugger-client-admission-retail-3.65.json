@@ -1,0 +1,72 @@
+{
+  "schema": 1,
+  "tested_at": "2026-09-20T03:23:00.8168746Z",
+  "firmware": "3.65",
+  "device_class": "retail-handheld",
+  "source_commit": "1e58cae0765b6b222c61a2105817ae715ef10c39",
+  "title_id": "SLRS00001",
+  "artifacts": {
+    "vpk_sha256": "DDE6CD06A3E7AEB2E38664AFEAFC296B7C323F05D84B6FC2C8D052C40F64738D",
+    "elf_sha256": "C8D3E2C3524ADE96B038EFC3E86391ABA968547939927EA6D63FE375337D1C25"
+  },
+  "probe_results": [
+    {
+      "case": "silent",
+      "elapsed_ms": 3384.7,
+      "closed_by_target": true
+    },
+    {
+      "case": "http",
+      "elapsed_ms": 185.7,
+      "closed_by_target": true
+    },
+    {
+      "case": "bad_checksum",
+      "elapsed_ms": 70.7,
+      "closed_by_target": true
+    },
+    {
+      "case": "partial_frame",
+      "elapsed_ms": 2707.3,
+      "closed_by_target": true
+    },
+    {
+      "case": "http_repeat_1",
+      "elapsed_ms": 186.0,
+      "closed_by_target": true
+    },
+    {
+      "case": "bad_checksum_repeat",
+      "elapsed_ms": 131.4,
+      "closed_by_target": true
+    },
+    {
+      "case": "http_repeat_2",
+      "elapsed_ms": 55.5,
+      "closed_by_target": true
+    }
+  ],
+  "gdb": {
+    "cycles": 3,
+    "q_supported": true,
+    "initial_stop": true,
+    "ctrl_c_stop": true,
+    "clean_detach": true,
+    "reconnect_after_probes": true,
+    "reconnect_after_shutdown": true
+  },
+  "pending_candidate_shutdown": {
+    "kill_reply": "Killed.",
+    "kill_ms": 45.1,
+    "candidate_close": "reset",
+    "candidate_close_ms_after_kill": 155.2,
+    "relaunch_settle_ms": 2000,
+    "launch_reply": "Launched.",
+    "pass": true
+  },
+  "notes": [
+    "A launch requested immediately after title kill raced Vita title teardown and did not restore the listener.",
+    "Waiting two seconds after title kill before relaunch produced a reusable listener and a successful GDB cycle."
+  ],
+  "pass": true
+}
