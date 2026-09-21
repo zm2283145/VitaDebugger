@@ -52,6 +52,7 @@ typedef int (*vd_endpoint_send_fn)(void* user, const uint8_t* input,
                                    size_t size, size_t* sent);
 typedef uint64_t (*vd_endpoint_clock_fn)(void* user);
 typedef void (*vd_endpoint_yield_fn)(void* user);
+typedef int (*vd_endpoint_progress_fn)(void* user);
 
 struct vd_endpoint_io {
     void* user;
@@ -59,6 +60,7 @@ struct vd_endpoint_io {
     vd_endpoint_send_fn send;
     vd_endpoint_clock_fn now_ms;
     vd_endpoint_yield_fn yield;
+    vd_endpoint_progress_fn progress;
 };
 
 struct vd_endpoint_receiver {

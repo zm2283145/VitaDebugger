@@ -29,12 +29,15 @@
 #define GATE_CLOSE_RETRIES 8u
 #define GATE_INVALID_SOCKET (-1)
 
+struct gate_app;
+
 struct gate_transport {
     int listener;
     int client;
     int screen;
     uint8_t screen_host[4];
     uint8_t control_bind[4];
+    struct gate_app* app;
 };
 
 struct gate_app {
@@ -53,6 +56,7 @@ struct gate_app {
     uint32_t client_accepted;
     uint32_t net_module_loaded;
     uint32_t net_initialized;
+    uint32_t shutdown_requested;
     int terminal_error;
 };
 
@@ -84,6 +88,33 @@ static void gate_yield(void* user)
 {
     (void)user;
     sceKernelDelayThread(1000u);
+}
+
+static int gate_progress(void* user)
+{
+    struct gate_transport* transport =
+        (struct gate_transport*)user;
+    struct gate_app* app;
+    SceCtrlData pad;
+    int result;
+
+    if (transport == NULL || transport->app == NULL)
+        return VD_ENDPOINT_IO_ERROR;
+    app = transport->app;
+    memset(&pad, 0, sizeof(pad));
+    if (sceCtrlPeekBufferPositive(0, &pad, 1) > 0 &&
+        (pad.buttons & (SCE_CTRL_SELECT | SCE_CTRL_START)) ==
+            (SCE_CTRL_SELECT | SCE_CTRL_START)) {
+        app->shutdown_requested = 1u;
+        return VD_ENDPOINT_IO_ERROR;
+    }
+    if (app->service_initialized == 0u)
+        return VD_ENDPOINT_IO_OK;
+    result = vd_companion_service_tick(
+        &app->service, gate_now_ms(transport));
+    return result == VD_COMPANION_OK
+               ? VD_ENDPOINT_IO_OK
+               : VD_ENDPOINT_IO_ERROR;
 }
 
 static int gate_close_socket(int* socket_id)
@@ -233,6 +264,7 @@ static int gate_control_send(void* user, const uint8_t* data,
     io.send = gate_io_send;
     io.now_ms = gate_now_ms;
     io.yield = gate_yield;
+    io.progress = gate_progress;
     return vd_endpoint_send_all(
                &io, data, size,
                VD_ENDPOINT_RECEIVE_DEADLINE_MS) == 0
@@ -272,6 +304,7 @@ static int gate_screen_write(void* user, const uint8_t* data,
     io.send = gate_screen_io_send;
     io.now_ms = gate_now_ms;
     io.yield = gate_yield;
+    io.progress = gate_progress;
     return vd_endpoint_send_all(
                &io, data, size,
                VD_ENDPOINT_RECEIVE_DEADLINE_MS) == 0
@@ -798,6 +831,7 @@ int main(void)
     app.transport.listener = GATE_INVALID_SOCKET;
     app.transport.client = GATE_INVALID_SOCKET;
     app.transport.screen = GATE_INVALID_SOCKET;
+    app.transport.app = &app;
     (void)sceCtrlSetSamplingMode(SCE_CTRL_MODE_ANALOG);
     if (gate_allocate_frames(&app) != 0) {
         gate_cleanup(&app);
@@ -826,6 +860,8 @@ int main(void)
         if ((pad.buttons &
              (SCE_CTRL_SELECT | SCE_CTRL_START)) ==
             (SCE_CTRL_SELECT | SCE_CTRL_START))
+            running = 0;
+        if (app.shutdown_requested != 0u)
             running = 0;
 
         if (app.terminal_error == 0) {

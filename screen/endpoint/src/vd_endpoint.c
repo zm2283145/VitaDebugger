@@ -65,6 +65,9 @@ int vd_endpoint_config_parse(struct vd_endpoint_config* config,
     struct vd_endpoint_config parsed;
     uint64_t capabilities;
     uint64_t consented_capabilities;
+    uint32_t expected_mutation_consent;
+    uint32_t expected_record_consent;
+    uint32_t expected_playback_consent;
     size_t index;
 
     if (config == NULL || data == NULL)
@@ -103,16 +106,22 @@ int vd_endpoint_config_parse(struct vd_endpoint_config* config,
     memcpy(parsed.bind_ipv4, data + 120u,
            sizeof(parsed.bind_ipv4));
 
-    if ((((capabilities & (VD_COMPANION_CAP_APP_INPUT |
-                           VD_COMPANION_CAP_INPUT_PLAYBACK)) != 0u) !=
-         (parsed.mutation_consent ==
-          VD_COMPANION_MUTATION_CONSENT)) ||
-        (((capabilities & VD_COMPANION_CAP_INPUT_RECORD) != 0u) !=
-         (parsed.record_consent ==
-          VD_INPUT_TRACE_EXPLICIT_RECORD_CONSENT)) ||
-        (((capabilities & VD_COMPANION_CAP_INPUT_PLAYBACK) != 0u) !=
-         (parsed.playback_consent ==
-          VD_INPUT_TRACE_EXPLICIT_PLAYBACK_CONSENT)) ||
+    expected_mutation_consent =
+        (capabilities & (VD_COMPANION_CAP_APP_INPUT |
+                         VD_COMPANION_CAP_INPUT_PLAYBACK)) != 0u
+            ? VD_COMPANION_MUTATION_CONSENT
+            : 0u;
+    expected_record_consent =
+        (capabilities & VD_COMPANION_CAP_INPUT_RECORD) != 0u
+            ? VD_INPUT_TRACE_EXPLICIT_RECORD_CONSENT
+            : 0u;
+    expected_playback_consent =
+        (capabilities & VD_COMPANION_CAP_INPUT_PLAYBACK) != 0u
+            ? VD_INPUT_TRACE_EXPLICIT_PLAYBACK_CONSENT
+            : 0u;
+    if (parsed.mutation_consent != expected_mutation_consent ||
+        parsed.record_consent != expected_record_consent ||
+        parsed.playback_consent != expected_playback_consent ||
         parsed.control_port != VD_COMPANION_DEFAULT_CONTROL_PORT ||
         parsed.screen_port != VD_COMPANION_DEFAULT_SCREEN_PORT ||
         !vd_nonzero(parsed.control_secret,
@@ -242,8 +251,15 @@ int vd_endpoint_send_all(const struct vd_endpoint_io* io,
     deadline += deadline_ms;
     while (offset < size) {
         size_t sent = 0u;
-        const int result =
-            io->send(io->user, data + offset, size - offset, &sent);
+        int result;
+
+        if (io->progress != NULL &&
+            io->progress(io->user) != VD_ENDPOINT_IO_OK)
+            return VD_ENDPOINT_ERROR_IO;
+        if (vd_deadline_expired(io->now_ms(io->user), deadline))
+            return VD_ENDPOINT_ERROR_DEADLINE;
+        result = io->send(
+            io->user, data + offset, size - offset, &sent);
         if (result == VD_ENDPOINT_IO_OK) {
             if (sent == 0u || sent > size - offset)
                 return VD_ENDPOINT_ERROR_IO;
@@ -252,8 +268,6 @@ int vd_endpoint_send_all(const struct vd_endpoint_io* io,
         }
         if (result != VD_ENDPOINT_IO_AGAIN)
             return VD_ENDPOINT_ERROR_IO;
-        if (vd_deadline_expired(io->now_ms(io->user), deadline))
-            return VD_ENDPOINT_ERROR_DEADLINE;
         if (io->yield != NULL)
             io->yield(io->user);
     }

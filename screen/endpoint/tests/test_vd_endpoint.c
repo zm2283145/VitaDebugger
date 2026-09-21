@@ -24,6 +24,13 @@ struct io_fixture {
     int receive_result;
     int send_result;
     unsigned int yields;
+    unsigned int progress_calls;
+    unsigned int neutralizations;
+    uint32_t send_advance_ms;
+    uint32_t persistent_again;
+    uint32_t input_active;
+    uint64_t input_lease_ms;
+    uint64_t cancel_at_ms;
 };
 
 static void store_u16(uint8_t* output, uint16_t value)
@@ -113,6 +120,7 @@ static int send_fake(void* user, const uint8_t* input, size_t size,
     memcpy(fixture->output + fixture->output_size, input, amount);
     fixture->output_size += amount;
     *sent = amount;
+    fixture->now += fixture->send_advance_ms;
     return VD_ENDPOINT_IO_OK;
 }
 
@@ -126,7 +134,24 @@ static void yield_fake(void* user)
     struct io_fixture* fixture = (struct io_fixture*)user;
     ++fixture->yields;
     ++fixture->now;
-    fixture->send_result = VD_ENDPOINT_IO_OK;
+    if (fixture->persistent_again == 0u)
+        fixture->send_result = VD_ENDPOINT_IO_OK;
+}
+
+static int progress_fake(void* user)
+{
+    struct io_fixture* fixture = (struct io_fixture*)user;
+
+    ++fixture->progress_calls;
+    if (fixture->input_active != 0u &&
+        fixture->now >= fixture->input_lease_ms) {
+        fixture->input_active = 0u;
+        ++fixture->neutralizations;
+    }
+    if (fixture->cancel_at_ms != 0u &&
+        fixture->now >= fixture->cancel_at_ms)
+        return VD_ENDPOINT_IO_ERROR;
+    return VD_ENDPOINT_IO_OK;
 }
 
 static int service_bind(void* user, uint32_t scope, uint16_t port)
@@ -182,6 +207,18 @@ static void test_config(void)
               VD_INPUT_TRACE_EXPLICIT_RECORD_CONSENT);
     CHECK(vd_endpoint_config_parse(&config, data, sizeof(data)) != 0,
           "unused recording consent is rejected");
+    store_u32(data + 20u, 0u);
+    store_u32(data + 16u, 1u);
+    CHECK(vd_endpoint_config_parse(&config, data, sizeof(data)) != 0,
+          "arbitrary disabled mutation consent is rejected");
+    store_u32(data + 16u, 0u);
+    store_u32(data + 20u, 1u);
+    CHECK(vd_endpoint_config_parse(&config, data, sizeof(data)) != 0,
+          "arbitrary disabled recording consent is rejected");
+    store_u32(data + 20u, 0u);
+    store_u32(data + 24u, 1u);
+    CHECK(vd_endpoint_config_parse(&config, data, sizeof(data)) != 0,
+          "arbitrary disabled playback consent is rejected");
     valid_config(data);
 
     for (index = 0u; index < sizeof(data); ++index) {
@@ -352,6 +389,42 @@ static void test_send(void)
     CHECK(vd_endpoint_send_all(&io, data, sizeof(data), 5u) == 0 &&
               fixture.yields == 1u,
           "would-block send retries");
+
+    memset(&fixture, 0, sizeof(fixture));
+    fixture.chunk = 2u;
+    fixture.send_result = VD_ENDPOINT_IO_AGAIN;
+    fixture.persistent_again = 1u;
+    fixture.input_active = 1u;
+    fixture.input_lease_ms = 3u;
+    io.user = &fixture;
+    io.progress = progress_fake;
+    CHECK(vd_endpoint_send_all(&io, data, sizeof(data), 5u) ==
+              VD_ENDPOINT_ERROR_DEADLINE &&
+              fixture.neutralizations == 1u &&
+              fixture.input_active == 0u &&
+              fixture.now == 5u,
+          "backpressure services lease watchdog before deadline");
+
+    memset(&fixture, 0, sizeof(fixture));
+    fixture.chunk = 1u;
+    fixture.send_advance_ms = 1u;
+    fixture.input_active = 1u;
+    fixture.input_lease_ms = 2u;
+    io.user = &fixture;
+    CHECK(vd_endpoint_send_all(&io, data, sizeof(data), 10u) == 0 &&
+              fixture.neutralizations == 1u &&
+              fixture.progress_calls == sizeof(data),
+          "short successful writes service lease watchdog");
+
+    memset(&fixture, 0, sizeof(fixture));
+    fixture.chunk = 1u;
+    fixture.send_advance_ms = 1u;
+    fixture.cancel_at_ms = 2u;
+    io.user = &fixture;
+    CHECK(vd_endpoint_send_all(&io, data, sizeof(data), 10u) ==
+              VD_ENDPOINT_ERROR_IO &&
+              fixture.output_size == 2u,
+          "progress cancellation bounds shutdown during short writes");
 
     memset(&fixture, 0, sizeof(fixture));
     fixture.chunk = 2u;
