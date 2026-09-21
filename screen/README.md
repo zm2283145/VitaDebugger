@@ -86,7 +86,9 @@ admission preface.
 Its required connect callback receives the already validated network scope
 and screen port; the callback must use those exact values and cannot retain a
 separately configured fallback endpoint. The close callback is also invoked
-after a failed connection attempt and must release partial state.
+after a failed connection attempt and must release partial state. Failed
+control or screen closes retain ownership, block reinitialization, and remain
+retryable instead of being cleared optimistically.
 
 The screen-only call pattern below documents the underlying framebuffer
 contract. Companion callers supply the same sources through
@@ -253,7 +255,10 @@ application callback on completion or failure. See
 [input trace v1](docs/input-trace-v1.md).
 If neutralization itself fails, the service retains active/cleanup-pending
 quarantine state, surfaces `VD_COMPANION_ERROR_INPUT`, and permits an explicit
-local retry; it never clears the state or reports successful cleanup.
+local retry; it never clears the state or reports successful cleanup. An
+authenticated input failure carries the exact 72-byte terminal status before
+close, and a failed control close retains a STATUS-only authenticated path
+until cleanup succeeds.
 
 The deterministic consumer entry point verifies the atomic manifest and image:
 

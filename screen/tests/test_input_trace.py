@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import dataclasses
+import errno
 import struct
 import tempfile
 import unittest
 import zlib
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from unittest import mock
 
 from vdscreen.trace import (
     InputState,
@@ -19,6 +22,7 @@ from vdscreen.trace import (
     TraceError,
     TraceIdentity,
     TraceReplayCancelled,
+    _fsync_parent_directory,
     replay_trace,
     save_trace,
     trace_listing,
@@ -89,10 +93,30 @@ class InputTraceTests(unittest.TestCase):
         self.assertEqual(listing["events"][1]["kind"], "checkpoint")
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / "saved.vdtrace"
-            saved = save_trace(data, output, expected_identity=IDENTITY)
+            with mock.patch(
+                    "vdscreen.trace._fsync_parent_directory",
+                    wraps=_fsync_parent_directory) as fsync_directory:
+                saved = save_trace(
+                    data, output, expected_identity=IDENTITY)
+            fsync_directory.assert_called_once_with(output.parent)
             self.assertEqual(saved, trace)
             self.assertEqual(output.read_bytes(), data)
             self.assertFalse((Path(directory) / "saved.vdtrace.tmp").exists())
+
+    def test_parent_directory_fsync_has_bounded_platform_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with mock.patch(
+                    "vdscreen.trace.os.open",
+                    side_effect=OSError(
+                        errno.EINVAL, "directory fsync unsupported")):
+                self.assertFalse(_fsync_parent_directory(root))
+            with mock.patch(
+                    "vdscreen.trace.os.open",
+                    side_effect=OSError(
+                        errno.EIO, "directory fsync failed")):
+                with self.assertRaises(OSError):
+                    _fsync_parent_directory(root)
 
     def test_wrong_identity_checksum_truncation_and_nonmonotonic_fail(self) -> None:
         data = _trace()
@@ -159,6 +183,7 @@ class InputTraceTests(unittest.TestCase):
         applied: list[InputState] = []
         stats = replay_trace(
             trace, lambda state: applied.append(state),
+            expected_identity=IDENTITY,
             now=clock.now, sleep=clock.sleep,
         )
         self.assertEqual(stats.events_dispatched, 1)
@@ -174,6 +199,7 @@ class InputTraceTests(unittest.TestCase):
         with self.assertRaises(TraceReplayCancelled):
             replay_trace(
                 trace, lambda state: applied.append(state),
+                expected_identity=IDENTITY,
                 cancelled=lambda: True,
             )
         self.assertEqual(applied, [NEUTRAL_INPUT])
@@ -186,6 +212,7 @@ class InputTraceTests(unittest.TestCase):
                     applied.append(state),
                     -1 if state != NEUTRAL_INPUT else 0,
                 )[1],
+                expected_identity=IDENTITY,
             )
         self.assertEqual(applied[-1], NEUTRAL_INPUT)
 
@@ -194,6 +221,7 @@ class InputTraceTests(unittest.TestCase):
             replay_trace(
                 trace,
                 lambda state: (applied.append(state), -1)[1],
+                expected_identity=IDENTITY,
             )
         self.assertIn("callback failed", str(raised.exception.primary_error))
         self.assertIn("neutral input release failed",
@@ -209,6 +237,7 @@ class InputTraceTests(unittest.TestCase):
         with self.assertRaisesRegex(TraceError, "drift"):
             replay_trace(
                 trace, lambda state: applied.append(state),
+                expected_identity=IDENTITY,
                 now=clock.now, sleep=oversleep,
                 max_drift_seconds=0.1,
             )
@@ -218,7 +247,29 @@ class InputTraceTests(unittest.TestCase):
         trace = verify_trace(_trace(end_reason=2))
         applied: list[InputState] = []
         with self.assertRaisesRegex(TraceError, "complete"):
-            replay_trace(trace, lambda state: applied.append(state))
+            replay_trace(
+                trace, lambda state: applied.append(state),
+                expected_identity=IDENTITY)
+        self.assertEqual(applied, [])
+
+    def test_replay_revalidates_bytes_and_live_identity(self) -> None:
+        trace = verify_trace(_trace())
+        applied: list[InputState] = []
+        stale = dataclasses.replace(
+            IDENTITY, process_generation=IDENTITY.process_generation + 1)
+        with self.assertRaisesRegex(TraceError, "identity"):
+            replay_trace(
+                trace, lambda state: applied.append(state),
+                expected_identity=stale)
+        self.assertEqual(applied, [])
+
+        malformed = bytearray(trace.data)
+        malformed[TRACE_HEADER_SIZE + 24] ^= 1
+        constructed = dataclasses.replace(trace, data=bytes(malformed))
+        with self.assertRaisesRegex(TraceError, "checksum"):
+            replay_trace(
+                constructed, lambda state: applied.append(state),
+                expected_identity=IDENTITY)
         self.assertEqual(applied, [])
 
     def test_atomic_save_owns_only_unique_temps(self) -> None:

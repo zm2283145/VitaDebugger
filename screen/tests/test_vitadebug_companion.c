@@ -22,6 +22,7 @@ struct fixture {
     uint32_t bound_scope;
     uint16_t bound_port;
     int close_calls;
+    int close_fail_remaining;
     int input_calls;
     int input_fail_call;
     int input_fail_remaining;
@@ -96,6 +97,10 @@ static int close_fake(void* user)
 {
     struct fixture* fixture = (struct fixture*)user;
     ++fixture->close_calls;
+    if (fixture->close_fail_remaining > 0) {
+        --fixture->close_fail_remaining;
+        return -1;
+    }
     return 0;
 }
 
@@ -614,13 +619,24 @@ static void test_integrated_screen(void)
     for (index = 0u; index < sizeof(screen.auth_token); ++index)
         screen.auth_token[index] = (uint8_t)(0xa0u + index);
     fixture.screen_connect_result = -1;
+    fixture.close_fail_remaining = 1;
     CHECK(vd_companion_service_init(&service, &config) ==
-              VD_COMPANION_ERROR_CONNECT &&
+              VD_COMPANION_ERROR_IO &&
               fixture.bind_calls == 1 &&
               fixture.close_calls == 1 &&
               fixture.screen_connect_calls == 1 &&
-              fixture.screen_close_calls == 1,
-          "failed screen connect cleans partial and control transports");
+              fixture.screen_close_calls == 1 &&
+              service.last_error == VD_COMPANION_ERROR_CONNECT &&
+              service.cleanup_error == VD_COMPANION_ERROR_IO &&
+              service.bound != 0u,
+          "screen-connect failure preserves its control-close error");
+    CHECK(vd_companion_service_init(&service, &config) ==
+              VD_COMPANION_ERROR_STATE &&
+              service.bound != 0u,
+          "pending control ownership blocks unsafe reinitialization");
+    CHECK(vd_companion_service_close(&service) == VD_COMPANION_OK &&
+              fixture.close_calls == 2 && service.bound == 0u,
+          "shutdown retries and releases pending control ownership");
     fixture.screen_connect_result = 0;
     CHECK(vd_companion_service_init(&service, &config) ==
               VD_COMPANION_OK &&
@@ -634,7 +650,8 @@ static void test_integrated_screen(void)
                   VD_COMPANION_OK,
           "integrated stream begins and submits registered display buffer");
     CHECK(vd_companion_service_close(&service) == VD_COMPANION_OK &&
-              fixture.screen_close_calls == 2,
+              fixture.screen_close_calls == 2 &&
+              fixture.close_calls == 3,
           "screen transport closes with the companion");
 }
 
@@ -867,7 +884,8 @@ static void test_protocol_abort_neutral_retry_status(void)
               status.state == VD_COMPANION_STATE_FAILED &&
               status.input_active != 0u &&
               status.input_cleanup_pending != 0u &&
-              status.last_error == VD_COMPANION_ERROR_INPUT &&
+              status.last_error == VD_COMPANION_ERROR_AUTH &&
+              status.cleanup_error == VD_COMPANION_ERROR_INPUT &&
               fixture.close_calls == 1,
           "protocol abort exposes failed neutral cleanup in local status");
     CHECK(vd_companion_service_init(&service, &config) ==
@@ -884,6 +902,111 @@ static void test_protocol_abort_neutral_retry_status(void)
           "protocol abort neutral cleanup remains retryable");
 }
 
+static void test_terminal_status_and_control_close_retry(void)
+{
+    uint8_t record[VD_COMPANION_MAX_RECORD];
+    size_t record_size = 0u;
+    const uint64_t capabilities = VD_COMPANION_CAP_STATUS;
+    struct vd_companion_config config;
+    struct vd_companion_service service = {0};
+    struct vd_companion_status status;
+    struct fixture fixture = {0};
+
+    configure(&config, &fixture);
+    config.enabled_capabilities = capabilities;
+    config.mutation_consent = 0u;
+    config.apply_input = NULL;
+    CHECK(vd_companion_service_init(&service, &config) ==
+              VD_COMPANION_OK &&
+              request(&service, &config, VD_COMPANION_MESSAGE_HELLO, 1u,
+                      11000u, capabilities, NULL, 0u, record,
+                      &record_size) == VD_COMPANION_OK,
+          "terminal-status fixture pairs");
+    CHECK(vd_companion_encode_record(
+              config.secret, VD_COMPANION_MESSAGE_STATUS, 0u, 2u, 500u,
+              config.session_id, config.process_generation, capabilities,
+              NULL, 0u, record, sizeof(record), &record_size) ==
+              VD_COMPANION_OK,
+          "terminal-status malformed request base encodes");
+    record[64] ^= 1u;
+    fixture.close_fail_remaining = 1;
+    fixture.now_ms = 11001u;
+    CHECK(vd_companion_service_process(&service, record, record_size) ==
+              VD_COMPANION_ERROR_IO &&
+              vd_companion_service_get_status(&service, &status) ==
+                  VD_COMPANION_OK &&
+              status.last_error == VD_COMPANION_ERROR_AUTH &&
+              status.cleanup_error == VD_COMPANION_ERROR_IO &&
+              service.bound != 0u,
+          "failed control close preserves ownership and both errors");
+    CHECK(vd_companion_service_init(&service, &config) ==
+              VD_COMPANION_ERROR_STATE,
+          "pending failed control transport cannot be reinitialized");
+    CHECK(request(&service, &config, VD_COMPANION_MESSAGE_STATUS, 2u,
+                  11002u, capabilities, NULL, 0u, record,
+                  &record_size) == VD_COMPANION_ERROR_IO &&
+              fixture.sent_size ==
+                  VD_COMPANION_HEADER_SIZE + 72u &&
+              read_u16(fixture.sent + 6u) ==
+                  VD_COMPANION_HEADER_SIZE &&
+              read_u16(fixture.sent + 10u) ==
+                  (uint16_t)-VD_COMPANION_ERROR_IO &&
+              read_u32(fixture.sent + 12u) == 72u &&
+              read_u32(fixture.sent +
+                       VD_COMPANION_HEADER_SIZE + 64u) == 0u &&
+              read_u32(fixture.sent +
+                       VD_COMPANION_HEADER_SIZE + 68u) ==
+                  (uint32_t)-VD_COMPANION_ERROR_AUTH,
+          "authenticated terminal STATUS exposes exact 72-byte state");
+    CHECK(vd_companion_service_close(&service) == VD_COMPANION_OK &&
+              fixture.close_calls == 2 && service.bound == 0u &&
+              service.state == VD_COMPANION_STATE_CLOSED,
+          "control close retry releases ownership exactly once");
+}
+
+static void test_authenticated_input_failure_status(void)
+{
+    uint8_t payload[36] = {0};
+    uint8_t record[VD_COMPANION_MAX_RECORD];
+    size_t record_size = 0u;
+    const uint64_t capabilities =
+        VD_COMPANION_CAP_STATUS | VD_COMPANION_CAP_APP_INPUT;
+    struct vd_companion_config config;
+    struct vd_companion_service service = {0};
+    struct fixture fixture = {0};
+
+    configure(&config, &fixture);
+    config.enabled_capabilities = capabilities;
+    CHECK(vd_companion_service_init(&service, &config) ==
+              VD_COMPANION_OK &&
+              request(&service, &config, VD_COMPANION_MESSAGE_HELLO, 1u,
+                      12000u, capabilities, NULL, 0u, record,
+                      &record_size) == VD_COMPANION_OK,
+          "authenticated terminal input fixture pairs");
+    write_u32(payload, VD_INPUT_BUTTON_CROSS);
+    write_u32(payload + 32, 100u);
+    fixture.input_fail_remaining = 2;
+    CHECK(request(&service, &config, VD_COMPANION_MESSAGE_INPUT, 2u,
+                  12001u, capabilities, payload, sizeof(payload), record,
+                  &record_size) == VD_COMPANION_ERROR_INPUT,
+          "authenticated input failure returns cleanup error");
+    CHECK(fixture.sent_size == VD_COMPANION_HEADER_SIZE + 72u &&
+              read_u16(fixture.sent + 8u) ==
+                  (VD_COMPANION_MESSAGE_INPUT | UINT16_C(0x8000)) &&
+              read_u16(fixture.sent + 10u) ==
+                  (uint16_t)-VD_COMPANION_ERROR_INPUT &&
+              read_u32(fixture.sent + 12u) == 72u &&
+              read_u32(fixture.sent +
+                       VD_COMPANION_HEADER_SIZE + 64u) == 1u &&
+              read_u32(fixture.sent +
+                       VD_COMPANION_HEADER_SIZE + 68u) ==
+                  (uint32_t)-VD_COMPANION_ERROR_INPUT,
+          "authenticated terminal response exposes cleanup quarantine");
+    CHECK(vd_companion_service_retry_neutral(&service) ==
+              VD_COMPANION_OK,
+          "local retry clears terminal input quarantine");
+}
+
 int main(void)
 {
     test_defaults_ports_and_bind();
@@ -894,6 +1017,8 @@ int main(void)
     test_integrated_input_trace();
     test_trace_disconnect_callback_and_timeout();
     test_protocol_abort_neutral_retry_status();
+    test_terminal_status_and_control_close_retry();
+    test_authenticated_input_failure_status();
     if (failures != 0) {
         fprintf(stderr, "%d companion test(s) failed\n", failures);
         return 1;

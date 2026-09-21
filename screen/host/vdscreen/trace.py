@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import errno
 import json
 import os
 import secrets
@@ -111,6 +112,25 @@ def _valid_title_id(raw: bytes) -> bool:
         ord("A") <= value <= ord("Z") or ord("0") <= value <= ord("9")
         for value in raw
     )
+
+
+def _fsync_parent_directory(directory: Path) -> bool:
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    unsupported = {errno.EINVAL, errno.ENOTSUP}
+    if os.name == "nt":
+        unsupported.update((errno.EACCES, errno.EISDIR, errno.EPERM))
+    descriptor: int | None = None
+    try:
+        descriptor = os.open(directory, flags)
+        os.fsync(descriptor)
+    except OSError as error:
+        if error.errno in unsupported:
+            return False
+        raise
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+    return True
 
 
 def verify_trace(data: bytes, *,
@@ -242,6 +262,7 @@ def save_trace(data: bytes, destination: Path, *,
                     raise
                 time.sleep(0.005)
         temporary = None
+        _fsync_parent_directory(destination.parent)
     finally:
         if descriptor is not None:
             os.close(descriptor)
@@ -283,12 +304,15 @@ def replay_trace(
     trace: InputTrace,
     apply: Callable[[InputState], object],
     *,
+    expected_identity: TraceIdentity,
     now: Callable[[], float] = time.monotonic,
     sleep: Callable[[float], None] = time.sleep,
     cancelled: Callable[[], bool] = lambda: False,
     max_sleep_seconds: float = TRACE_DEFAULT_MAX_SLEEP_SECONDS,
     max_drift_seconds: float = TRACE_DEFAULT_MAX_DRIFT_SECONDS,
 ) -> ReplayStats:
+    trace = verify_trace(
+        trace.data, expected_identity=expected_identity)
     if trace.end_reason != TRACE_END_COMPLETE:
         raise TraceError("only explicitly complete traces may be replayed")
     if not 0 < max_sleep_seconds <= TRACE_DEFAULT_MAX_SLEEP_SECONDS:

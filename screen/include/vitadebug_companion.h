@@ -134,10 +134,12 @@ typedef int (*vd_companion_screen_close_fn)(void* user);
 
 /*
  * bind must attempt exactly the supplied scope/port and clean up its own
- * partial resources on failure. The transport accepts one client per service
- * initialization, reads at most VD_COMPANION_MAX_RECORD under an absolute
- * deadline, and passes only one complete record to service_process. On EOF,
- * partial read, timeout, or processing error it calls service_disconnect.
+ * partial resources on failure. close must be retryable; a nonzero result
+ * means the companion retains transport ownership until a later successful
+ * close. The transport accepts one client per service initialization, reads
+ * at most VD_COMPANION_MAX_RECORD under an absolute deadline, and passes only
+ * one complete record to service_process. On EOF, partial read, timeout, or
+ * processing error it calls service_disconnect.
  */
 
 /*
@@ -223,6 +225,7 @@ struct vd_companion_status {
     uint32_t input_active;
     uint32_t input_cleanup_pending;
     int32_t last_error;
+    int32_t cleanup_error;
     uint32_t trace_state;
     uint32_t trace_end_reason;
     uint64_t trace_event_count;
@@ -255,6 +258,7 @@ struct vd_companion_service {
     uint32_t input_active;
     uint32_t input_cleanup_pending;
     int32_t last_error;
+    int32_t cleanup_error;
     vd_companion_send_fn send;
     vd_companion_close_fn close;
     void* transport_user;

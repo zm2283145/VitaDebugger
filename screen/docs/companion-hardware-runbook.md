@@ -59,7 +59,9 @@ do not probe for or silently select another port.
    skipped and regressed sequences, zero/excessive TTL values, unknown
    enums/capabilities, oversized paths/counts/reads, and slow partial records.
    Each must fail closed with bounded memory and deadline, then release the
-   connection and any active input.
+   connection and any active input. Inject one control-close failure, verify
+   ownership blocks reinitialization, query only authenticated terminal
+   STATUS, then retry close and confirm ownership is released exactly once.
 4. **Cooperative input:** register only a disposable application's callback.
    Test 50 ms and 1000 ms leases, renewal, disconnect, host process death,
    title exit, and service shutdown. In every case the stale-input watchdog

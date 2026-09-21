@@ -46,9 +46,13 @@ The caller must treat a transport disconnect or operation error as session
 termination and call `vd_companion_service_disconnect()`. Authentication,
 framing, identity, replay, deadline, and capability-envelope failures already
 abort the service terminally. Either path releases input, closes the bound
-transport and screen state, and wipes the control secret. A reconnect requires
-fresh explicit initialization with a new secret and session ID; sequence 1 is
-never accepted again by the old service instance.
+transport and screen state, and wipes the control secret after control
+transport ownership is successfully released. A failed close retains
+ownership, blocks reinitialization, preserves the primary terminal error and
+the cleanup error separately, and is retried by
+`vd_companion_service_close()`. A reconnect requires fresh explicit
+initialization with a new secret and session ID; sequence 1 is never accepted
+again by the old service instance.
 
 The TTL is authenticated and starts when the service receives the complete
 record. It never compares a host timestamp with a Vita timestamp and assumes
@@ -101,7 +105,21 @@ enumerate or select another target. Trace state and event count are `u32` at
 48 and 56. Input cleanup-pending and the positive magnitude of the latest
 terminal error are `u32` at 64 and 68. Recording and cleanup quarantine are
 therefore visible to a paired client; the same fields are available locally
-through `vd_companion_service_get_status()` after transport teardown.
+through `vd_companion_service_get_status()` after transport teardown, along
+with the distinct cleanup error.
+
+If an authenticated `INPUT` callback fails, the service attempts neutral
+release and sends one terminal response before closing. That response has the
+normal `INPUT | 0x8000` type, the immediate returned error in the response
+status, and this exact 72-byte status payload; offsets 64 and 68 therefore
+expose cleanup quarantine and the primary input failure without reporting
+successful release. If a terminal control close fails and ownership remains,
+the service accepts only an authenticated empty `STATUS` request with the next
+exact sequence, same session/generation/capabilities, and valid TTL. No other
+operation is dispatchable in terminal state. Its response status reports the
+retained cleanup error while payload offset 68 preserves the primary terminal
+error. A successful close removes this narrow status path and wipes the
+secret.
 
 `INPUT` (type 3) has a 36-byte payload: buttons `u32`, signed left X/Y and
 right X/Y axes as four `i16` values, touch count `u8`, three zero bytes, two
