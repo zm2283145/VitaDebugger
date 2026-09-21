@@ -19,9 +19,10 @@ only as a concept because no license was identified during review.
 
 ## Compatible concepts adopted
 
-- Keep the device producer, host receiver, and any local automation/MCP adapter
-  separate. The current screen library and Python receiver implement the first
-  two boundaries; no MCP server is exposed.
+- Keep device transport, host receiver, and any local automation/MCP adapter
+  as distinct trust boundaries inside one source-owned companion design. The
+  current static archive and Python screen receiver implement the first two
+  boundaries; no MCP server is exposed.
 - Start with one serialized client, fixed/versioned records, exact payload
   bounds, format conversion, checksums, sequence/timestamp validation, frame
   rate limits, timeout limits, drop-old behavior, and explicit cleanup.
@@ -30,9 +31,10 @@ only as a concept because no license was identified during review.
 - Return typed errors to callers. A future MCP adapter must map protocol,
   authorization, timeout, and stale-generation errors to tool errors rather
   than terminate its process or manufacture success.
-- If a separately versioned Vita service is ever justified, negotiate an exact
-  ABI and capability mask before starting network or worker ownership. Abort
-  sockets before bounded worker joins and retain failed cleanup obligations.
+- The source-owned control foundation negotiates an exact ABI and capability
+  mask before operation dispatch. It uses injected transport callbacks and
+  owns no worker; malformed sessions and disconnects release input and close
+  the bound transport terminally.
 - Keep side-by-side development ports and service names compile-time explicit
   so experimental services cannot replace an installed broad service.
 
@@ -56,27 +58,31 @@ rate, and failure rules required here. vitacompanion has no screenshot or
 framebuffer implementation; its display operation controls power only.
 Neither protocol is a compatible transport for this stream.
 
-## Future local automation capability model
+## Companion capability model
 
 Screen observation remains a read-only capability. Do not place broader tools
-behind the current plaintext pre-shared screen token. Before any higher-risk
-capability is implemented, define an authenticated-encryption session with
-fresh nonces, monotonically increasing record sequence, replay rejection,
-short expiry, exact title/PID/process-generation binding, and an explicit
-grant for one capability.
+behind the plaintext screen token. The companion control foundation therefore
+uses a distinct nonzero secret, keyed BLAKE2b record authentication,
+monotonically increasing sequence, terminal replay rejection, short deadlines,
+exact title/PID/process-generation/session binding, and explicit negotiated
+capabilities. It provides integrity and admission on a trusted private LAN,
+not confidentiality.
 
 | Capability | Minimum acceptable boundary |
 | --- | --- |
 | Screen latest-frame read | Local-only API over checksum-verified atomic output; optional MCP tool accepts no path or address |
-| Application file read | Application-owned root selected at build/runtime; canonicalize and verify the final path remains below that root; read-only allowlist; byte and time limits; no device/mount prefix from the peer |
+| Application file read | Implemented through an application-owned root provider; canonical relative paths and opened-object attestations; regular files only; entry, request, and session bounds; no device/mount prefix from the peer |
 | Title/process inventory | User-mode provider returns only allowlisted development title IDs plus opaque launch generations; no addresses, modules, system titles, or implicit mutation |
 | Title launch | Exact build-time allowlist, explicit opt-in, user titles only, no arbitrary path/URI/arguments, and no quit/reboot operation |
-| Input | Separate short-lived capability/token, application-cooperative injection point only, allowlisted controls, strict event rate/duration, watchdog expiry, and forced neutral release on every error/disconnect |
+| Input | Implemented as an explicit mutation capability and application callback only, with 50-1000 ms leases, deadline/sequence checks, watchdog expiry, and forced neutral release |
+| Input recording/replay | Separate per-session capabilities and consents; physical samples enter only through the source-owned app API; fixed trace bounds and identity; 1x tick-driven playback only through the app callback; neutral release on every terminal path |
 | MCP adapter | Loopback by default, narrow schemas without arbitrary paths/PIDs/addresses, per-capability grants, bounded responses, and typed failures |
 
-File, launch, inventory, input, and MCP services are not implemented by the
-screen foundation. They require separate threat reviews and tests; adding one
-must not broaden the screen protocol.
+Title launch/inventory and MCP remain unsupported. File reads and cooperative
+input are implemented only by the source-owned companion control protocol;
+they do not broaden or share the screen token/protocol. There is no
+authenticated-encryption claim, so the hardware gate remains limited to one
+trusted private LAN and must not carry secrets in control payloads.
 
 ## Future compatibility matrix
 

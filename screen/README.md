@@ -1,18 +1,28 @@
-# VitaDebugger screen streaming foundation
+# VitaDebugger source-owned companion foundation
 
-This directory provides a **default-off, application-linked, user-mode**
-screen stream. It does not modify `libuvdb.a`, the kernel companion, attach
-broker, loader, deployment agent, or any system process. Nothing starts a
-socket or reads a framebuffer merely by building the repository.
+This directory provides one **default-off, application-linked, user-mode**
+developer companion archive. `libvitadebug_companion.a` integrates the
+reviewed application-owned screen stream with a host/compile-qualified control
+foundation. It does not modify `libuvdb.a`, the kernel companion, attach
+broker, loader, deployment agent, VitaCompanion, or any system process.
+Nothing starts a socket, reads a framebuffer, or accepts control merely by
+building the repository.
 
 The producer accepts only exact pointers registered by the embedding
 application and labels every frame source-owned. The application must call
 `vd_screen_submit_displayed_frame()` only for a buffer it owns and has selected
 for display. There is deliberately no PID, arbitrary address, memory reader,
 system compositor access, DRM path, injection, or external-attach fallback.
+Control status is limited to the same configured title/PID/generation/session;
+input reaches only a registered application callback under a short lease; and
+file access reaches only a registered read-only provider for one explicit
+application-owned debug root.
+The same layer can explicitly record physical controller/touch samples handed
+to it by that application and replay a verified trace only through the
+registered application callback.
 
 This revision is a host-tested foundation, **not a claim of continuous
-capture support on Vita hardware**.
+capture or control support on Vita hardware**.
 
 ## Architecture and safety choice
 
@@ -32,14 +42,27 @@ Repository review found:
   separate fragile GPU lifecycle and is unrelated to observing another
   application's own render target.
 
-Accordingly, screen capture is a separate source-owned library. It injects a
-complete-buffer writer callback and can compose with
+Accordingly, screen capture and control are one source-owned companion
+library, not permanent plugins. The screen component injects a complete-buffer
+writer callback and can compose with
 `vp_vita_tcp_sink_write()` from `libvitaprofiler.a`; it does not duplicate or
 weaken that transport. It does not call `sceDisplayGetFrameBuf()` because this
 repository has hardware evidence only for metadata, not for safe pixel-format
 interpretation or framebuffer read timing. The application already knows its
-render target format and presentation point and is the authority that can
-make that assertion.
+render target format and presentation point and is the authority that can make
+that assertion. The legacy
+`libvitadebug_screen.a` output remains for source compatibility, but new
+integration uses `libvitadebug_companion.a`; both are built from the same
+screen source rather than separate runtime plugins.
+
+The control component is transport- and filesystem-abstracted. This layer
+opens no Vita socket and calls no Vita filesystem, process, input, module, or
+kernel API. A source-owned application supplies the bind/send/close,
+cooperative input, and confined debug-root callbacks. Initialization validates
+all policy first and treats a bind callback failure as terminal. The callback
+contracts, exact record format, keyed BLAKE2b authentication, capabilities,
+sequence protection, deadlines, and bounds are specified in
+[companion protocol v1](docs/companion-protocol-v1.md).
 
 ## Producer integration
 
@@ -49,9 +72,22 @@ Build only when the application deliberately opts in:
 make -C screen vita-check
 ```
 
-The output is `screen/build/vita/libvitadebug_screen.a`. Initialize a
-caller-owned transport first, then register one to three exact framebuffer
-bases:
+The primary output is
+`screen/build/vita/libvitadebug_companion.a`. It includes the screen producer
+and Monocypher implementation used elsewhere in this repository. The
+lower-level screen API remains available, but a companion integration should
+initialize `vd_companion_config`, explicitly select capabilities, set the
+source-owned target identity and nonzero random secret/session, and provide
+callbacks. Mutation stays disabled unless
+`VD_COMPANION_MUTATION_CONSENT` is separately set.
+The nested screen configuration requires its own nonzero token; never reuse
+the control MAC secret because screen protocol v1 sends its token in the
+admission preface.
+
+The screen-only call pattern below documents the underlying framebuffer
+contract. Companion callers supply the same sources through
+`vd_companion_screen_config` and use `vd_companion_screen_begin()` plus
+`vd_companion_submit_displayed_frame()`:
 
 ```c
 static struct vd_screen_stream screen;
@@ -140,26 +176,31 @@ py -3 .\screen\tools\vdscreen.py receive `
 
 The screen receiver permits only ports 18000 through 18999 and rejects
 VitaDebugger's existing 18194 DebugNet, 18195 profiler, and 18196 deployment
-ports. This range also cannot collide with VitaCompanion defaults 1337/1338 or
-vita-agent-bridge 1348. A bind failure is terminal for that invocation and the
-failed listener is closed before the error returns. Limits and the nonzero
-authentication token are validated before socket creation; after accept, both
-the listener owns the socket only until the receive handoff begins. The
-receiver is then its sole cleanup owner, so every setup/protocol failure and
-valid session attempts temp cleanup, shutdown, and exactly one close. An active
-protocol/setup error remains primary if temp cleanup also fails; without a
-primary failure, the first cleanup error is surfaced after all cleanup steps
-have been attempted.
+ports plus companion control 18198. Companion control accepts only a distinct
+validated 18000-18999 port and rejects 18194-18197, defaulting to 18198. These
+ranges cannot select VitaCompanion 1337/1338 or vita-agent-bridge 1348. A bind
+failure is terminal for that invocation and never selects another port.
+Loopback is the control default; private-LAN scope requires a separate consent
+value.
+
+The screen receiver validates limits and its nonzero authentication token
+before socket creation; after accept, the listener owns the socket only until
+the receive handoff begins. The receiver is then its sole cleanup owner, so
+every setup/protocol failure and valid session attempts temp cleanup,
+shutdown, and exactly one close. An active protocol/setup error remains
+primary if temp cleanup also fails; without a primary failure, the first
+cleanup error is surfaced after all cleanup steps have been attempted.
 
 Use these exact identities for the first serialized hardware gate:
 
 | Surface | Hardware-gate identity |
 | --- | --- |
-| Host listener/service | `vdscreen-v1`, TCP `18197` |
-| Application archive | `libvitadebug_screen.a` |
+| Screen listener/service | `vdscreen-v1`, TCP `18197` |
+| Control service | `vitadebug-companion-v1`, TCP `18198` |
+| Application archive | `libvitadebug_companion.a` |
 | Disposable application title ID | `VDSCRN001` |
-| Disposable application/module name | `vitadebug_screen_gate` |
-| Candidate VPK artifact | `vitadebug-screen-gate.vpk` |
+| Disposable application/module name | `vitadebug_companion_gate` |
+| Candidate VPK artifact | `vitadebug-companion-gate.vpk` |
 | Resident SUPRX/SKPRX | none |
 
 The same values are machine-checked in
@@ -192,6 +233,21 @@ installed as a separately invoked fallback. Any later resident companion is a
 new reviewed feature and must use distinct module names plus exact ABI
 negotiation; it is not authorized by this gate.
 
+Development-title inventory and launch are intentionally unsupported because
+this repository does not yet contain a reviewed static user-approved allowlist
+and lifecycle backend. Protocol requests return the typed unsupported result.
+There is also no arbitrary process inventory, kill/quit-all, reboot, module
+loading/injection, protected/system target, arbitrary mount access, FTP
+write/delete/upload, PS/power/system input, global hook, or MCP exposure.
+
+Cooperative input recording/replay has separate negotiated capabilities and
+separate record/playback consents. Recording is visible in paired status and
+accepts only samples submitted by the current source-owned app; there are no
+global `SceCtrl`/`SceTouch` hooks. Playback is real-time 1x, tick-driven,
+drift-bounded, never automatic after reconnect, and always neutralizes the
+application callback on completion or failure. See
+[input trace v1](docs/input-trace-v1.md).
+
 The deterministic consumer entry point verifies the atomic manifest and image:
 
 ```powershell
@@ -204,7 +260,7 @@ is bounded to two image slots plus metadata.
 
 ## Threat and privacy model
 
-- Streaming is off unless an application links the separate archive, passes
+- Streaming is off unless an application links the companion archive, passes
   `VD_SCREEN_EXPLICIT_CONSENT`, supplies a nonzero token, registers its own
   buffers, starts a transport, and submits frames.
 - The receiver requires the exact session token and defaults to loopback.
@@ -219,17 +275,28 @@ is bounded to two image slots plus metadata.
 - Malformed, oversized, fast, stale, or incomplete peers fail closed. The
   receiver keeps no unbounded queue and preserves the last complete frame
   across disconnect while removing temporary files.
+- Control is separately default-off and authenticated. It binds loopback
+  unless private-LAN scope is explicitly authorized, grants only enabled
+  capabilities, and releases cooperative input on timeout, malformed-session
+  abort, disconnect, or shutdown. Authentication provides integrity and
+  admission, not confidentiality.
 
 ## Validation status and future hardware gate
 
 Host tests cover wire compatibility, ownership/bounds checks, producer
 drop-old behavior, terminal partial writes, authentication, CRC, malformed and
 truncated frames, duplicate/gap handling, rate rejection, PPM conversion,
-atomic publication, and disconnect cleanup. `vita-check` compiles with
-`-Werror` and links a Vita ELF.
+atomic publication, control framing/replay/deadline rejection, confined file
+operations, input leases, trace round trips, button/analog/touch fidelity,
+markers, overflow, malformed traces, wrong identities, bounded replay drift,
+cancel/failure/disconnect cleanup, and exact neutral release. `vita-check`
+compiles with `-Wall -Wextra -Werror` and links a Vita ELF.
 
 Hardware validation remains serialized and must not begin while another task
-owns the device:
+owns the device. The full control, Wi-Fi/suspend, malformed-client,
+generation-change, watchdog, cleanup, and fallback matrix is in the
+[future companion hardware runbook](docs/companion-hardware-runbook.md).
+The screen-specific portion remains:
 
 1. Obtain explicit coordinator release and record device/firmware, repository
    commit, VitaSDK revision, application revision, IP/port, and token handling.
@@ -250,6 +317,8 @@ owns the device:
    exact registered-base match.
 
 See [protocol v1](docs/protocol-v1.md) for the exact wire contract.
+See [companion protocol v1](docs/companion-protocol-v1.md) for the control
+wire contract and capability boundaries.
 The clean-room review of the two inspiration projects and the deliberately
 unimplemented automation boundaries are recorded in
 [related work](docs/related-work.md).

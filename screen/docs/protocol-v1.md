@@ -21,6 +21,7 @@ visible to an observer on the network. Use a fresh token for each supervised
 session and only a trusted private LAN. Do not expose the port to the internet.
 This token grants only screen submission; it must never authorize file, launch,
 inventory, input, debugger, deployment, or MCP operations.
+In particular, it must be distinct from the companion control MAC secret.
 
 Each frame is a 64-byte header followed by exactly `payload_length` bytes:
 
@@ -71,7 +72,8 @@ must verify `image_sha256` and reread `latest.json`, as implemented by
 `vdscreen.receiver.read_latest`, to avoid racing a later slot rotation.
 
 The host listener defaults to TCP 18197. It accepts overrides only from 18000
-through 18999 and reserves 18194-18196 for existing VitaDebugger services.
+through 18999 and reserves 18194-18196 for existing VitaDebugger services plus
+18198 for companion control.
 VitaCompanion's 1337/1338 and vita-agent-bridge's 1348 are outside the accepted
 range. A bind conflict returns an error and closes the failed listener; it
 never falls back to a different port. Local limits and token configuration are

@@ -7,7 +7,10 @@ profiling PlayStation Vita homebrew. It currently provides:
 - an optional, narrow kernel companion (`vitadebug.skprx`) for process all-stop
   and caller-process thread inspection;
 - a standalone, allocation-free profiler (`libvitaprofiler.a`);
-- a default-off, source-owned screen stream (`libvitadebug_screen.a`);
+- a default-off, source-owned
+  [developer companion](screen/README.md) (`libvitadebug_companion.a`) for
+  application-owned screen streaming, scoped status/input/debug files, and
+  deterministic cooperative input traces;
 - bounded GDB-console, UDP-log, and profiler-trace transports; and
 - the separately licensed [VitaDevDeploy](deploy/README.md) remote deployment
   helper and a [VS Code workflow](examples/vscode-debug-demo/README.md).

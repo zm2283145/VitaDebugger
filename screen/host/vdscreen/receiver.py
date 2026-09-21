@@ -33,6 +33,7 @@ RESERVED_LISTENER_PORTS = frozenset({
     18194,  # VitaDebugger DebugNet gate
     18195,  # VitaProfiler TCP gate
     18196,  # VitaDevDeploy direct TCP
+    18198,  # VitaDebugger companion control
 })
 
 

@@ -340,29 +340,40 @@ class ReceiverTests(unittest.TestCase):
 
     def test_hardware_gate_manifest_has_distinct_identities(self) -> None:
         manifest = json.loads(SIDE_BY_SIDE_CONFIG.read_text())
-        self.assertEqual(manifest["schema_version"], 1)
+        self.assertEqual(manifest["schema_version"], 2)
         host = manifest["host"]
         vita = manifest["vita"]
         coexistence = manifest["coexistence"]
-        validate_listener_port(host["listener_port"])
-        self.assertEqual(host["listener_port"], vita["connect_port"])
-        self.assertEqual(host["service"], "vdscreen-v1")
+        validate_listener_port(host["screen_listener_port"])
+        self.assertEqual(host["screen_listener_port"],
+                         vita["screen_connect_port"])
+        self.assertEqual(host["screen_receiver"], "vdscreen-v1")
+        self.assertEqual(vita["control_listener_port"], 18198)
+        self.assertNotEqual(vita["control_listener_port"],
+                            vita["screen_connect_port"])
         self.assertEqual(vita["title_id"], "VDSCRN001")
-        self.assertEqual(vita["application_module"], "vitadebug_screen_gate")
-        self.assertEqual(vita["archive"], "libvitadebug_screen.a")
-        self.assertEqual(vita["artifact"], "vitadebug-screen-gate.vpk")
-        self.assertIsNone(vita["resident_module"])
+        self.assertEqual(vita["application_module"],
+                         "vitadebug_companion_gate")
+        self.assertEqual(vita["archive"], "libvitadebug_companion.a")
+        self.assertEqual(vita["artifact"], "vitadebug-companion-gate.vpk")
+        self.assertIsNone(vita["resident_suprx"])
+        self.assertIsNone(vita["resident_skprx"])
+        self.assertIs(vita["kernel_api"], False)
         self.assertEqual(
             set(coexistence["forbidden_ports"]), {1337, 1338, 1348})
-        self.assertNotIn(host["listener_port"],
+        self.assertNotIn(host["screen_listener_port"],
+                         coexistence["forbidden_ports"])
+        self.assertNotIn(vita["control_listener_port"],
                          coexistence["forbidden_ports"])
         self.assertIs(coexistence["mutate_fallback_configuration"], False)
+        self.assertIs(coexistence["fallback_remains_installed"], True)
+        self.assertIs(coexistence["hardware_contact_authorized"], False)
 
     def test_side_by_side_listener_port_contract(self) -> None:
         for port in (MIN_LISTENER_PORT, DEFAULT_LISTENER_PORT,
                      MAX_LISTENER_PORT):
             validate_listener_port(port)
-        for port in (0, 1337, 1338, 1348, 17999, 18194, 18195, 18196,
+        for port in (0, 1337, 1338, 1348, 17999, 18194, 18195, 18196, 18198,
                      19000, 65535):
             with self.subTest(port=port), self.assertRaises(ValueError):
                 validate_listener_port(port)
