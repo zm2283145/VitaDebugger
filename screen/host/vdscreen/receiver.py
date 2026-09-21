@@ -81,6 +81,11 @@ def validate_listener_port(port: int) -> None:
         raise ValueError("listener port is reserved by another VitaDebugger service")
 
 
+def _validate_auth_token(token: bytes) -> None:
+    if len(token) != AUTH_TOKEN_SIZE or not any(token):
+        raise ValueError("receiver token must be exactly 32 nonzero bytes")
+
+
 def _is_loopback(bind: str) -> bool:
     import ipaddress
 
@@ -227,20 +232,18 @@ def receive_connection(
     peer: tuple[str, int] | None = None,
     now_fn: Callable[[], float] = time.monotonic,
 ) -> ReceiveStats:
-    limits.validate()
     stats = ReceiveStats()
-    started = now_fn()
-    deadline = started + limits.max_session_seconds
-    rate = _RateGate(
-        limits.max_frames_per_second, limits.rate_burst_frames, started)
-    last_sequence: int | None = None
-    last_timestamp: int | None = None
-    store.cleanup_temps()
-    connection.settimeout(limits.idle_timeout_seconds)
     try:
-        if len(token) != AUTH_TOKEN_SIZE or not any(token):
-            raise ValueError(
-                "receiver token must be exactly 32 nonzero bytes")
+        limits.validate()
+        _validate_auth_token(token)
+        started = now_fn()
+        deadline = started + limits.max_session_seconds
+        rate = _RateGate(
+            limits.max_frames_per_second, limits.rate_burst_frames, started)
+        last_sequence: int | None = None
+        last_timestamp: int | None = None
+        store.cleanup_temps()
+        connection.settimeout(limits.idle_timeout_seconds)
         auth = _read_exact(
             connection, AUTH_SIZE,
             min(deadline, now_fn() + limits.idle_timeout_seconds), now_fn)
@@ -287,14 +290,19 @@ def receive_connection(
             stats.frames_published += 1
             last_sequence = header.sequence
             last_timestamp = header.timestamp_us
+        return stats
     finally:
-        store.cleanup_temps()
         try:
-            connection.shutdown(socket.SHUT_RDWR)
-        except OSError:
-            pass
-        connection.close()
-    return stats
+            store.cleanup_temps()
+        finally:
+            try:
+                connection.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            try:
+                connection.close()
+            except OSError:
+                pass
 
 
 def listen_once(
@@ -312,13 +320,21 @@ def listen_once(
         raise ValueError("non-loopback bind requires explicit LAN authorization")
     if not 0 < accept_timeout_seconds <= 3600:
         raise ValueError("accept timeout must be between 0 and 3600 seconds")
+    limits.validate()
+    _validate_auth_token(token)
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
         listener.bind((bind, port))
         listener.listen(1)
         listener.settimeout(accept_timeout_seconds)
         connection, peer = listener.accept()
-    return receive_connection(
-        connection, token=token, store=store, limits=limits, peer=peer)
+    try:
+        return receive_connection(
+            connection, token=token, store=store, limits=limits, peer=peer)
+    finally:
+        try:
+            connection.close()
+        except OSError:
+            pass
 
 
 def read_latest(output: Path, attempts: int = 3) -> tuple[dict, bytes]:

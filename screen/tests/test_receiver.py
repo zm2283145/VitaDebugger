@@ -7,6 +7,7 @@ import threading
 import unittest
 import zlib
 from pathlib import Path
+from unittest import mock
 
 from vdscreen.protocol import (
     FRAME_FLAG_SOURCE_OWNED,
@@ -89,6 +90,121 @@ def run_connection(data: bytes, output: Path,
 
 
 class ReceiverTests(unittest.TestCase):
+    def test_listener_rejects_invalid_setup_before_socket_creation(self) -> None:
+        invalid_limits = ReceiverLimits(max_payload_bytes=0)
+        cases = (
+            (invalid_limits, TOKEN),
+            (ReceiverLimits(), bytes(32)),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            store = LatestFrameStore(Path(directory))
+            for limits, token in cases:
+                with self.subTest(limits=limits, zero_token=not any(token)), \
+                        mock.patch("vdscreen.receiver.socket.socket") as factory:
+                    with self.assertRaises(ValueError):
+                        listen_once(
+                            bind="127.0.0.1",
+                            port=DEFAULT_LISTENER_PORT,
+                            allow_lan=False,
+                            accept_timeout_seconds=0.1,
+                            token=token,
+                            store=store,
+                            limits=limits,
+                        )
+                    factory.assert_not_called()
+
+    def test_receive_validation_failure_closes_without_reading(self) -> None:
+        class FakeConnection:
+            def __init__(self) -> None:
+                self.recv_calls = 0
+                self.timeout_calls = 0
+                self.shutdown_calls = 0
+                self.close_calls = 0
+
+            def settimeout(self, timeout: float) -> None:
+                del timeout
+                self.timeout_calls += 1
+
+            def recv_into(self, buffer: memoryview) -> int:
+                del buffer
+                self.recv_calls += 1
+                return 0
+
+            def shutdown(self, how: int) -> None:
+                del how
+                self.shutdown_calls += 1
+
+            def close(self) -> None:
+                self.close_calls += 1
+
+        cases = (
+            (ReceiverLimits(max_payload_bytes=0), TOKEN),
+            (ReceiverLimits(), bytes(32)),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            for limits, token in cases:
+                connection = FakeConnection()
+                with self.subTest(limits=limits, zero_token=not any(token)):
+                    with self.assertRaises(ValueError):
+                        receive_connection(
+                            connection,
+                            token=token,
+                            store=LatestFrameStore(Path(directory)),
+                            limits=limits,
+                        )
+                    self.assertEqual(connection.recv_calls, 0)
+                    self.assertEqual(connection.timeout_calls, 0)
+                    self.assertEqual(connection.shutdown_calls, 1)
+                    self.assertEqual(connection.close_calls, 1)
+
+    def test_listener_closes_accepted_socket_if_handoff_raises(self) -> None:
+        class FakeAccepted:
+            def __init__(self) -> None:
+                self.close_calls = 0
+
+            def close(self) -> None:
+                self.close_calls += 1
+
+        class FakeListener:
+            def __init__(self, accepted: FakeAccepted) -> None:
+                self.accepted = accepted
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc_value, traceback):
+                return False
+
+            def bind(self, address) -> None:
+                del address
+
+            def listen(self, backlog: int) -> None:
+                del backlog
+
+            def settimeout(self, timeout: float) -> None:
+                del timeout
+
+            def accept(self):
+                return self.accepted, ("127.0.0.1", 12345)
+
+        accepted = FakeAccepted()
+        listener = FakeListener(accepted)
+        with tempfile.TemporaryDirectory() as directory, \
+                mock.patch("vdscreen.receiver.socket.socket",
+                           return_value=listener), \
+                mock.patch("vdscreen.receiver.receive_connection",
+                           side_effect=ValueError("pre-receive failure")):
+            with self.assertRaisesRegex(ValueError, "pre-receive"):
+                listen_once(
+                    bind="127.0.0.1",
+                    port=DEFAULT_LISTENER_PORT,
+                    allow_lan=False,
+                    accept_timeout_seconds=0.1,
+                    token=TOKEN,
+                    store=LatestFrameStore(Path(directory)),
+                )
+        self.assertEqual(accepted.close_calls, 1)
+
     def test_hardware_gate_manifest_has_distinct_identities(self) -> None:
         manifest = json.loads(SIDE_BY_SIDE_CONFIG.read_text())
         self.assertEqual(manifest["schema_version"], 1)

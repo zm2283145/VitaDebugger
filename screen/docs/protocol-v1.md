@@ -74,4 +74,6 @@ The host listener defaults to TCP 18197. It accepts overrides only from 18000
 through 18999 and reserves 18194-18196 for existing VitaDebugger services.
 VitaCompanion's 1337/1338 and vita-agent-bridge's 1348 are outside the accepted
 range. A bind conflict returns an error and closes the failed listener; it
-never falls back to a different port.
+never falls back to a different port. Local limits and token configuration are
+validated before socket creation, and every accepted connection is closed even
+when receiver setup fails before its first read.

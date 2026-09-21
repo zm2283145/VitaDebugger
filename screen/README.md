@@ -142,7 +142,10 @@ The screen receiver permits only ports 18000 through 18999 and rejects
 VitaDebugger's existing 18194 DebugNet, 18195 profiler, and 18196 deployment
 ports. This range also cannot collide with VitaCompanion defaults 1337/1338 or
 vita-agent-bridge 1348. A bind failure is terminal for that invocation and the
-failed listener is closed before the error returns.
+failed listener is closed before the error returns. Limits and the nonzero
+authentication token are validated before socket creation; after accept, both
+the listener handoff and receiver own unconditional close paths so setup or
+validation failures cannot leak the accepted connection.
 
 Use these exact identities for the first serialized hardware gate:
 
