@@ -99,7 +99,15 @@ failure, and shutdown force a neutral application callback.
 `vdscreen.trace` provides `verify_trace`, `save_trace`, `trace_listing`, and
 `replay_trace`. Replay requires a caller-registered cooperative callback,
 limits each host sleep to 50 ms, reports drift, supports cancellation, and
-forces neutral in `finally`.
+forces neutral in `finally`. If both replay and neutralization fail,
+`TraceCleanupError` preserves both exceptions so cleanup failure cannot be
+mistaken for a successful release.
+
+`save_trace` validates before writing, creates a random same-directory
+temporary with exclusive creation and no-follow where the host supports it,
+flushes and `fsync`s the owned file, atomically replaces the destination, and
+cleans up only that unique owned path. It never opens, truncates, follows, or
+deletes a predictable `<destination>.tmp`.
 
 The file CLI verifies, lists, or atomically copies already-received traces:
 

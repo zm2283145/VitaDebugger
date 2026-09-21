@@ -351,6 +351,7 @@ class ReceiverTests(unittest.TestCase):
         self.assertEqual(vita["control_listener_port"], 18198)
         self.assertNotEqual(vita["control_listener_port"],
                             vita["screen_connect_port"])
+        self.assertIs(vita["screen_control_secrets_distinct"], True)
         self.assertEqual(vita["title_id"], "VDSCRN001")
         self.assertEqual(vita["application_module"],
                          "vitadebug_companion_gate")

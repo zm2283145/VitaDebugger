@@ -10,6 +10,7 @@
     "screen_connect_port": 18197,
     "control_listener_port": 18198,
     "control_network_policy": "loopback-default-private-lan-explicit",
+    "screen_control_secrets_distinct": true,
     "title_id": "VDSCRN001",
     "application_module": "vitadebug_companion_gate",
     "archive": "libvitadebug_companion.a",

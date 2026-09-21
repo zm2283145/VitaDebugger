@@ -11,7 +11,7 @@
 #define VD_COMPANION_MAC_DOMAIN_SIZE 29u
 #define VD_COMPANION_RESPONSE_BIT UINT16_C(0x8000)
 #define VD_COMPANION_HELLO_RESPONSE_SIZE 32u
-#define VD_COMPANION_STATUS_RESPONSE_SIZE 64u
+#define VD_COMPANION_STATUS_RESPONSE_SIZE 72u
 #define VD_COMPANION_LIST_ENTRY_SIZE 76u
 #define VD_COMPANION_READ_PREFIX_SIZE 16u
 
@@ -24,7 +24,7 @@ struct vd_companion_record {
     uint16_t status;
     uint32_t payload_size;
     uint64_t sequence;
-    uint64_t deadline_ms;
+    uint64_t ttl_ms;
     uint64_t session_id;
     uint64_t generation;
     uint64_t capabilities;
@@ -166,14 +166,18 @@ static int vd_release_input(struct vd_companion_service* service)
 {
     const struct vd_companion_input neutral = {0};
 
-    if (service->input_active == 0u)
+    if (service->input_active == 0u &&
+        service->input_cleanup_pending == 0u)
         return VD_COMPANION_OK;
-    service->input_active = 0u;
-    service->input_lease_expires_ms = 0u;
     if (service->apply_input(service->input_user, &neutral) != 0) {
+        service->input_cleanup_pending = 1u;
         service->state = VD_COMPANION_STATE_FAILED;
+        service->last_error = VD_COMPANION_ERROR_INPUT;
         return VD_COMPANION_ERROR_INPUT;
     }
+    service->input_active = 0u;
+    service->input_cleanup_pending = 0u;
+    service->input_lease_expires_ms = 0u;
     return VD_COMPANION_OK;
 }
 
@@ -182,6 +186,17 @@ static void vd_stop_trace(struct vd_companion_service* service,
 {
     if (service->trace_initialized != 0u)
         (void)vd_input_trace_abort(&service->trace, end_reason);
+}
+
+static int vd_close_screen_transport(
+    struct vd_companion_service* service)
+{
+    if (service->screen_connected == 0u)
+        return VD_COMPANION_OK;
+    if (service->screen_close(service->screen_transport_user) != 0)
+        return VD_COMPANION_ERROR_IO;
+    service->screen_connected = 0u;
+    return VD_COMPANION_OK;
 }
 
 static int vd_abort_session(struct vd_companion_service* service, int error)
@@ -193,6 +208,9 @@ static int vd_abort_session(struct vd_companion_service* service, int error)
     service->total_file_bytes = 0u;
     if (service->screen_initialized != 0u)
         (void)vd_screen_stream_close(&service->screen);
+    if (vd_close_screen_transport(service) != VD_COMPANION_OK &&
+        release_result == VD_COMPANION_OK)
+        release_result = VD_COMPANION_ERROR_IO;
     if (service->bound != 0u) {
         service->bound = 0u;
         if (service->close(service->transport_user) != 0 &&
@@ -201,8 +219,9 @@ static int vd_abort_session(struct vd_companion_service* service, int error)
     }
     crypto_wipe(service->secret, sizeof(service->secret));
     service->state = VD_COMPANION_STATE_FAILED;
-    (void)release_result;
-    return error;
+    service->last_error =
+        release_result != VD_COMPANION_OK ? release_result : error;
+    return service->last_error;
 }
 
 static int vd_send_response(struct vd_companion_service* service,
@@ -214,11 +233,15 @@ static int vd_send_response(struct vd_companion_service* service,
     size_t output_size = 0u;
     int result;
 
+    if (service->now_ms(service->clock_user) >
+        service->request_expires_ms)
+        return vd_abort_session(
+            service, VD_COMPANION_ERROR_DEADLINE);
     result = vd_companion_encode_record(
         service->secret,
         (uint16_t)(request->type | VD_COMPANION_RESPONSE_BIT),
         (uint16_t)(status == VD_COMPANION_OK ? 0u : (uint16_t)(-status)),
-        request->sequence, request->deadline_ms, service->session_id,
+        request->sequence, request->ttl_ms, service->session_id,
         service->process_generation, service->negotiated_capabilities,
         payload, payload_size, output, sizeof(output), &output_size);
     if (result != VD_COMPANION_OK)
@@ -259,7 +282,7 @@ static int vd_decode_record(struct vd_companion_service* service,
     decoded->status = 0u;
     decoded->payload_size = payload_size;
     decoded->sequence = vd_read_u64(record + 16);
-    decoded->deadline_ms = vd_read_u64(record + 24);
+    decoded->ttl_ms = vd_read_u64(record + 24);
     decoded->session_id = vd_read_u64(record + 32);
     decoded->generation = vd_read_u64(record + 40);
     decoded->capabilities = vd_read_u64(record + 48);
@@ -315,6 +338,11 @@ static int vd_handle_status(struct vd_companion_service* service,
         vd_write_u64(payload + 56,
                      trace_info.max_scheduling_drift_us);
     }
+    vd_write_u32(payload + 64, service->input_cleanup_pending);
+    vd_write_u32(payload + 68,
+                 service->last_error < 0
+                     ? (uint32_t)(-service->last_error)
+                     : (uint32_t)service->last_error);
     return vd_send_response(service, request, VD_COMPANION_OK, payload,
                             sizeof(payload));
 }
@@ -372,9 +400,7 @@ static int vd_handle_input(struct vd_companion_service* service,
     service->input_active = 1u;
     service->input_lease_expires_ms = now_ms + lease_ms;
     if (service->apply_input(service->input_user, &input) != 0) {
-        (void)vd_release_input(service);
-        service->state = VD_COMPANION_STATE_FAILED;
-        return VD_COMPANION_ERROR_INPUT;
+        return vd_abort_session(service, VD_COMPANION_ERROR_INPUT);
     }
     return vd_send_response(service, request, VD_COMPANION_OK, NULL, 0u);
 }
@@ -584,8 +610,11 @@ int vd_companion_service_init(struct vd_companion_service* service,
     if (service == NULL || config == NULL)
         return VD_COMPANION_ERROR_INVALID_ARGUMENT;
     if (service->initialized == VD_COMPANION_SERVICE_MAGIC &&
-        service->state != VD_COMPANION_STATE_CLOSED &&
-        service->state != VD_COMPANION_STATE_FAILED)
+        ((service->state != VD_COMPANION_STATE_CLOSED &&
+          service->state != VD_COMPANION_STATE_FAILED) ||
+         service->input_active != 0u ||
+         service->input_cleanup_pending != 0u ||
+         service->screen_connected != 0u))
         return VD_COMPANION_ERROR_STATE;
     if (config->explicit_consent != VD_COMPANION_EXPLICIT_CONSENT)
         return VD_COMPANION_ERROR_DISABLED;
@@ -593,7 +622,7 @@ int vd_companion_service_init(struct vd_companion_service* service,
         !vd_title_valid(config->title_id) || config->process_id == 0u ||
         config->process_generation == 0u || config->session_id == 0u ||
         config->bind == NULL || config->send == NULL ||
-        config->close == NULL ||
+        config->close == NULL || config->now_ms == NULL ||
         config->enabled_capabilities == 0u ||
         (config->enabled_capabilities & ~VD_COMPANION_CAP_SUPPORTED) != 0u ||
         (config->enabled_capabilities & VD_COMPANION_CAP_STATUS) == 0u)
@@ -647,8 +676,15 @@ int vd_companion_service_init(struct vd_companion_service* service,
             return VD_COMPANION_ERROR_INVALID_ARGUMENT;
     }
     if ((config->enabled_capabilities & VD_COMPANION_CAP_SCREEN) != 0u &&
-        config->screen == NULL)
+        (config->screen == NULL || config->screen->connect == NULL ||
+         config->screen->close == NULL ||
+         config->screen->transport_user == NULL ||
+         config->screen->write == NULL))
         return VD_COMPANION_ERROR_INVALID_ARGUMENT;
+    if ((config->enabled_capabilities & VD_COMPANION_CAP_SCREEN) != 0u &&
+        crypto_verify32(config->secret,
+                        config->screen->auth_token) == 0)
+        return VD_COMPANION_ERROR_SECRET_REUSE;
 
     memset(service, 0, sizeof(*service));
     memcpy(service->secret, config->secret, sizeof(service->secret));
@@ -665,6 +701,8 @@ int vd_companion_service_init(struct vd_companion_service* service,
     service->send = config->send;
     service->close = config->close;
     service->transport_user = config->transport_user;
+    service->now_ms = config->now_ms;
+    service->clock_user = config->clock_user;
     service->apply_input = config->apply_input;
     service->input_user = config->input_user;
     service->filesystem = config->filesystem;
@@ -704,6 +742,9 @@ int vd_companion_service_init(struct vd_companion_service* service,
             return VD_COMPANION_ERROR_INVALID_ARGUMENT;
         }
         service->screen_initialized = 1u;
+        service->screen_close = config->screen->close;
+        service->screen_transport_user =
+            config->screen->transport_user;
     }
 
     if ((config->enabled_capabilities &
@@ -741,14 +782,35 @@ int vd_companion_service_init(struct vd_companion_service* service,
         return VD_COMPANION_ERROR_BIND;
     }
     service->bound = 1u;
+    if (service->screen_initialized != 0u) {
+        service->screen_connected = 1u;
+    }
+    if (service->screen_initialized != 0u &&
+        config->screen->connect(config->screen->transport_user,
+                                config->network_scope,
+                                config->screen_port) != 0) {
+        int close_result;
+        service->bound = 0u;
+        (void)service->close(service->transport_user);
+        (void)vd_screen_stream_close(&service->screen);
+        close_result = vd_close_screen_transport(service);
+        crypto_wipe(service->secret, sizeof(service->secret));
+        service->state = VD_COMPANION_STATE_FAILED;
+        service->last_error =
+            close_result == VD_COMPANION_OK
+                ? VD_COMPANION_ERROR_CONNECT
+                : close_result;
+        return service->last_error;
+    }
     return VD_COMPANION_OK;
 }
 
 int vd_companion_service_process(struct vd_companion_service* service,
-                                 const uint8_t* record, size_t record_size,
-                                 uint64_t now_ms)
+                                 const uint8_t* record,
+                                 size_t record_size)
 {
     struct vd_companion_record request;
+    uint64_t now_ms;
     int result;
 
     if (!vd_service_valid(service) ||
@@ -758,6 +820,7 @@ int vd_companion_service_process(struct vd_companion_service* service,
     result = vd_decode_record(service, record, record_size, &request);
     if (result != VD_COMPANION_OK)
         return vd_abort_session(service, result);
+    now_ms = service->now_ms(service->clock_user);
     if (request.type == 0u ||
         (request.type & VD_COMPANION_RESPONSE_BIT) != 0u ||
         request.session_id != service->session_id ||
@@ -766,9 +829,12 @@ int vd_companion_service_process(struct vd_companion_service* service,
     if (request.sequence == 0u ||
         request.sequence != service->last_sequence + 1u)
         return vd_abort_session(service, VD_COMPANION_ERROR_REPLAY);
-    if (request.deadline_ms < now_ms ||
-        request.deadline_ms - now_ms > VD_COMPANION_MAX_DEADLINE_MS)
+    if (request.ttl_ms == 0u ||
+        request.ttl_ms > VD_COMPANION_MAX_DEADLINE_MS ||
+        now_ms > UINT64_MAX - request.ttl_ms)
         return vd_abort_session(service, VD_COMPANION_ERROR_DEADLINE);
+    service->request_received_ms = now_ms;
+    service->request_expires_ms = now_ms + request.ttl_ms;
     if (service->state == VD_COMPANION_STATE_PAIRED &&
         request.capabilities != service->negotiated_capabilities)
         return vd_abort_session(service, VD_COMPANION_ERROR_CAPABILITY);
@@ -812,6 +878,8 @@ int vd_companion_service_tick(struct vd_companion_service* service,
 {
     if (!vd_service_valid(service))
         return VD_COMPANION_ERROR_STATE;
+    if (service->input_cleanup_pending != 0u)
+        return vd_release_input(service);
     if (service->state == VD_COMPANION_STATE_FAILED)
         return VD_COMPANION_ERROR_STATE;
     if (service->input_active != 0u &&
@@ -839,6 +907,43 @@ int vd_companion_service_identity_changed(
     return vd_abort_session(service, VD_COMPANION_ERROR_STATE);
 }
 
+int vd_companion_service_retry_neutral(
+    struct vd_companion_service* service)
+{
+    if (!vd_service_valid(service))
+        return VD_COMPANION_ERROR_STATE;
+    if (service->input_cleanup_pending == 0u)
+        return VD_COMPANION_OK;
+    return vd_release_input(service);
+}
+
+int vd_companion_service_get_status(
+    const struct vd_companion_service* service,
+    struct vd_companion_status* status)
+{
+    struct vd_input_trace_info trace_info;
+
+    if (!vd_service_valid(service) || status == NULL)
+        return VD_COMPANION_ERROR_INVALID_ARGUMENT;
+    memset(status, 0, sizeof(*status));
+    status->state = service->state;
+    status->input_active = service->input_active;
+    status->input_cleanup_pending =
+        service->input_cleanup_pending;
+    status->last_error = service->last_error;
+    if (service->trace_initialized != 0u &&
+        vd_input_trace_get_info(&service->trace, &trace_info) ==
+            VD_INPUT_TRACE_OK) {
+        status->trace_state = trace_info.state;
+        status->trace_end_reason = trace_info.end_reason;
+        status->trace_event_count = trace_info.event_count;
+        status->trace_duration_us = trace_info.duration_us;
+        status->trace_max_scheduling_drift_us =
+            trace_info.max_scheduling_drift_us;
+    }
+    return VD_COMPANION_OK;
+}
+
 int vd_companion_service_close(struct vd_companion_service* service)
 {
     int primary = VD_COMPANION_OK;
@@ -852,6 +957,9 @@ int vd_companion_service_close(struct vd_companion_service* service)
         primary = VD_COMPANION_ERROR_INPUT;
     if (service->screen_initialized != 0u)
         (void)vd_screen_stream_close(&service->screen);
+    if (vd_close_screen_transport(service) != VD_COMPANION_OK &&
+        primary == VD_COMPANION_OK)
+        primary = VD_COMPANION_ERROR_IO;
     if (service->bound != 0u) {
         service->bound = 0u;
         if (service->close(service->transport_user) != 0 &&
@@ -859,10 +967,13 @@ int vd_companion_service_close(struct vd_companion_service* service)
             primary = VD_COMPANION_ERROR_IO;
     }
     crypto_wipe(service->secret, sizeof(service->secret));
-    if (primary == VD_COMPANION_OK)
+    if (primary == VD_COMPANION_OK) {
         service->state = VD_COMPANION_STATE_CLOSED;
-    else
+        service->last_error = VD_COMPANION_OK;
+    } else {
         service->state = VD_COMPANION_STATE_FAILED;
+        service->last_error = primary;
+    }
     return primary;
 }
 
@@ -1041,16 +1152,21 @@ int vd_companion_input_playback_tick(
     result = vd_input_trace_playback_tick(
         &service->trace, now_us, vd_companion_trace_apply, service);
     if (result == VD_INPUT_TRACE_COMPLETE) {
-        const int release_result = vd_release_input(service);
-        return release_result == VD_COMPANION_OK
-                   ? VD_INPUT_TRACE_COMPLETE
-                   : release_result;
+        service->input_active = 0u;
+        service->input_cleanup_pending = 0u;
+        service->input_lease_expires_ms = 0u;
+        return VD_INPUT_TRACE_COMPLETE;
     }
     if (result < 0) {
-        (void)vd_release_input(service);
-        if (result == VD_INPUT_TRACE_ERROR_CALLBACK ||
-            result == VD_INPUT_TRACE_ERROR_TIME)
-            (void)vd_abort_session(service, VD_COMPANION_ERROR_INPUT);
+        if (result == VD_INPUT_TRACE_ERROR_CALLBACK)
+            return vd_abort_session(
+                service, VD_COMPANION_ERROR_INPUT);
+        if (result == VD_INPUT_TRACE_ERROR_TIME)
+            return vd_abort_session(
+                service, VD_COMPANION_ERROR_DEADLINE);
+        return vd_release_input(service) == VD_COMPANION_OK
+                   ? result
+                   : VD_COMPANION_ERROR_INPUT;
     }
     return result;
 }
@@ -1100,7 +1216,7 @@ int vd_companion_input_trace_data(
 
 int vd_companion_encode_record(
     const uint8_t secret[VD_COMPANION_SECRET_SIZE], uint16_t message_type,
-    uint16_t status, uint64_t sequence, uint64_t deadline_ms,
+    uint16_t status, uint64_t sequence, uint64_t ttl_ms,
     uint64_t session_id, uint64_t process_generation,
     uint64_t capabilities, const uint8_t* payload, size_t payload_size,
     uint8_t* output, size_t output_capacity, size_t* output_size)
@@ -1110,7 +1226,8 @@ int vd_companion_encode_record(
     if (output_size != NULL)
         *output_size = 0u;
     if (!vd_bytes_nonzero(secret, VD_COMPANION_SECRET_SIZE) ||
-        message_type == 0u || sequence == 0u || deadline_ms == 0u ||
+        message_type == 0u || sequence == 0u || ttl_ms == 0u ||
+        ttl_ms > VD_COMPANION_MAX_DEADLINE_MS ||
         session_id == 0u || process_generation == 0u ||
         payload_size > VD_COMPANION_MAX_PAYLOAD ||
         (payload_size != 0u && payload == NULL) || output == NULL ||
@@ -1125,7 +1242,7 @@ int vd_companion_encode_record(
     vd_write_u16(output + 10, status);
     vd_write_u32(output + 12, (uint32_t)payload_size);
     vd_write_u64(output + 16, sequence);
-    vd_write_u64(output + 24, deadline_ms);
+    vd_write_u64(output + 24, ttl_ms);
     vd_write_u64(output + 32, session_id);
     vd_write_u64(output + 40, process_generation);
     vd_write_u64(output + 48, capabilities);

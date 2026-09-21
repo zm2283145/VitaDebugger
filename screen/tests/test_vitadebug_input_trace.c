@@ -19,6 +19,36 @@ struct playback_sink {
     size_t fail_call;
 };
 
+static void write_u32(uint8_t* output, uint32_t value)
+{
+    output[0] = (uint8_t)(value >> 24);
+    output[1] = (uint8_t)(value >> 16);
+    output[2] = (uint8_t)(value >> 8);
+    output[3] = (uint8_t)value;
+}
+
+static uint32_t crc_update(uint32_t crc, const uint8_t* data, size_t size)
+{
+    size_t index;
+
+    for (index = 0u; index < size; ++index) {
+        uint32_t bit;
+        crc ^= data[index];
+        for (bit = 0u; bit < 8u; ++bit)
+            crc = (crc >> 1) ^
+                  (UINT32_C(0xedb88320) & (0u - (crc & 1u)));
+    }
+    return crc;
+}
+
+static uint32_t trace_checksum(const uint8_t* data, size_t data_size)
+{
+    uint32_t crc = UINT32_C(0xffffffff);
+    crc = crc_update(crc, data, 72u);
+    crc = crc_update(crc, data + 76u, data_size - 76u);
+    return ~crc;
+}
+
 static int apply_input(void* user, const struct vd_input_state* input)
 {
     struct playback_sink* sink = (struct playback_sink*)user;
@@ -77,6 +107,7 @@ static void test_round_trip_and_playback(void)
         (struct vd_input_touch){1u, 123u, 456u, 789u};
     first.touches[1] =
         (struct vd_input_touch){2u, 321u, 654u, 987u};
+    second.buttons = VD_INPUT_BUTTON_CIRCLE;
     CHECK(vd_input_trace_record_input(&trace, &first, 1000u, 10u) ==
               VD_INPUT_TRACE_OK,
           "button analog and touch state records exactly");
@@ -117,9 +148,11 @@ static void test_round_trip_and_playback(void)
     CHECK(vd_input_trace_playback_tick(&trace, 6000u, apply_input,
                                        &sink) ==
               VD_INPUT_TRACE_COMPLETE &&
-              sink.count == 2u &&
-              memcmp(&sink.inputs[1], &second, sizeof(second)) == 0,
-          "final input replays exactly and completes");
+              sink.count == 3u &&
+              memcmp(&sink.inputs[1], &second, sizeof(second)) == 0 &&
+              sink.inputs[2].buttons == 0u &&
+              sink.inputs[2].touch_count == 0u,
+          "final non-neutral input replays then completion neutralizes");
     CHECK(vd_input_trace_get_info(&trace, &info) ==
               VD_INPUT_TRACE_OK &&
               info.max_scheduling_drift_us == 0u,
@@ -182,6 +215,20 @@ static void test_limits_identity_and_malformed(void)
                                 NULL) ==
               VD_INPUT_TRACE_ERROR_CHECKSUM,
           "mutated event payload fails checksum");
+    memcpy(copy, data, data_size);
+    copy[25] = 1u;
+    write_u32(copy + 72, trace_checksum(copy, data_size));
+    CHECK(vd_input_trace_verify(copy, data_size, &config.identity,
+                                NULL) ==
+              VD_INPUT_TRACE_ERROR_FORMAT,
+          "checksum-correct nonzero header reserved byte is rejected");
+    memcpy(copy, data, data_size);
+    copy[VD_INPUT_TRACE_HEADER_SIZE + 48u] = 1u;
+    write_u32(copy + 72, trace_checksum(copy, data_size));
+    CHECK(vd_input_trace_verify(copy, data_size, &config.identity,
+                                NULL) ==
+              VD_INPUT_TRACE_ERROR_FORMAT,
+          "checksum-correct nonzero event reserved byte is rejected");
     CHECK(vd_input_trace_verify(data, data_size - 1u, &config.identity,
                                 NULL) ==
               VD_INPUT_TRACE_ERROR_LIMIT,
@@ -196,6 +243,16 @@ static void test_limits_identity_and_malformed(void)
           "nonmonotonic recording time is rejected");
     (void)vd_input_trace_abort(&trace,
                                VD_INPUT_TRACE_END_ABORTED);
+    CHECK(vd_input_trace_record_begin(&trace, 3u, 3000u) ==
+              VD_INPUT_TRACE_OK &&
+              vd_input_trace_record_input(
+                  &trace, &input, 1003001u, 4u) ==
+                  VD_INPUT_TRACE_ERROR_TIME &&
+              vd_input_trace_get_info(&trace, &info) ==
+                  VD_INPUT_TRACE_OK &&
+              info.state == VD_INPUT_TRACE_STATE_READY &&
+              info.end_reason == VD_INPUT_TRACE_END_TIMEOUT,
+          "duration overflow terminates direct recording as timeout");
 }
 
 static void test_drift_callback_cancel_and_pause(void)
@@ -268,6 +325,31 @@ static void test_drift_callback_cancel_and_pause(void)
               trace.state == VD_INPUT_TRACE_STATE_READY &&
               trace.end_reason == VD_INPUT_TRACE_END_CANCELLED,
           "playback cancel is immediate and explicit");
+
+    sink.fail_call = 0u;
+    sink.count = 0u;
+    input.buttons = VD_INPUT_BUTTON_CROSS;
+    CHECK(vd_input_trace_init(&trace, &config) ==
+              VD_INPUT_TRACE_OK &&
+              vd_input_trace_record_begin(&trace, 6u, 0u) ==
+                  VD_INPUT_TRACE_OK &&
+              vd_input_trace_record_input(&trace, &input, 0u, 1u) ==
+                  VD_INPUT_TRACE_OK &&
+              vd_input_trace_record_end(
+                  &trace, VD_INPUT_TRACE_END_COMPLETE) ==
+                  VD_INPUT_TRACE_OK &&
+              vd_input_trace_playback_begin(&trace, 4000u) ==
+                  VD_INPUT_TRACE_OK,
+          "completion-neutral failure fixture prepares trace");
+    sink.fail_call = 2u;
+    CHECK(vd_input_trace_playback_tick(&trace, 4000u, apply_input,
+                                       &sink) ==
+              VD_INPUT_TRACE_ERROR_CALLBACK &&
+              sink.count == 2u &&
+              trace.state == VD_INPUT_TRACE_STATE_FAILED &&
+              trace.end_reason ==
+                  VD_INPUT_TRACE_END_CALLBACK_FAILURE,
+          "direct playback exposes completion neutral failure");
 }
 
 int main(void)

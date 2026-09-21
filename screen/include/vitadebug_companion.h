@@ -76,6 +76,8 @@ enum vd_companion_result {
     VD_COMPANION_ERROR_FILESYSTEM = -14,
     VD_COMPANION_ERROR_LIMIT = -15,
     VD_COMPANION_ERROR_IO = -16,
+    VD_COMPANION_ERROR_SECRET_REUSE = -17,
+    VD_COMPANION_ERROR_CONNECT = -18,
 };
 
 enum vd_companion_state {
@@ -123,8 +125,12 @@ typedef int (*vd_companion_bind_fn)(void* user, uint32_t network_scope,
 typedef int (*vd_companion_send_fn)(void* user, const uint8_t* record,
                                     size_t record_size);
 typedef int (*vd_companion_close_fn)(void* user);
+typedef uint64_t (*vd_companion_now_ms_fn)(void* user);
 typedef int (*vd_companion_input_fn)(
     void* user, const struct vd_companion_input* input);
+typedef int (*vd_companion_screen_connect_fn)(
+    void* user, uint32_t network_scope, uint16_t port);
+typedef int (*vd_companion_screen_close_fn)(void* user);
 
 /*
  * bind must attempt exactly the supplied scope/port and clean up its own
@@ -161,6 +167,13 @@ struct vd_companion_filesystem {
 };
 
 struct vd_companion_screen_config {
+    /* connect must use exactly the validated scope/port supplied by the
+     * companion; it must not retain a separately configured endpoint.
+     * close must release partial state after a failed connect and be
+     * retryable after returning failure. */
+    vd_companion_screen_connect_fn connect;
+    vd_companion_screen_close_fn close;
+    void* transport_user;
     vd_screen_write_fn write;
     void* write_user;
     const struct vd_screen_source* sources;
@@ -192,6 +205,8 @@ struct vd_companion_config {
     vd_companion_send_fn send;
     vd_companion_close_fn close;
     void* transport_user;
+    vd_companion_now_ms_fn now_ms;
+    void* clock_user;
     vd_companion_input_fn apply_input;
     void* input_user;
     struct vd_companion_filesystem filesystem;
@@ -200,6 +215,18 @@ struct vd_companion_config {
     size_t trace_buffer_capacity;
     uint32_t trace_max_events;
     uint64_t trace_max_duration_us;
+    uint64_t trace_max_scheduling_drift_us;
+};
+
+struct vd_companion_status {
+    uint32_t state;
+    uint32_t input_active;
+    uint32_t input_cleanup_pending;
+    int32_t last_error;
+    uint32_t trace_state;
+    uint32_t trace_end_reason;
+    uint64_t trace_event_count;
+    uint64_t trace_duration_us;
     uint64_t trace_max_scheduling_drift_us;
 };
 
@@ -218,20 +245,29 @@ struct vd_companion_service {
     uint64_t enabled_capabilities;
     uint64_t negotiated_capabilities;
     uint64_t last_sequence;
+    uint64_t request_received_ms;
+    uint64_t request_expires_ms;
     uint64_t input_lease_expires_ms;
     uint64_t total_file_bytes;
     uint32_t state;
     uint32_t initialized;
     uint32_t bound;
     uint32_t input_active;
+    uint32_t input_cleanup_pending;
+    int32_t last_error;
     vd_companion_send_fn send;
     vd_companion_close_fn close;
     void* transport_user;
+    vd_companion_now_ms_fn now_ms;
+    void* clock_user;
     vd_companion_input_fn apply_input;
     void* input_user;
     struct vd_companion_filesystem filesystem;
     struct vd_screen_stream screen;
     uint32_t screen_initialized;
+    vd_companion_screen_close_fn screen_close;
+    void* screen_transport_user;
+    uint32_t screen_connected;
     struct vd_input_trace trace;
     uint32_t trace_initialized;
     uint32_t record_consent;
@@ -244,13 +280,18 @@ int vd_companion_validate_control_port(uint16_t port);
 int vd_companion_service_init(struct vd_companion_service* service,
                               const struct vd_companion_config* config);
 int vd_companion_service_process(struct vd_companion_service* service,
-                                 const uint8_t* record, size_t record_size,
-                                 uint64_t now_ms);
+                                 const uint8_t* record,
+                                 size_t record_size);
 int vd_companion_service_tick(struct vd_companion_service* service,
                               uint64_t now_ms);
 int vd_companion_service_disconnect(struct vd_companion_service* service);
 int vd_companion_service_identity_changed(
     struct vd_companion_service* service);
+int vd_companion_service_retry_neutral(
+    struct vd_companion_service* service);
+int vd_companion_service_get_status(
+    const struct vd_companion_service* service,
+    struct vd_companion_status* status);
 int vd_companion_service_close(struct vd_companion_service* service);
 
 int vd_companion_screen_begin(struct vd_companion_service* service);
@@ -290,7 +331,7 @@ int vd_companion_input_trace_data(
 /* Test/host tooling helper for exact version-1 record construction. */
 int vd_companion_encode_record(
     const uint8_t secret[VD_COMPANION_SECRET_SIZE], uint16_t message_type,
-    uint16_t status, uint64_t sequence, uint64_t deadline_ms,
+    uint16_t status, uint64_t sequence, uint64_t ttl_ms,
     uint64_t session_id, uint64_t process_generation,
     uint64_t capabilities, const uint8_t* payload, size_t payload_size,
     uint8_t* output, size_t output_capacity, size_t* output_size);

@@ -56,7 +56,7 @@ do not probe for or silently select another port.
    generation/session/sequence cannot control the new instance.
 3. **Malformed clients:** send truncated headers and payloads, bad magic,
    version, sizes, reserved fields and tags, zero/stale identities, duplicate,
-   skipped and regressed sequences, expired/excessive deadlines, unknown
+   skipped and regressed sequences, zero/excessive TTL values, unknown
    enums/capabilities, oversized paths/counts/reads, and slow partial records.
    Each must fail closed with bounded memory and deadline, then release the
    connection and any active input.
@@ -75,7 +75,9 @@ do not probe for or silently select another port.
    1x playback. Verify bounded tick work and drift reporting. Exercise cancel,
    timeout, callback failure, Wi-Fi loss, disconnect, shutdown, and
    title/generation change; every path must force neutral and none may
-   auto-play after reconnect. Pause remains unsupported.
+   auto-play after reconnect. Inject one neutral-callback failure and verify
+   cleanup-pending quarantine remains visible until an explicit retry
+   succeeds. Pause remains unsupported.
 7. **Read-only debug root:** use a disposable application-owned root containing
    regular files, directories, a symlink candidate, a device-like candidate,
    traversal names, and a path swapped between resolution and open. Verify

@@ -5,6 +5,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import os
+import secrets
 import struct
 import time
 import zlib
@@ -37,6 +38,19 @@ class TraceError(ValueError):
 
 class TraceReplayCancelled(TraceError):
     """Cooperative replay was explicitly cancelled."""
+
+
+class TraceCleanupError(TraceError):
+    """Replay failed and the required neutral input release also failed."""
+
+    def __init__(
+        self,
+        primary_error: BaseException,
+        cleanup_error: BaseException,
+    ) -> None:
+        super().__init__("neutral input release failed after replay failure")
+        self.primary_error = primary_error
+        self.cleanup_error = cleanup_error
 
 
 @dataclasses.dataclass(frozen=True)
@@ -103,6 +117,8 @@ def verify_trace(data: bytes, *,
                  expected_identity: TraceIdentity | None = None) -> InputTrace:
     if not TRACE_HEADER_SIZE <= len(data) <= TRACE_MAX_FILE_SIZE:
         raise TraceError("trace size is outside fixed bounds")
+    if any(data[25:28]) or any(data[76:96]):
+        raise TraceError("trace header reserved bytes must be zero")
     values = _HEADER.unpack_from(data)
     (magic, version, header_size, event_size, end_reason, flags,
      title_raw, process_id, generation, session_id, trace_id, event_count,
@@ -137,6 +153,9 @@ def verify_trace(data: bytes, *,
     for index in range(event_count):
         offset = TRACE_HEADER_SIZE + index * TRACE_EVENT_SIZE
         event_raw = data[offset:offset + TRACE_EVENT_SIZE]
+        if (any(event_raw[38:40]) or any(event_raw[48:52]) or
+                any(event_raw[60:64])):
+            raise TraceError("trace event reserved bytes must be zero")
         unpacked = _EVENT.unpack(event_raw)
         (sequence, kind, size, relative_us, frame_raw, buttons,
          left_x, left_y, right_x, right_y, touch_count, marker,
@@ -191,18 +210,46 @@ def save_trace(data: bytes, destination: Path, *,
     trace = verify_trace(data, expected_identity=expected_identity)
     destination = Path(destination)
     destination.parent.mkdir(parents=True, exist_ok=True)
-    temporary = destination.with_name(destination.name + ".tmp")
+    temporary: Path | None = None
+    descriptor: int | None = None
     try:
-        with temporary.open("wb") as output:
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        flags |= getattr(os, "O_BINARY", 0)
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+        for _ in range(32):
+            candidate = destination.with_name(
+                f".{destination.name}.{secrets.token_hex(16)}.tmp")
+            try:
+                descriptor = os.open(candidate, flags, 0o600)
+            except FileExistsError:
+                continue
+            temporary = candidate
+            break
+        if descriptor is None or temporary is None:
+            raise FileExistsError(
+                "could not allocate a unique trace temporary file")
+        with os.fdopen(descriptor, "wb") as output:
+            descriptor = None
             output.write(trace.data)
             output.flush()
             os.fsync(output.fileno())
-        os.replace(temporary, destination)
+        for attempt in range(20):
+            try:
+                os.replace(temporary, destination)
+                break
+            except PermissionError:
+                if attempt == 19:
+                    raise
+                time.sleep(0.005)
+        temporary = None
     finally:
-        try:
-            temporary.unlink()
-        except FileNotFoundError:
-            pass
+        if descriptor is not None:
+            os.close(descriptor)
+        if temporary is not None:
+            try:
+                temporary.unlink()
+            except FileNotFoundError:
+                pass
     return trace
 
 
@@ -284,9 +331,10 @@ def replay_trace(
             result = apply(NEUTRAL_INPUT)
             if result not in (None, 0, True):
                 raise TraceError("neutral input release failed")
-        except BaseException:
+        except BaseException as cleanup_error:
             if primary is None:
                 raise
+            raise TraceCleanupError(primary, cleanup_error) from cleanup_error
 
 
 def listing_json(trace: InputTrace) -> str:

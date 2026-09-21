@@ -24,9 +24,16 @@ struct fixture {
     int close_calls;
     int input_calls;
     int input_fail_call;
+    int input_fail_remaining;
     struct vd_companion_input last_input;
     uint32_t resolve_flags;
     int fs_calls;
+    int screen_connect_calls;
+    int screen_connect_result;
+    int screen_close_calls;
+    uint32_t screen_scope;
+    uint16_t screen_port;
+    uint64_t now_ms;
 };
 
 static uint16_t read_u16(const uint8_t* input)
@@ -92,12 +99,21 @@ static int close_fake(void* user)
     return 0;
 }
 
+static uint64_t now_fake(void* user)
+{
+    return ((struct fixture*)user)->now_ms;
+}
+
 static int input_fake(void* user,
                       const struct vd_companion_input* input)
 {
     struct fixture* fixture = (struct fixture*)user;
     fixture->last_input = *input;
     ++fixture->input_calls;
+    if (fixture->input_fail_remaining > 0) {
+        --fixture->input_fail_remaining;
+        return -1;
+    }
     if (fixture->input_fail_call != 0 &&
         fixture->input_calls == fixture->input_fail_call)
         return -1;
@@ -164,6 +180,22 @@ static int screen_write(void* user, const uint8_t* data, size_t size)
     return 0;
 }
 
+static int screen_connect(void* user, uint32_t scope, uint16_t port)
+{
+    struct fixture* fixture = (struct fixture*)user;
+    ++fixture->screen_connect_calls;
+    fixture->screen_scope = scope;
+    fixture->screen_port = port;
+    return fixture->screen_connect_result;
+}
+
+static int screen_close(void* user)
+{
+    struct fixture* fixture = (struct fixture*)user;
+    ++fixture->screen_close_calls;
+    return 0;
+}
+
 static void configure(struct vd_companion_config* config,
                       struct fixture* fixture)
 {
@@ -186,6 +218,8 @@ static void configure(struct vd_companion_config* config,
     config->send = send_fake;
     config->close = close_fake;
     config->transport_user = fixture;
+    config->now_ms = now_fake;
+    config->clock_user = fixture;
     config->apply_input = input_fake;
     config->input_user = fixture;
     config->filesystem.user = fixture;
@@ -201,15 +235,15 @@ static int request(struct vd_companion_service* service,
                    const uint8_t* payload, size_t payload_size,
                    uint8_t* record, size_t* record_size)
 {
+    ((struct fixture*)config->clock_user)->now_ms = now_ms;
     int result = vd_companion_encode_record(
-        config->secret, type, 0u, sequence, now_ms + 500u,
+        config->secret, type, 0u, sequence, 500u,
         config->session_id, config->process_generation, capabilities,
         payload, payload_size, record, VD_COMPANION_MAX_RECORD,
         record_size);
     if (result != VD_COMPANION_OK)
         return result;
-    return vd_companion_service_process(service, record, *record_size,
-                                        now_ms);
+    return vd_companion_service_process(service, record, *record_size);
 }
 
 static void test_defaults_ports_and_bind(void)
@@ -286,6 +320,8 @@ static void test_pair_status_input_and_cleanup(void)
                   1000u, capabilities | VD_COMPANION_CAP_TITLE_LAUNCH,
                   NULL, 0u, record, &record_size) == VD_COMPANION_OK &&
               service.state == VD_COMPANION_STATE_PAIRED &&
+              service.request_received_ms == 1000u &&
+              service.request_expires_ms == 1500u &&
               read_u64(fixture.sent + VD_COMPANION_HEADER_SIZE + 8u) ==
                   capabilities,
           "hello negotiates only implemented capabilities");
@@ -434,7 +470,7 @@ static void test_replay_deadline_auth_and_malformed(void)
     config.mutation_consent = 0u;
     config.apply_input = NULL;
     CHECK(vd_companion_encode_record(
-              config.secret, VD_COMPANION_MESSAGE_HELLO, 0u, 1u, 3000u,
+              config.secret, VD_COMPANION_MESSAGE_HELLO, 0u, 1u, 500u,
               config.session_id, config.process_generation,
               VD_COMPANION_CAP_STATUS, NULL, 0u, record, sizeof(record),
               &record_size) == VD_COMPANION_OK,
@@ -444,8 +480,8 @@ static void test_replay_deadline_auth_and_malformed(void)
         CHECK(vd_companion_service_init(&service, &config) ==
                   VD_COMPANION_OK,
               "truncated-record fixture initializes");
-        CHECK(vd_companion_service_process(&service, record, length,
-                                           2500u) ==
+        fixture.now_ms = 2500u;
+        CHECK(vd_companion_service_process(&service, record, length) ==
                   VD_COMPANION_ERROR_PROTOCOL,
               "every truncated header fails closed");
         CHECK(service.state == VD_COMPANION_STATE_FAILED &&
@@ -458,8 +494,8 @@ static void test_replay_deadline_auth_and_malformed(void)
           "bad-tag fixture initializes");
     memcpy(mutated, record, record_size);
     mutated[64] ^= 1u;
-    CHECK(vd_companion_service_process(&service, mutated, record_size,
-                                       2500u) ==
+    fixture.now_ms = 2500u;
+    CHECK(vd_companion_service_process(&service, mutated, record_size) ==
               VD_COMPANION_ERROR_AUTH,
           "bad record authentication fails closed");
     memset(&service, 0, sizeof(service));
@@ -468,27 +504,46 @@ static void test_replay_deadline_auth_and_malformed(void)
           "bad-magic fixture initializes");
     memcpy(mutated, record, record_size);
     mutated[0] ^= 1u;
-    CHECK(vd_companion_service_process(&service, mutated, record_size,
-                                       2500u) ==
+    fixture.now_ms = 2500u;
+    CHECK(vd_companion_service_process(&service, mutated, record_size) ==
               VD_COMPANION_ERROR_PROTOCOL,
           "bad framing magic fails before dispatch");
     memset(&service, 0, sizeof(service));
     CHECK(vd_companion_service_init(&service, &config) ==
               VD_COMPANION_OK,
           "deadline fixture initializes");
-    CHECK(vd_companion_service_process(&service, record, record_size,
-                                       3001u) ==
+    CHECK(vd_companion_encode_record(
+              config.secret, VD_COMPANION_MESSAGE_HELLO, 0u, 1u,
+              VD_COMPANION_MAX_DEADLINE_MS + 1u, config.session_id,
+              config.process_generation, VD_COMPANION_CAP_STATUS, NULL,
+              0u, record, sizeof(record), &record_size) ==
+              VD_COMPANION_ERROR_INVALID_ARGUMENT,
+          "encoder rejects an excessive relative TTL");
+    CHECK(vd_companion_encode_record(
+              config.secret, VD_COMPANION_MESSAGE_HELLO, 0u, 1u, 0u,
+              config.session_id, config.process_generation,
+              VD_COMPANION_CAP_STATUS, NULL, 0u, record, sizeof(record),
+              &record_size) == VD_COMPANION_ERROR_INVALID_ARGUMENT,
+          "encoder rejects a zero relative TTL");
+    CHECK(vd_companion_encode_record(
+              config.secret, VD_COMPANION_MESSAGE_HELLO, 0u, 1u, 500u,
+              config.session_id, config.process_generation,
+              VD_COMPANION_CAP_STATUS, NULL, 0u, record, sizeof(record),
+              &record_size) == VD_COMPANION_OK,
+          "relative TTL is independent of either machine's epoch");
+    fixture.now_ms = UINT64_MAX - 499u;
+    CHECK(vd_companion_service_process(&service, record, record_size) ==
               VD_COMPANION_ERROR_DEADLINE,
-          "expired request is rejected");
+          "receive-time expiry overflow is rejected");
     memset(&service, 0, sizeof(service));
     CHECK(vd_companion_service_init(&service, &config) ==
               VD_COMPANION_OK,
           "replay fixture initializes");
-    CHECK(vd_companion_service_process(&service, record, record_size,
-                                       2500u) == VD_COMPANION_OK,
+    fixture.now_ms = 2500u;
+    CHECK(vd_companion_service_process(&service, record, record_size) ==
+              VD_COMPANION_OK,
           "valid authenticated hello pairs");
-    CHECK(vd_companion_service_process(&service, record, record_size,
-                                       2500u) ==
+    CHECK(vd_companion_service_process(&service, record, record_size) ==
               VD_COMPANION_ERROR_REPLAY,
           "duplicate sequence is rejected");
 
@@ -502,8 +557,9 @@ static void test_replay_deadline_auth_and_malformed(void)
         for (index = 0u; index < fuzz_size; ++index)
             mutated[index] =
                 (uint8_t)(index * 33u + length * 17u + 11u);
-        CHECK(vd_companion_service_process(&service, mutated, fuzz_size,
-                                           2500u) < 0,
+        fixture.now_ms = 2500u;
+        CHECK(vd_companion_service_process(&service, mutated, fuzz_size) <
+                  0,
               "deterministic malformed corpus never dispatches");
     }
     (void)vd_companion_service_close(&service);
@@ -523,7 +579,11 @@ static void test_integrated_screen(void)
     size_t index;
 
     configure(&config, &fixture);
+    screen.connect = screen_connect;
+    screen.close = screen_close;
+    screen.transport_user = &fixture;
     screen.write = screen_write;
+    screen.write_user = &fixture;
     screen.sources = &source;
     screen.source_count = 1u;
     screen.max_width = 1u;
@@ -538,15 +598,44 @@ static void test_integrated_screen(void)
     config.mutation_consent = 0u;
     config.apply_input = NULL;
     config.screen = &screen;
+    config.screen_port = 1337u;
+    CHECK(vd_companion_service_init(&service, &config) ==
+              VD_COMPANION_ERROR_PORT &&
+              fixture.bind_calls == 0 &&
+              fixture.screen_connect_calls == 0,
+          "forbidden screen endpoint never reaches transport callbacks");
+    config.screen_port = VD_COMPANION_DEFAULT_SCREEN_PORT;
+    memcpy(screen.auth_token, config.secret, sizeof(screen.auth_token));
+    CHECK(vd_companion_service_init(&service, &config) ==
+              VD_COMPANION_ERROR_SECRET_REUSE &&
+              fixture.bind_calls == 0 &&
+              fixture.screen_connect_calls == 0,
+          "screen token cannot reuse the exposed control MAC secret");
+    for (index = 0u; index < sizeof(screen.auth_token); ++index)
+        screen.auth_token[index] = (uint8_t)(0xa0u + index);
+    fixture.screen_connect_result = -1;
+    CHECK(vd_companion_service_init(&service, &config) ==
+              VD_COMPANION_ERROR_CONNECT &&
+              fixture.bind_calls == 1 &&
+              fixture.close_calls == 1 &&
+              fixture.screen_connect_calls == 1 &&
+              fixture.screen_close_calls == 1,
+          "failed screen connect cleans partial and control transports");
+    fixture.screen_connect_result = 0;
     CHECK(vd_companion_service_init(&service, &config) ==
               VD_COMPANION_OK &&
-              service.screen_initialized != 0u,
-          "same companion initializes source-owned framebuffer stream");
+              service.screen_initialized != 0u &&
+              fixture.screen_connect_calls == 2 &&
+              fixture.screen_scope == VD_COMPANION_NETWORK_LOOPBACK &&
+              fixture.screen_port == VD_COMPANION_DEFAULT_SCREEN_PORT,
+          "screen transport receives validated scope and screen port");
     CHECK(vd_companion_screen_begin(&service) == VD_COMPANION_OK &&
               vd_companion_submit_displayed_frame(&service, &frame) ==
                   VD_COMPANION_OK,
           "integrated stream begins and submits registered display buffer");
-    (void)vd_companion_service_close(&service);
+    CHECK(vd_companion_service_close(&service) == VD_COMPANION_OK &&
+              fixture.screen_close_calls == 2,
+          "screen transport closes with the companion");
 }
 
 static void test_integrated_input_trace(void)
@@ -719,13 +808,80 @@ static void test_trace_disconnect_callback_and_timeout(void)
               vd_companion_input_playback_begin(&service, 9000u) ==
                   VD_INPUT_TRACE_OK,
           "callback failure fixture starts playback");
-    fixture.input_fail_call = 1;
+    fixture.input_fail_remaining = 2;
     CHECK(vd_companion_input_playback_tick(&service, 9000u) ==
-              VD_INPUT_TRACE_ERROR_CALLBACK &&
+              VD_COMPANION_ERROR_INPUT &&
               fixture.input_calls == 2 &&
               fixture.last_input.buttons == 0u &&
-              service.state == VD_COMPANION_STATE_FAILED,
-          "callback failure forces neutral and terminal cleanup");
+              service.state == VD_COMPANION_STATE_FAILED &&
+              service.input_cleanup_pending != 0u,
+          "callback and neutral failure enter explicit cleanup quarantine");
+    CHECK(vd_companion_service_retry_neutral(&service) ==
+              VD_COMPANION_OK &&
+              fixture.input_calls == 3 &&
+              service.input_cleanup_pending == 0u &&
+              service.input_active == 0u,
+          "embedding app can retry and complete neutral cleanup");
+}
+
+static void test_protocol_abort_neutral_retry_status(void)
+{
+    uint8_t payload[36] = {0};
+    uint8_t record[VD_COMPANION_MAX_RECORD];
+    size_t record_size = 0u;
+    const uint64_t capabilities =
+        VD_COMPANION_CAP_STATUS | VD_COMPANION_CAP_APP_INPUT;
+    struct vd_companion_config config;
+    struct vd_companion_service service = {0};
+    struct vd_companion_status status;
+    struct fixture fixture = {0};
+
+    configure(&config, &fixture);
+    config.enabled_capabilities = capabilities;
+    CHECK(vd_companion_service_init(&service, &config) ==
+              VD_COMPANION_OK &&
+              request(&service, &config, VD_COMPANION_MESSAGE_HELLO, 1u,
+                      10000u, capabilities, NULL, 0u, record,
+                      &record_size) == VD_COMPANION_OK,
+          "neutral retry fixture pairs");
+    write_u32(payload, VD_INPUT_BUTTON_CROSS);
+    write_u32(payload + 32, 100u);
+    CHECK(request(&service, &config, VD_COMPANION_MESSAGE_INPUT, 2u,
+                  10001u, capabilities, payload, sizeof(payload), record,
+                  &record_size) == VD_COMPANION_OK,
+          "neutral retry fixture activates input");
+    CHECK(vd_companion_encode_record(
+              config.secret, VD_COMPANION_MESSAGE_STATUS, 0u, 3u, 500u,
+              config.session_id, config.process_generation, capabilities,
+              NULL, 0u, record, sizeof(record), &record_size) ==
+              VD_COMPANION_OK,
+          "malformed request base encodes");
+    record[64] ^= 1u;
+    fixture.input_fail_remaining = 1;
+    fixture.now_ms = 10002u;
+    CHECK(vd_companion_service_process(
+              &service, record, record_size) ==
+              VD_COMPANION_ERROR_INPUT &&
+              vd_companion_service_get_status(&service, &status) ==
+                  VD_COMPANION_OK &&
+              status.state == VD_COMPANION_STATE_FAILED &&
+              status.input_active != 0u &&
+              status.input_cleanup_pending != 0u &&
+              status.last_error == VD_COMPANION_ERROR_INPUT &&
+              fixture.close_calls == 1,
+          "protocol abort exposes failed neutral cleanup in local status");
+    CHECK(vd_companion_service_init(&service, &config) ==
+              VD_COMPANION_ERROR_STATE &&
+              service.input_active != 0u &&
+              service.input_cleanup_pending != 0u,
+          "reinitialization cannot erase neutral cleanup quarantine");
+    CHECK(vd_companion_service_retry_neutral(&service) ==
+              VD_COMPANION_OK &&
+              vd_companion_service_get_status(&service, &status) ==
+                  VD_COMPANION_OK &&
+              status.input_active == 0u &&
+              status.input_cleanup_pending == 0u,
+          "protocol abort neutral cleanup remains retryable");
 }
 
 int main(void)
@@ -737,6 +893,7 @@ int main(void)
     test_integrated_screen();
     test_integrated_input_trace();
     test_trace_disconnect_callback_and_timeout();
+    test_protocol_abort_neutral_retry_status();
     if (failures != 0) {
         fprintf(stderr, "%d companion test(s) failed\n", failures);
         return 1;

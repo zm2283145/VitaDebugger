@@ -4,6 +4,7 @@ import struct
 import tempfile
 import unittest
 import zlib
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from vdscreen.trace import (
@@ -14,6 +15,7 @@ from vdscreen.trace import (
     TRACE_EVENT_SIZE,
     TRACE_HEADER_SIZE,
     TRACE_NO_FRAME,
+    TraceCleanupError,
     TraceError,
     TraceIdentity,
     TraceReplayCancelled,
@@ -128,6 +130,18 @@ class InputTraceTests(unittest.TestCase):
         with self.assertRaisesRegex(TraceError, "time regressed"):
             verify_trace(bytes(changed))
 
+    def test_checksum_correct_reserved_bytes_fail_closed(self) -> None:
+        for offset in (25, 27, 76, 95, TRACE_HEADER_SIZE + 38,
+                       TRACE_HEADER_SIZE + 51,
+                       TRACE_HEADER_SIZE + 63):
+            changed = bytearray(_trace())
+            changed[offset] = 1
+            struct.pack_into(">I", changed, 72, 0)
+            struct.pack_into(">I", changed, 72, _checksum(changed))
+            with self.subTest(offset=offset), self.assertRaisesRegex(
+                    TraceError, "reserved"):
+                verify_trace(bytes(changed))
+
     def test_deterministic_malformed_corpus_fails_closed(self) -> None:
         data = _trace()
         for length in range(TRACE_HEADER_SIZE):
@@ -176,6 +190,17 @@ class InputTraceTests(unittest.TestCase):
         self.assertEqual(applied[-1], NEUTRAL_INPUT)
 
         applied.clear()
+        with self.assertRaises(TraceCleanupError) as raised:
+            replay_trace(
+                trace,
+                lambda state: (applied.append(state), -1)[1],
+            )
+        self.assertIn("callback failed", str(raised.exception.primary_error))
+        self.assertIn("neutral input release failed",
+                      str(raised.exception.cleanup_error))
+        self.assertEqual(applied[-1], NEUTRAL_INPUT)
+
+        applied.clear()
         clock = FakeClock()
 
         def oversleep(duration: float) -> None:
@@ -195,6 +220,38 @@ class InputTraceTests(unittest.TestCase):
         with self.assertRaisesRegex(TraceError, "complete"):
             replay_trace(trace, lambda state: applied.append(state))
         self.assertEqual(applied, [])
+
+    def test_atomic_save_owns_only_unique_temps(self) -> None:
+        data = _trace()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            destination = root / "trace.vdtrace"
+            predictable = root / "trace.vdtrace.tmp"
+            predictable.write_bytes(b"unrelated")
+            victim = root / "victim"
+            victim.write_bytes(b"keep")
+            symlink = root / ".trace.vdtrace.attacker.tmp"
+            try:
+                symlink.symlink_to(victim)
+            except OSError:
+                symlink = None
+            else:
+                if not symlink.is_symlink():
+                    symlink.unlink()
+                    symlink = None
+
+            with ThreadPoolExecutor(max_workers=4) as executor:
+                results = list(executor.map(
+                    lambda _: save_trace(data, destination), range(8)))
+            self.assertTrue(all(result.data == data for result in results))
+            self.assertEqual(destination.read_bytes(), data)
+            self.assertEqual(predictable.read_bytes(), b"unrelated")
+            self.assertEqual(victim.read_bytes(), b"keep")
+            if symlink is not None:
+                self.assertTrue(symlink.is_symlink())
+            owned_temps = list(root.glob(".trace.vdtrace.*.tmp"))
+            self.assertEqual(
+                owned_temps, [symlink] if symlink is not None else [])
 
 
 if __name__ == "__main__":

@@ -83,6 +83,10 @@ callbacks. Mutation stays disabled unless
 The nested screen configuration requires its own nonzero token; never reuse
 the control MAC secret because screen protocol v1 sends its token in the
 admission preface.
+Its required connect callback receives the already validated network scope
+and screen port; the callback must use those exact values and cannot retain a
+separately configured fallback endpoint. The close callback is also invoked
+after a failed connection attempt and must release partial state.
 
 The screen-only call pattern below documents the underlying framebuffer
 contract. Companion callers supply the same sources through
@@ -247,6 +251,9 @@ global `SceCtrl`/`SceTouch` hooks. Playback is real-time 1x, tick-driven,
 drift-bounded, never automatic after reconnect, and always neutralizes the
 application callback on completion or failure. See
 [input trace v1](docs/input-trace-v1.md).
+If neutralization itself fails, the service retains active/cleanup-pending
+quarantine state, surfaces `VD_COMPANION_ERROR_INPUT`, and permits an explicit
+local retry; it never clears the state or reports successful cleanup.
 
 The deterministic consumer entry point verifies the atomic manifest and image:
 

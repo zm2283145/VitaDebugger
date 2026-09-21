@@ -157,10 +157,14 @@ static int vd_trace_append(struct vd_input_trace* trace, uint32_t kind,
     if (now_us < trace->started_us)
         return VD_INPUT_TRACE_ERROR_TIME;
     relative_us = now_us - trace->started_us;
-    if ((trace->has_event != 0u &&
-         relative_us < trace->last_relative_us) ||
-        relative_us > trace->max_duration_us)
+    if (trace->has_event != 0u &&
+        relative_us < trace->last_relative_us)
         return VD_INPUT_TRACE_ERROR_TIME;
+    if (relative_us > trace->max_duration_us) {
+        (void)vd_input_trace_record_end(
+            trace, VD_INPUT_TRACE_END_TIMEOUT);
+        return VD_INPUT_TRACE_ERROR_TIME;
+    }
     if (frame_index != VD_INPUT_TRACE_NO_FRAME &&
         trace->has_frame != 0u &&
         frame_index < trace->last_frame_index)
@@ -563,6 +567,13 @@ int vd_input_trace_playback_tick(struct vd_input_trace* trace,
         ++dispatched;
     }
     if (trace->playback_index == trace->event_count) {
+        const struct vd_input_state neutral = {0};
+        if (apply(apply_user, &neutral) != 0) {
+            trace->state = VD_INPUT_TRACE_STATE_FAILED;
+            trace->end_reason =
+                VD_INPUT_TRACE_END_CALLBACK_FAILURE;
+            return VD_INPUT_TRACE_ERROR_CALLBACK;
+        }
         trace->state = VD_INPUT_TRACE_STATE_READY;
         return VD_INPUT_TRACE_COMPLETE;
     }

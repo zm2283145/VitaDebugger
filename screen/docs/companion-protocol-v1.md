@@ -24,7 +24,7 @@ record is an 80-byte header followed by `payload_size` bytes:
 | 10 | 2 | request status, exactly zero; response status below |
 | 12 | 4 | payload size, at most 4096 |
 | 16 | 8 | sequence, starting at 1 and increasing exactly by 1 |
-| 24 | 8 | absolute monotonic deadline in milliseconds |
+| 24 | 8 | relative TTL in milliseconds, 1 through 5000 |
 | 32 | 8 | nonzero random session ID |
 | 40 | 8 | nonzero source-owned process generation |
 | 48 | 8 | requested or negotiated capability mask |
@@ -38,10 +38,10 @@ record. Use only loopback or an explicitly approved trusted private LAN; do
 not forward the port or use shared/public Wi-Fi.
 
 Requests have types 1 through 7. Responses set bit 15 on the request type,
-echo sequence and deadline, and carry the service identity and negotiated
+echo sequence and TTL, and carry the service identity and negotiated
 capability mask. Response status is zero for success or the positive magnitude
 of the exact `vd_companion_result` error. Authentication, framing, identity,
-sequence, deadline, and capability checks occur before operation dispatch.
+sequence, TTL, and capability checks occur before operation dispatch.
 The caller must treat a transport disconnect or operation error as session
 termination and call `vd_companion_service_disconnect()`. Authentication,
 framing, identity, replay, deadline, and capability-envelope failures already
@@ -50,7 +50,11 @@ transport and screen state, and wipes the control secret. A reconnect requires
 fresh explicit initialization with a new secret and session ID; sequence 1 is
 never accepted again by the old service instance.
 
-The accepted deadline window is `now_ms` through `now_ms + 5000`, inclusive.
+The TTL is authenticated and starts when the service receives the complete
+record. It never compares a host timestamp with a Vita timestamp and assumes
+no synchronized clock or shared monotonic epoch. The service records the local
+receive time and checked `receive_time + TTL` expiry without overflow. The
+transport separately bounds partial-record reads to five seconds.
 Sequence zero, duplicates, gaps, regressions, stale generations, stale session
 IDs, nonzero reserved fields, response-shaped requests, oversized records,
 and unknown enum values fail closed.
@@ -89,12 +93,15 @@ this foundation, so launch mutation remains default-disabled and unavailable.
 
 ## Implemented requests
 
-`STATUS` (type 2) has no request payload. Its 64-byte response contains the
+`STATUS` (type 2) has no request payload. Its 72-byte response contains the
 configured 9-byte title ID at offset 0, three zero bytes, PID at offset 12,
 generation at 16, session ID at 24, and negotiated mask at 32. It cannot
 enumerate or select another target. Trace state and event count are `u32` at
 40 and 44; trace duration and observed maximum playback drift are `u64` at
-48 and 56. Recording is therefore visible to a paired client.
+48 and 56. Input cleanup-pending and the positive magnitude of the latest
+terminal error are `u32` at 64 and 68. Recording and cleanup quarantine are
+therefore visible to a paired client; the same fields are available locally
+through `vd_companion_service_get_status()` after transport teardown.
 
 `INPUT` (type 3) has a 36-byte payload: buttons `u32`, signed left X/Y and
 right X/Y axes as four `i16` values, touch count `u8`, three zero bytes, two
