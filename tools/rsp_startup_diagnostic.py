@@ -8,6 +8,7 @@ import ftplib
 import ipaddress
 import json
 import math
+import socket
 import struct
 import time
 from pathlib import Path
@@ -15,8 +16,8 @@ from typing import Any
 
 
 MAGIC = 0x55565344
-VERSION = 3
-RECORD_FORMAT = "<16I"
+VERSION = 5
+RECORD_FORMAT = "<21I"
 RECORD_SIZE = struct.calcsize(RECORD_FORMAT)
 JOURNAL_SIZE = RECORD_SIZE * 2
 REMOTE_PATH = "ux0:/data/vitadebugger-rsp-startup.bin"
@@ -26,6 +27,8 @@ OBS_MALFORMED_REQUEST = 4
 OBS_REQUEST_RECEIVED = 8
 OBS_RESPONSE_ATTEMPTED = 16
 OBS_RESPONSE_SENT = 32
+OBS_SELF_PROBE_RECEIVED = 64
+OBS_SELF_PROBE_FAILED = 128
 KNOWN_STAGE_FLAGS = (
     FAILED
     | OBS_POLL_ENTERED
@@ -33,6 +36,8 @@ KNOWN_STAGE_FLAGS = (
     | OBS_REQUEST_RECEIVED
     | OBS_RESPONSE_ATTEMPTED
     | OBS_RESPONSE_SENT
+    | OBS_SELF_PROBE_RECEIVED
+    | OBS_SELF_PROBE_FAILED
 )
 
 STAGES = {
@@ -108,7 +113,9 @@ def parse_record(data: bytes) -> dict[str, Any]:
     if run_id == 0:
         raise StartupDiagnosticFailure("startup record run ID is invalid")
     details = values[12:15]
-    if values[15] != 0:
+    route_address, bound_address, bound_port = values[15:18]
+    endpoint_result, self_probe_result = values[18:20]
+    if values[20] != 0:
         raise StartupDiagnosticFailure("startup record reserved fields are nonzero")
     if stage_flags & ~KNOWN_STAGE_FLAGS or build_flags & ~7:
         raise StartupDiagnosticFailure("startup record flags are invalid")
@@ -116,6 +123,29 @@ def parse_record(data: bytes) -> dict[str, Any]:
     if failed_stage_mask & ~valid_stage_mask:
         raise StartupDiagnosticFailure("startup failed-stage mask is invalid")
     signed_result = result if result < 0x80000000 else result - 0x100000000
+    signed_self_probe = (
+        self_probe_result
+        if self_probe_result < 0x80000000
+        else self_probe_result - 0x100000000
+    )
+    signed_endpoint = (
+        endpoint_result
+        if endpoint_result < 0x80000000
+        else endpoint_result - 0x100000000
+    )
+    if bound_port > 0xFFFF:
+        raise StartupDiagnosticFailure("startup bound port is invalid")
+    if stage >= 10:
+        if signed_endpoint == 0 and bound_port == 0:
+            raise StartupDiagnosticFailure("startup bound endpoint is missing")
+        if signed_endpoint != 0 and (bound_address != 0 or bound_port != 0):
+            raise StartupDiagnosticFailure("startup bound endpoint is inconsistent")
+        received = bool(stage_flags & OBS_SELF_PROBE_RECEIVED)
+        failed_probe = bool(stage_flags & OBS_SELF_PROBE_FAILED)
+        if received == failed_probe:
+            raise StartupDiagnosticFailure("startup self-probe flags are invalid")
+        if received != (signed_self_probe == 0):
+            raise StartupDiagnosticFailure("startup self-probe result is inconsistent")
     if signed_result != 0 and not stage_flags & FAILED:
         raise StartupDiagnosticFailure("startup record failure result is inconsistent")
     if stage_flags & FAILED and not failed_stage_mask & (1 << stage):
@@ -132,6 +162,8 @@ def parse_record(data: bytes) -> dict[str, Any]:
         "request_received": bool(stage_flags & OBS_REQUEST_RECEIVED),
         "response_attempted": bool(stage_flags & OBS_RESPONSE_ATTEMPTED),
         "response_sent": bool(stage_flags & OBS_RESPONSE_SENT),
+        "self_probe_received": bool(stage_flags & OBS_SELF_PROBE_RECEIVED),
+        "self_probe_failed": bool(stage_flags & OBS_SELF_PROBE_FAILED),
         "build_flags": build_flags,
         "run_id": run_id,
         "failed_stage_mask": failed_stage_mask,
@@ -146,6 +178,12 @@ def parse_record(data: bytes) -> dict[str, Any]:
             value if value < 0x80000000 else value - 0x100000000
             for value in details
         ],
+        "route_address": socket.inet_ntoa(struct.pack("<I", route_address)),
+        "route_known": route_address != 0,
+        "bound_address": socket.inet_ntoa(struct.pack("<I", bound_address)),
+        "bound_port": bound_port,
+        "endpoint_result": signed_endpoint,
+        "self_probe_result": signed_self_probe,
         "admission_diagnostic": bool(build_flags & 1),
         "console_test": bool(build_flags & 2),
         "kernel_mode": bool(build_flags & 4),

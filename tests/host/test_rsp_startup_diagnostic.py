@@ -23,7 +23,17 @@ def record(
     run_id: int = 0x123456789ABCDEF0,
     failed_stage_mask: int | None = None,
     details: tuple[int, int, int] = (0, 0, 0),
+    route_address: int = 0xD901010A,
+    bound_address: int = 0,
+    bound_port: int = 1235,
+    endpoint_result: int = 0,
+    self_probe_result: int = 0,
 ) -> bytes:
+    if stage >= 10 and not stage_flags & (
+        diagnostic.OBS_SELF_PROBE_RECEIVED
+        | diagnostic.OBS_SELF_PROBE_FAILED
+    ):
+        stage_flags |= diagnostic.OBS_SELF_PROBE_RECEIVED
     if failed_stage_mask is None:
         failed_stage_mask = (
             1 << stage if stage_flags & diagnostic.FAILED else 0
@@ -42,6 +52,11 @@ def record(
         run_id >> 32,
         failed_stage_mask,
         *(value & 0xFFFFFFFF for value in details),
+        route_address,
+        bound_address,
+        bound_port,
+        endpoint_result & 0xFFFFFFFF,
+        self_probe_result & 0xFFFFFFFF,
         0,
     ]
     raw = struct.pack(diagnostic.RECORD_FORMAT, *values)
@@ -56,6 +71,11 @@ class StartupDiagnosticTests(unittest.TestCase):
         self.assertEqual(parsed["selected"]["stage_name"], "stdio_ready")
         self.assertTrue(parsed["selected"]["admission_diagnostic"])
         self.assertTrue(parsed["selected"]["console_test"])
+        self.assertEqual(parsed["selected"]["route_address"], "10.1.1.217")
+        self.assertTrue(parsed["selected"]["route_known"])
+        self.assertEqual(parsed["selected"]["bound_address"], "0.0.0.0")
+        self.assertEqual(parsed["selected"]["bound_port"], 1235)
+        self.assertEqual(parsed["selected"]["endpoint_result"], 0)
 
     def test_sequence_wrap_selects_newest_slot(self) -> None:
         parsed = diagnostic.parse_journal(
@@ -93,7 +113,7 @@ class StartupDiagnosticTests(unittest.TestCase):
 
     def test_rejects_reserved_flags_and_inconsistent_result(self) -> None:
         cases = [
-            record(1, 1, stage_flags=64),
+            record(1, 1, stage_flags=256),
             record(1, 1, build_flags=8),
             record(1, 1, result=-5),
             record(
@@ -116,12 +136,47 @@ class StartupDiagnosticTests(unittest.TestCase):
                 stage_flags=diagnostic.FAILED,
                 build_flags=4,
                 details=(-35, 35, 200),
+                self_probe_result=-110,
             )
         )
         self.assertTrue(parsed["failed"])
         self.assertEqual(parsed["result"], -35)
         self.assertTrue(parsed["kernel_mode"])
         self.assertEqual(parsed["details_signed"], [-35, 35, 200])
+        self.assertEqual(parsed["self_probe_result"], -110)
+
+    def test_decodes_persistent_self_probe_observations(self) -> None:
+        flags = (
+            diagnostic.OBS_POLL_ENTERED
+            | diagnostic.OBS_SELF_PROBE_RECEIVED
+        )
+        parsed = diagnostic.parse_record(record(20, 20, stage_flags=flags))
+        self.assertTrue(parsed["poll_entered"])
+        self.assertTrue(parsed["self_probe_received"])
+        self.assertFalse(parsed["self_probe_failed"])
+
+    def test_rejects_invalid_endpoint_and_self_probe_fields(self) -> None:
+        received = diagnostic.OBS_SELF_PROBE_RECEIVED
+        failed = diagnostic.OBS_SELF_PROBE_FAILED
+        cases = [
+            record(20, 20, bound_port=70000),
+            record(20, 20, stage_flags=received | failed),
+            record(20, 20, stage_flags=received, self_probe_result=-1),
+            record(20, 20, stage_flags=failed, self_probe_result=0),
+            record(20, 20, endpoint_result=-9),
+        ]
+        for raw in cases:
+            with self.subTest(raw=raw):
+                with self.assertRaises(diagnostic.StartupDiagnosticFailure):
+                    diagnostic.parse_record(raw)
+
+        parsed = diagnostic.parse_record(
+            record(
+                20, 20, bound_address=0, bound_port=0,
+                endpoint_result=-9,
+            )
+        )
+        self.assertEqual(parsed["endpoint_result"], -9)
 
     def test_accepts_zero_result_failure_and_retains_prior_failure(self) -> None:
         current_failure = diagnostic.parse_record(

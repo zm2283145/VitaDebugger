@@ -28,13 +28,15 @@
 #define UVDB_STARTUP_DIAGNOSTIC_PATH \
     "ux0:/data/vitadebugger-rsp-startup.bin"
 #define UVDB_STARTUP_DIAGNOSTIC_MAGIC UINT32_C(0x55565344)
-#define UVDB_STARTUP_DIAGNOSTIC_VERSION UINT32_C(3)
+#define UVDB_STARTUP_DIAGNOSTIC_VERSION UINT32_C(5)
 #define UVDB_STARTUP_DIAGNOSTIC_FAILED UINT32_C(1)
 #define UVDB_STARTUP_OBS_POLL_ENTERED UINT32_C(2)
 #define UVDB_STARTUP_OBS_MALFORMED_REQUEST UINT32_C(4)
 #define UVDB_STARTUP_OBS_REQUEST_RECEIVED UINT32_C(8)
 #define UVDB_STARTUP_OBS_RESPONSE_ATTEMPTED UINT32_C(16)
 #define UVDB_STARTUP_OBS_RESPONSE_SENT UINT32_C(32)
+#define UVDB_STARTUP_OBS_SELF_PROBE_RECEIVED UINT32_C(64)
+#define UVDB_STARTUP_OBS_SELF_PROBE_FAILED UINT32_C(128)
 #define UVDB_STARTUP_BUILD_ADMISSION UINT32_C(1)
 #define UVDB_STARTUP_BUILD_CONSOLE UINT32_C(2)
 #define UVDB_STARTUP_BUILD_KERNEL UINT32_C(4)
@@ -78,11 +80,16 @@ struct uvdb_startup_diagnostic_record
     uint32_t run_id_high;
     uint32_t failed_stage_mask;
     uint32_t detail[3];
+    uint32_t route_address;
+    uint32_t bound_address;
+    uint32_t bound_port;
+    uint32_t endpoint_result;
+    uint32_t self_probe_result;
     uint32_t reserved;
 };
 
 _Static_assert(
-    sizeof(struct uvdb_startup_diagnostic_record) == 64u,
+    sizeof(struct uvdb_startup_diagnostic_record) == 84u,
     "startup diagnostic record ABI changed");
 
 static int startup_diagnostic_descriptor = -1;
@@ -90,6 +97,11 @@ static uint32_t startup_diagnostic_sequence;
 static uint64_t startup_diagnostic_run_id;
 static uint32_t startup_diagnostic_failed_stage_mask;
 static uint32_t startup_diagnostic_observation_flags;
+static uint32_t startup_diagnostic_route_address;
+static uint32_t startup_diagnostic_bound_address;
+static uint32_t startup_diagnostic_bound_port;
+static int startup_diagnostic_endpoint_result;
+static int startup_diagnostic_self_probe_result;
 
 static uint32_t startup_diagnostic_checksum(
     const struct uvdb_startup_diagnostic_record* record)
@@ -153,6 +165,13 @@ static void startup_diagnostic_mark_detail(
     record.detail[0] = detail0;
     record.detail[1] = detail1;
     record.detail[2] = detail2;
+    record.route_address = startup_diagnostic_route_address;
+    record.bound_address = startup_diagnostic_bound_address;
+    record.bound_port = startup_diagnostic_bound_port;
+    record.endpoint_result =
+        (uint32_t)startup_diagnostic_endpoint_result;
+    record.self_probe_result =
+        (uint32_t)startup_diagnostic_self_probe_result;
     record.checksum = startup_diagnostic_checksum(&record);
     off_t offset = (off_t)(
         (record.sequence & 1u) * sizeof(record));
@@ -173,6 +192,27 @@ static void startup_diagnostic_mark(
     startup_diagnostic_mark_detail(stage, result, stage_flags, 0, 0, 0);
 }
 
+static void startup_diagnostic_set_route(uint32_t address)
+{
+    startup_diagnostic_route_address = address;
+}
+
+static void startup_diagnostic_set_bound(
+    uint32_t address, uint32_t port, int result)
+{
+    startup_diagnostic_bound_address = address;
+    startup_diagnostic_bound_port = port;
+    startup_diagnostic_endpoint_result = result;
+}
+
+static void startup_diagnostic_set_self_probe(int result)
+{
+    startup_diagnostic_self_probe_result = result;
+    startup_diagnostic_observation_flags |=
+        result == 0 ? UVDB_STARTUP_OBS_SELF_PROBE_RECEIVED :
+                      UVDB_STARTUP_OBS_SELF_PROBE_FAILED;
+}
+
 static void startup_diagnostic_start(void)
 {
     startup_diagnostic_sequence = 0;
@@ -181,6 +221,11 @@ static void startup_diagnostic_start(void)
         startup_diagnostic_run_id = 1;
     startup_diagnostic_failed_stage_mask = 0;
     startup_diagnostic_observation_flags = 0;
+    startup_diagnostic_route_address = 0;
+    startup_diagnostic_bound_address = 0;
+    startup_diagnostic_bound_port = 0;
+    startup_diagnostic_endpoint_result = 0;
+    startup_diagnostic_self_probe_result = 0;
     startup_diagnostic_descriptor = open(
         UVDB_STARTUP_DIAGNOSTIC_PATH,
         O_WRONLY | O_CREAT | O_TRUNC, 0600);
@@ -203,6 +248,9 @@ static void startup_diagnostic_start(void)
 #define startup_diagnostic_mark(stage, result, flags) ((void)0)
 #define startup_diagnostic_mark_detail(stage, result, flags, d0, d1, d2) \
     ((void)0)
+#define startup_diagnostic_set_route(address) ((void)0)
+#define startup_diagnostic_set_bound(address, port, result) ((void)0)
+#define startup_diagnostic_set_self_probe(result) ((void)0)
 #endif
 
 #if defined(UVDB_GDB_VFP_FIXTURE) && !defined(UVDB_KERNEL_VFP_READS)
@@ -257,6 +305,71 @@ static int admission_diagnostic_start(void)
         close(descriptor);
         return -1;
     }
+#ifdef UVDB_STARTUP_DIAGNOSTIC
+    static const char request[] = UVDB_ADMISSION_DIAGNOSTIC_REQUEST;
+    struct sockaddr_in bound = {0};
+    socklen_t bound_size = sizeof(bound);
+    errno = 0;
+    int endpoint_result =
+        getsockname(descriptor, (void*)&bound, &bound_size);
+    startup_diagnostic_set_bound(
+        endpoint_result == 0 ? bound.sin_addr.s_addr : 0,
+        endpoint_result == 0 ? (uint32_t)ntohs(bound.sin_port) : 0,
+        endpoint_result == 0 ? 0 : (errno ? -errno : -1));
+
+    errno = 0;
+    int probe = socket(AF_INET, SOCK_DGRAM, 0);
+    int probe_result = errno ? -errno : -1;
+    if(probe >= 0)
+    {
+        struct sockaddr_in target = {
+            .sin_len = sizeof(target),
+            .sin_family = AF_INET,
+            .sin_addr = {
+                .s_addr = startup_diagnostic_route_address != 0
+                              ? startup_diagnostic_route_address
+                              : htonl(INADDR_LOOPBACK)},
+            .sin_port = htons(UVDB_ADMISSION_DIAGNOSTIC_PORT),
+        };
+        errno = 0;
+        ssize_t sent = sendto(
+            probe, request, sizeof(request) - 1u, 0,
+            (void*)&target, sizeof(target));
+        probe_result =
+            sent < 0 ? (errno ? -errno : -1) :
+            sent != (ssize_t)(sizeof(request) - 1u) ? -EIO :
+                                                          -ETIMEDOUT;
+        struct sockaddr_in probe_source = {0};
+        socklen_t probe_source_size = sizeof(probe_source);
+        errno = 0;
+        int probe_source_result =
+            getsockname(probe, (void*)&probe_source, &probe_source_size);
+        if(probe_source_result < 0)
+            probe_result = errno ? -errno : -1;
+        for(int wait = 0; sent == (ssize_t)(sizeof(request) - 1u) &&
+                             probe_source_result == 0 &&
+                             wait < 100; ++wait)
+        {
+            unsigned char received[sizeof(request)];
+            struct sockaddr_in peer = {0};
+            socklen_t peer_size = sizeof(peer);
+            ssize_t size = recvfrom(
+                descriptor, received, sizeof(received),
+                MSG_DONTWAIT, (void*)&peer, &peer_size);
+            if(size == (ssize_t)(sizeof(request) - 1u) &&
+               memcmp(received, request, sizeof(request) - 1u) == 0 &&
+               peer.sin_addr.s_addr == probe_source.sin_addr.s_addr &&
+               peer.sin_port == probe_source.sin_port)
+            {
+                probe_result = 0;
+                break;
+            }
+            usleep(1000);
+        }
+        close(probe);
+    }
+    startup_diagnostic_set_self_probe(probe_result);
+#endif
     admission_diagnostic_socket = descriptor;
     return 0;
 }
@@ -578,6 +691,8 @@ int main(void)
             route_result = getsockname(sock, (void*)&sin, &l);
         close(sock);
     }
+    if(route_result == 0)
+        startup_diagnostic_set_route(sin.sin_addr.s_addr);
     startup_diagnostic_mark(
         UVDB_STARTUP_STAGE_ROUTE_READY, route_result,
         route_result < 0 ? UVDB_STARTUP_DIAGNOSTIC_FAILED : 0);
