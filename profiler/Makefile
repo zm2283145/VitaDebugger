@@ -250,7 +250,10 @@ $(HOST_BUILD)/generate_vitaprofiler_fixture: src/vitaprofiler.c src/vitaprofiler
 $(HOST_BUILD)/capture-from-c.vptrace: $(HOST_BUILD)/generate_vitaprofiler_fixture
 	$(HOST_BUILD)/generate_vitaprofiler_fixture $@
 
-host-test: $(HOST_BUILD)/test_vitaprofiler $(HOST_BUILD)/test_vitaprofiler_names $(HOST_BUILD)/test_vitaprofiler_stream $(HOST_BUILD)/test_vitaprofiler_tcp_vita $(HOST_BUILD)/test_vitaprofiler_integrations $(HOST_BUILD)/test_vitaprofiler_graphics_disabled $(HOST_BUILD)/test_vitaprofiler_pmu_vita $(HOST_BUILD)/test_vitaprofiler_sampling $(HOST_BUILD)/capture-from-c.vptrace
+$(HOST_BUILD)/capture-v2-from-c.vptrace: $(HOST_BUILD)/generate_vitaprofiler_fixture
+	$(HOST_BUILD)/generate_vitaprofiler_fixture --v2 $@
+
+host-test: $(HOST_BUILD)/test_vitaprofiler $(HOST_BUILD)/test_vitaprofiler_names $(HOST_BUILD)/test_vitaprofiler_stream $(HOST_BUILD)/test_vitaprofiler_tcp_vita $(HOST_BUILD)/test_vitaprofiler_integrations $(HOST_BUILD)/test_vitaprofiler_graphics_disabled $(HOST_BUILD)/test_vitaprofiler_pmu_vita $(HOST_BUILD)/test_vitaprofiler_sampling $(HOST_BUILD)/capture-from-c.vptrace $(HOST_BUILD)/capture-v2-from-c.vptrace
 	$(HOST_BUILD)/test_vitaprofiler
 	$(HOST_BUILD)/test_vitaprofiler_names
 	$(HOST_BUILD)/test_vitaprofiler_stream

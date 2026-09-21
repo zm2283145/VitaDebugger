@@ -148,8 +148,8 @@ static void test_cooperative_graphics_hooks(void)
     struct fake_source source = {100u, 5u, 0u};
     struct vp_name_dictionary names;
     struct vp_name_dictionary_config name_config;
-    struct vp_name_entry entries[32];
-    char text[1024];
+    struct vp_name_entry entries[64];
+    char text[4096];
     struct vp_graphics_name_ids ids;
     struct vp_pmu_name_ids pmu_ids;
     struct vp_pmu_sample pmu_sample;
@@ -244,8 +244,8 @@ static void test_render96ex_vitagl_callsite_sequence(void)
     struct fake_source source = {100u, 7u, 0u};
     struct vp_name_dictionary dictionary;
     struct vp_name_dictionary_config dictionary_config;
-    struct vp_name_entry entries[32];
-    char text[1024];
+    struct vp_name_entry entries[64];
+    char text[4096];
     struct vp_graphics_name_ids ids;
     struct vp_graphics_hooks hooks;
     struct vp_zone_scope frame;
@@ -262,7 +262,7 @@ static void test_render96ex_vitagl_callsite_sequence(void)
     config.thread_user = &source;
     memset(&dictionary_config, 0, sizeof(dictionary_config));
     dictionary_config.entries = entries;
-    dictionary_config.entry_capacity = 32u;
+    dictionary_config.entry_capacity = 64u;
     dictionary_config.text = text;
     dictionary_config.text_capacity = sizeof(text);
     CHECK(vp_init(&context, &config) == VP_RESULT_OK &&
@@ -338,6 +338,20 @@ static void test_deep_graphics_instrumentation(void)
         VP_GRAPHICS_NAME_ID_SCEGXM_DISPLAY_QUEUE_ADD_WAIT,
         VP_GRAPHICS_NAME_ID_SCEGXM_DISPLAY_CALLBACK,
         VP_GRAPHICS_NAME_ID_DISPLAY_VBLANK_WAIT,
+        VP_GRAPHICS_NAME_ID_VITAGL_COMMAND_SUBMIT,
+        VP_GRAPHICS_NAME_ID_VITAGL_CLEAR,
+        VP_GRAPHICS_NAME_ID_VITAGL_FENCE_WAIT,
+        VP_GRAPHICS_NAME_ID_VITAGL_PROGRAM,
+        VP_GRAPHICS_NAME_ID_VITAGL_RENDER_TARGET_TRANSITION,
+        VP_GRAPHICS_NAME_ID_VITAGL_BUFFER_TRANSITION,
+        VP_GRAPHICS_NAME_ID_VITAGL_UPLOAD,
+        VP_GRAPHICS_NAME_ID_SCEGXM_COMMAND_SUBMIT,
+        VP_GRAPHICS_NAME_ID_SCEGXM_CLEAR,
+        VP_GRAPHICS_NAME_ID_SCEGXM_FENCE_WAIT,
+        VP_GRAPHICS_NAME_ID_SCEGXM_PROGRAM,
+        VP_GRAPHICS_NAME_ID_SCEGXM_RENDER_TARGET_TRANSITION,
+        VP_GRAPHICS_NAME_ID_SCEGXM_BUFFER_TRANSITION,
+        VP_GRAPHICS_NAME_ID_SCEGXM_UPLOAD,
     };
     static const uint32_t expected_counters[VP_GRAPHICS_COUNTER_COUNT] = {
         VP_GRAPHICS_NAME_ID_VITAGL_DRAW_CALLS,
@@ -348,6 +362,12 @@ static void test_deep_graphics_instrumentation(void)
         VP_GRAPHICS_NAME_ID_SCEGXM_STATE_CHANGES,
         VP_GRAPHICS_NAME_ID_VITAGL_ALLOCATION_BYTES,
         VP_GRAPHICS_NAME_ID_SCEGXM_ALLOCATION_BYTES,
+        VP_GRAPHICS_NAME_ID_VITAGL_CLEAR_CALLS,
+        VP_GRAPHICS_NAME_ID_SCEGXM_CLEAR_CALLS,
+        VP_GRAPHICS_NAME_ID_VITAGL_PROGRAM_CHANGES,
+        VP_GRAPHICS_NAME_ID_SCEGXM_PROGRAM_CHANGES,
+        VP_GRAPHICS_NAME_ID_VITAGL_UPLOAD_BYTES,
+        VP_GRAPHICS_NAME_ID_SCEGXM_UPLOAD_BYTES,
     };
     struct vp_context context;
     struct vp_slot slots[64];
@@ -355,8 +375,8 @@ static void test_deep_graphics_instrumentation(void)
     struct fake_source source = {90u, 11u, 0u};
     struct vp_name_dictionary dictionary;
     struct vp_name_dictionary_config dictionary_config;
-    struct vp_name_entry entries[32];
-    char text[1024];
+    struct vp_name_entry entries[64];
+    char text[4096];
     struct vp_graphics_name_ids ids;
     struct vp_graphics_hooks hooks;
     struct vp_graphics_scope_stack stack;
@@ -374,7 +394,7 @@ static void test_deep_graphics_instrumentation(void)
     config.thread_user = &source;
     memset(&dictionary_config, 0, sizeof(dictionary_config));
     dictionary_config.entries = entries;
-    dictionary_config.entry_capacity = 32u;
+    dictionary_config.entry_capacity = 64u;
     dictionary_config.text = text;
     dictionary_config.text_capacity = sizeof(text);
     CHECK(vp_init(&context, &config) == VP_RESULT_OK &&
@@ -469,6 +489,45 @@ static void test_deep_graphics_instrumentation(void)
               events[1].correlation_id == events[7].correlation_id &&
               events[7].value == 30,
           "graphics events preserve nested ordering and duration");
+
+    source.now = 140u;
+    CHECK(VP_GRAPHICS_SCOPE_PUSH(
+              &hooks, &stack,
+              VP_GRAPHICS_ZONE_VITAGL_RENDER_TARGET_TRANSITION) ==
+                  VP_RESULT_OK,
+          "begin render-target transition");
+    source.now = 145u;
+    CHECK(VP_GRAPHICS_SCOPE_POP(&hooks, &stack) == VP_RESULT_OK &&
+              VP_GRAPHICS_ZONE_BEGIN(
+                  &hooks, VP_GRAPHICS_ZONE_SCEGXM_FENCE_WAIT,
+                  &disabled_scope) == VP_RESULT_OK,
+          "finish transition and begin explicit fence wait");
+    source.now = 155u;
+    CHECK(VP_GRAPHICS_ZONE_END(&hooks, &disabled_scope) == VP_RESULT_OK &&
+              VP_GRAPHICS_COUNTER(
+                  &hooks, VP_GRAPHICS_COUNTER_VITAGL_UPLOAD_BYTES,
+                  8192) == VP_RESULT_OK &&
+              VP_GRAPHICS_COUNTER(
+                  &hooks, VP_GRAPHICS_COUNTER_SCEGXM_PROGRAM_CHANGES,
+                  3) == VP_RESULT_OK,
+          "record fence, upload, and program instrumentation");
+    count = vp_drain(&context, events, 32u);
+    CHECK(count == 6u &&
+              events[0].name_id ==
+                  ids.zones[
+                      VP_GRAPHICS_ZONE_VITAGL_RENDER_TARGET_TRANSITION] &&
+              events[1].value == 5 &&
+              events[2].name_id ==
+                  ids.zones[VP_GRAPHICS_ZONE_SCEGXM_FENCE_WAIT] &&
+              events[3].value == 10 &&
+              events[4].name_id ==
+                  ids.counters[VP_GRAPHICS_COUNTER_VITAGL_UPLOAD_BYTES] &&
+              events[4].value == 8192 &&
+              events[5].name_id ==
+                  ids.counters[
+                      VP_GRAPHICS_COUNTER_SCEGXM_PROGRAM_CHANGES] &&
+              events[5].value == 3,
+          "new source-owned graphics boundaries emit ordinary CPU events");
 
     vp_graphics_scope_stack_init(&stack);
     for (i = 0u; i < VP_GRAPHICS_SCOPE_STACK_CAPACITY; ++i) {

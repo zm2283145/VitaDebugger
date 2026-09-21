@@ -10,7 +10,9 @@ that arbitrary-thread sampling is ready on Vita hardware.
 
 - explicit capability bits for current-thread PC, current-thread stack,
   foreign-thread PC, foreign-thread stack, bounded stack reads, stable foreign
-  identity, and confident foreign register-context selection;
+  identity, exit-aware generation validation, fault-contained reads, bounded
+  callbacks/watchdog response, retryable release rollback, and confident
+  foreign register-context selection;
 - a caller-owned sampler and caller-owned frame array with a hard maximum of
   64 frames;
 - separate current-thread and foreign-thread entry points, with no fallback
@@ -20,6 +22,9 @@ that arbitrary-thread sampling is ready on Vita hardware.
   selected register context;
 - begin/next/end provider leases, including quarantine and retry when release
   fails;
+- an ABI-v2 `validate_sample` callback after acquisition and before every
+  foreign unwind step, with explicit stale-generation, thread-exit, timeout,
+  and protected-read-fault outcomes;
 - deterministic partial results when a bounded provider read or unwind fails
   after the initial PC;
 - zeroed output on acquisition failure and monotonic stack-pointer validation
@@ -36,6 +41,21 @@ cooperative unwinder. A foreign provider must pin or otherwise retain the exact
 target represented by the supplied identity; a numeric thread ID alone is not
 enough. Its identity must include a logical lifetime epoch: thread exit makes
 the identity stale even if the platform can retain a dormant/restartable object.
+
+ABI-v1 providers remain accepted for cooperative current-thread sampling only.
+A foreign provider must use ABI v2 and advertise
+`STABLE_IDENTITY`, `EXIT_AWARE_IDENTITY`,
+`FOREIGN_CONTEXT_CONFIDENCE`, `BOUNDED_CALLBACKS`, and
+`RELEASE_ROLLBACK`; foreign stacks additionally require
+`BOUNDED_STACK_READ` and `FAULT_CONTAINED_READ`. It supplies a nonzero
+worst-case callback bound no larger than the caller's
+`callback_timeout_us`. The core invokes `validate_sample` before exposing the
+first frame and before every unwind read. This does not make an untrusted
+callback preemptible: the capability is an audited provider promise backed by
+its own watchdog. A provider returning `VP_ERROR_TIMEOUT`,
+`VP_ERROR_THREAD_EXITED`, `VP_ERROR_STALE_IDENTITY`, or
+`VP_ERROR_READ_FAULT` yields an explicit bounded stop reason. Release is still
+mandatory; failure quarantines the sampler until retry succeeds.
 
 ```c
 #include <vitaprofiler_sampling.h>
@@ -112,7 +132,9 @@ only acceptable foundation for a future adapter:
 Those facts are not yet a complete profiler provider. The public read-only
 thread ABI does not expose a retained generation-stable identity to user mode,
 and it does not provide a protected, bounded target-memory reader or a
-hardware-validated unwind layout. Periodically beginning all-stop sessions
+hardware-validated unwind layout. It also has not proven a callback deadline
+and watchdog path that survives target exit/UID reuse while guaranteeing
+retryable stop-token release. Periodically beginning all-stop sessions
 inside a profiler would also need a dedicated latency, watchdog, thread-exit,
 and process-exit hardware gate. This increment therefore does **not** call
 `vdKernelBeginStop()`, guess frame records, dereference candidate stack

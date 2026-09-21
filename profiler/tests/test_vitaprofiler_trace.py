@@ -9,6 +9,7 @@ import tempfile
 import threading
 import time
 import unittest
+import zlib
 from pathlib import Path
 from unittest import mock
 
@@ -69,6 +70,86 @@ def make_capture() -> bytes:
     return names + header + events
 
 
+def encode_v2_chunk(chunk_type: int, sequence: int, payload: bytes) -> bytes:
+    return trace.STREAM_V2_CHUNK_HEADER.pack(
+        trace.STREAM_V2_CHUNK_MAGIC, trace.STREAM_V2_VERSION,
+        trace.STREAM_V2_CHUNK_HEADER_SIZE, chunk_type, 0, len(payload),
+        sequence, zlib.crc32(payload) & 0xFFFFFFFF, 0) + payload
+
+
+def make_v2_capture() -> bytes:
+    v1 = make_capture()
+    dictionary_size = struct.unpack_from("<I", v1, 16)[0]
+    dictionary = v1[:dictionary_size]
+    events = v1[dictionary_size + trace.WIRE_HEADER_SIZE:]
+    session_flags = (
+        trace.STREAM_V2_SESSION_PROCESS_ID |
+        trace.STREAM_V2_SESSION_PROCESS_IDENTITY |
+        trace.STREAM_V2_SESSION_TIMER_SOURCE |
+        trace.STREAM_V2_SESSION_TIMER_UNIT)
+    source = b"sceKernelGetProcessTimeWide"
+    unit = b"microseconds"
+    session = trace.STREAM_V2_SESSION.pack(
+        0x0102030405060708, 0x1122334455667788, 900, 73,
+        session_flags, len(source), len(unit), 0,
+        source.ljust(trace.STREAM_V2_TIMER_SOURCE_MAX, b"\0"),
+        unit.ljust(trace.STREAM_V2_TIMER_UNIT_MAX, b"\0"))
+    thread = trace.STREAM_V2_THREAD.pack(
+        0xAABBCCDD00000002, 7, 2,
+        trace.fnv1a_name_id(b"update"),
+        trace.STREAM_V2_THREAD_IDENTITY, 0)
+    module = trace.STREAM_V2_MODULE.pack(
+        4, 1, 0x81000000, 0x81010000,
+        trace.fnv1a_name_id(b"update"),
+        trace.STREAM_V2_MODULE_EXECUTABLE |
+        trace.STREAM_V2_MODULE_ARM |
+        trace.STREAM_V2_MODULE_THUMB, 0)
+    partial_stats = trace.STREAM_V2_STATS.pack(6, 1, 2, 0, 2, 0)
+    chunks = [
+        (trace.STREAM_V2_CHUNK_SESSION, session),
+        (trace.STREAM_V2_CHUNK_DICTIONARY, dictionary),
+        (trace.STREAM_V2_CHUNK_THREAD, thread),
+        (trace.STREAM_V2_CHUNK_MODULE, module),
+        (trace.STREAM_V2_CHUNK_EVENTS,
+         events[:2 * trace.WIRE_EVENT_SIZE]),
+        (trace.STREAM_V2_CHUNK_STATS, partial_stats),
+        (trace.STREAM_V2_CHUNK_EVENTS,
+         events[2 * trace.WIRE_EVENT_SIZE:]),
+    ]
+    prefix = b"".join(encode_v2_chunk(kind, sequence, payload)
+                      for sequence, (kind, payload) in enumerate(chunks))
+    final_size = (len(prefix) + trace.STREAM_V2_CHUNK_HEADER_SIZE +
+                  trace.STREAM_V2_STATS_PAYLOAD_SIZE)
+    final_stats = trace.STREAM_V2_STATS.pack(
+        6, 1, 2, 0, 6, final_size)
+    return prefix + encode_v2_chunk(
+        trace.STREAM_V2_CHUNK_END, len(chunks), final_stats)
+
+
+def rewrite_v2_accepted_counters(
+        raw: bytes, values: list[int]) -> bytes:
+    result = bytearray(raw)
+    offset = 0
+    value_index = 0
+    while offset < len(result):
+        fields = trace.STREAM_V2_CHUNK_HEADER.unpack_from(result, offset)
+        chunk_type = fields[3]
+        payload_size = fields[5]
+        payload_offset = offset + trace.STREAM_V2_CHUNK_HEADER_SIZE
+        if chunk_type in (trace.STREAM_V2_CHUNK_STATS,
+                          trace.STREAM_V2_CHUNK_END):
+            struct.pack_into("<I", result, payload_offset,
+                             values[value_index])
+            payload = result[payload_offset:payload_offset + payload_size]
+            struct.pack_into("<I", result, offset + 20,
+                             zlib.crc32(payload) & 0xFFFFFFFF)
+            value_index += 1
+        offset = payload_offset + payload_size
+    if value_index != len(values):
+        raise AssertionError("unexpected v2 stats chunk count")
+    return bytes(result)
+
+
 def make_run_clocks_capture(
         samples: list[tuple[int, int, int]],
         ) -> bytes:
@@ -117,6 +198,95 @@ def make_run_clocks_metadata(**overrides: object) -> dict[str, object]:
 
 
 class DecodeTests(unittest.TestCase):
+    def test_v1_compatibility_and_v2_metadata_exports(self):
+        v1 = trace.decode_capture(make_capture())
+        self.assertEqual(v1.header.version, 1)
+        self.assertIsNone(v1.session)
+        self.assertTrue(v1.complete)
+
+        v2 = trace.decode_capture(make_v2_capture())
+        self.assertEqual(v2.header.version, 2)
+        self.assertTrue(v2.complete)
+        self.assertEqual(len(v2.events), len(v1.events))
+        self.assertEqual(v2.events, v1.events)
+        self.assertEqual(v2.session.session_id, 0x0102030405060708)
+        self.assertEqual(v2.session.process_id, 73)
+        self.assertEqual(v2.session.timer_unit, "microseconds")
+        self.assertEqual(v2.thread_identities[0].generation, 2)
+        self.assertEqual(v2.thread_identities[0].first_event_index, 0)
+        self.assertTrue(v2.module_ranges[0].arm)
+        self.assertTrue(v2.module_ranges[0].thumb)
+        self.assertEqual(v2.loss.producer_dropped, 1)
+        self.assertEqual(v2.loss.transport_lost, 2)
+
+        decoded = trace.capture_to_json(v2)
+        self.assertEqual(decoded["format"], "vitaprofiler-decoded-v2")
+        self.assertEqual(decoded["session"]["process_identity"],
+                         0x1122334455667788)
+        self.assertEqual(decoded["thread_identities"][0]["generation"], 2)
+        perfetto = trace.capture_to_chrome_trace(v2)
+        self.assertEqual(perfetto["metadata"]["loss"]["transport_lost"], 2)
+        self.assertTrue(any(event.get("ph") == "M" and
+                            event.get("name") == "thread_name"
+                            for event in perfetto["traceEvents"]))
+
+    def test_v2_incremental_framing_and_incomplete_snapshot(self):
+        raw = make_v2_capture()
+        decoder = trace.IncrementalTraceDecoder(max_bytes=len(raw))
+        saw_incomplete_events = False
+        for offset in range(0, len(raw), 7):
+            if decoder.feed(raw[offset:offset + 7]) and decoder.is_v2:
+                try:
+                    snapshot = decoder.snapshot()
+                except trace.TraceFormatError:
+                    continue
+                if snapshot.events and not snapshot.complete:
+                    saw_incomplete_events = True
+                    self.assertIsNotNone(snapshot.session)
+                    self.assertLessEqual(len(snapshot.events), 6)
+        capture = decoder.finish()
+        self.assertTrue(saw_incomplete_events)
+        self.assertTrue(capture.complete)
+        self.assertEqual(len(capture.events), 6)
+
+    def test_v2_wrapping_uint32_loss_counter_is_valid(self):
+        raw = rewrite_v2_accepted_counters(
+            make_v2_capture(), [0xFFFFFFFF, 0])
+        capture = trace.decode_capture(raw)
+        self.assertTrue(capture.complete)
+        self.assertEqual(capture.loss.producer_accepted, 0)
+
+    def test_v2_corrupt_truncated_version_and_lifecycle_fail_closed(self):
+        raw = make_v2_capture()
+        for length in range(len(raw)):
+            with self.subTest(truncated_at=length):
+                with self.assertRaises(trace.TraceFormatError):
+                    trace.decode_capture(raw[:length])
+
+        damaged = bytearray(raw)
+        damaged[4] = trace.STREAM_V2_VERSION + 1
+        with self.assertRaisesRegex(trace.TraceFormatError, "unsupported"):
+            trace.decode_capture(bytes(damaged))
+
+        damaged = bytearray(raw)
+        damaged[trace.STREAM_V2_CHUNK_HEADER_SIZE + 1] ^= 0x80
+        with self.assertRaisesRegex(trace.TraceFormatError, "CRC"):
+            trace.decode_capture(bytes(damaged))
+
+        first_size = (trace.STREAM_V2_CHUNK_HEADER_SIZE +
+                      trace.STREAM_V2_SESSION_PAYLOAD_SIZE)
+        damaged = bytearray(raw)
+        struct.pack_into("<I", damaged, first_size + 16, 9)
+        with self.assertRaisesRegex(trace.TraceFormatError, "sequence"):
+            trace.decode_capture(bytes(damaged))
+
+        for index in range(0, len(raw), max(1, len(raw) // 64)):
+            damaged = bytearray(raw)
+            damaged[index] ^= 1
+            with self.subTest(fuzz_byte=index):
+                with self.assertRaises(trace.TraceFormatError):
+                    trace.decode_capture(bytes(damaged))
+
     def test_c_generated_capture_matches_python_decoder(self):
         fixture = PROFILER / "build" / "host" / "capture-from-c.vptrace"
         self.assertTrue(fixture.is_file(),
@@ -148,6 +318,18 @@ class DecodeTests(unittest.TestCase):
                             event.get("name") == "vitagl.draw_calls" and
                             event.get("args", {}).get("value") == 43
                             for event in perfetto["traceEvents"]))
+
+        v2_fixture = (PROFILER / "build" / "host" /
+                      "capture-v2-from-c.vptrace")
+        self.assertTrue(v2_fixture.is_file(),
+                        "make host-test must generate the C v2 fixture")
+        v2 = trace.decode_capture(v2_fixture.read_bytes())
+        self.assertEqual(v2.header.version, 2)
+        self.assertTrue(v2.complete)
+        self.assertEqual(v2.events, capture.events)
+        self.assertEqual(v2.session.process_id, 73)
+        self.assertEqual(v2.thread_identities[0].generation, 2)
+        self.assertTrue(v2.module_ranges[0].thumb)
 
     def test_named_capture_summary_and_exports(self):
         capture = trace.decode_capture(make_capture())

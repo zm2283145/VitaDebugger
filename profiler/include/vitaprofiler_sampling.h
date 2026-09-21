@@ -7,7 +7,8 @@
 extern "C" {
 #endif
 
-#define VP_SAMPLE_PROVIDER_ABI_VERSION 1u
+#define VP_SAMPLE_PROVIDER_ABI_VERSION_LEGACY 1u
+#define VP_SAMPLE_PROVIDER_ABI_VERSION 2u
 #define VP_SAMPLE_MAX_FRAMES 64u
 
 #define VP_SAMPLE_CAP_CURRENT_THREAD_PC (UINT32_C(1) << 0)
@@ -17,12 +18,19 @@ extern "C" {
 #define VP_SAMPLE_CAP_STABLE_IDENTITY (UINT32_C(1) << 4)
 #define VP_SAMPLE_CAP_BOUNDED_STACK_READ (UINT32_C(1) << 5)
 #define VP_SAMPLE_CAP_FOREIGN_CONTEXT_CONFIDENCE (UINT32_C(1) << 6)
+#define VP_SAMPLE_CAP_EXIT_AWARE_IDENTITY (UINT32_C(1) << 7)
+#define VP_SAMPLE_CAP_FAULT_CONTAINED_READ (UINT32_C(1) << 8)
+#define VP_SAMPLE_CAP_BOUNDED_CALLBACKS (UINT32_C(1) << 9)
+#define VP_SAMPLE_CAP_RELEASE_ROLLBACK (UINT32_C(1) << 10)
 #define VP_SAMPLE_CAP_ALL                                                   \
     (VP_SAMPLE_CAP_CURRENT_THREAD_PC | VP_SAMPLE_CAP_CURRENT_THREAD_STACK | \
      VP_SAMPLE_CAP_FOREIGN_THREAD_PC |                                     \
      VP_SAMPLE_CAP_FOREIGN_THREAD_STACK |                                  \
      VP_SAMPLE_CAP_STABLE_IDENTITY | VP_SAMPLE_CAP_BOUNDED_STACK_READ |     \
-     VP_SAMPLE_CAP_FOREIGN_CONTEXT_CONFIDENCE)
+     VP_SAMPLE_CAP_FOREIGN_CONTEXT_CONFIDENCE |                            \
+     VP_SAMPLE_CAP_EXIT_AWARE_IDENTITY |                                   \
+     VP_SAMPLE_CAP_FAULT_CONTAINED_READ | VP_SAMPLE_CAP_BOUNDED_CALLBACKS |\
+     VP_SAMPLE_CAP_RELEASE_ROLLBACK)
 
 #define VP_SAMPLE_FRAME_FLAG_THUMB (UINT32_C(1) << 0)
 #define VP_SAMPLE_FRAME_FLAG_CONTEXT_CONFIDENT (UINT32_C(1) << 1)
@@ -43,6 +51,9 @@ enum vp_sample_stop_reason {
     VP_SAMPLE_STOP_STALE_IDENTITY = 5,
     VP_SAMPLE_STOP_MALFORMED = 6,
     VP_SAMPLE_STOP_RELEASE_ERROR = 7,
+    VP_SAMPLE_STOP_TIMEOUT = 8,
+    VP_SAMPLE_STOP_READ_FAULT = 9,
+    VP_SAMPLE_STOP_THREAD_EXITED = 10,
 };
 
 struct vp_sample_target {
@@ -105,6 +116,13 @@ typedef int (*vp_sample_next_frame_fn)(
     const struct vp_sample_cursor* current,
     struct vp_sample_cursor* next);
 typedef int (*vp_sample_end_fn)(void* user, uint64_t lease_token);
+/* Required for ABI-v2 foreign providers. Called after acquisition and before
+ * every unwind step. It must atomically verify that the lease still names the
+ * requested logical generation and report THREAD_EXITED, STALE_IDENTITY, or
+ * TIMEOUT rather than allowing a reused UID or expired watchdog through. */
+typedef int (*vp_sample_validate_fn)(
+    void* user, uint64_t lease_token,
+    const struct vp_sample_target* target);
 
 struct vp_sample_provider {
     uint32_t abi_version;
@@ -113,6 +131,11 @@ struct vp_sample_provider {
     vp_sample_next_frame_fn next_frame;
     vp_sample_end_fn end_sample;
     void* user;
+    vp_sample_validate_fn validate_sample;
+    /* Worst-case callback bound promised by the provider. Foreign admission
+     * requires a nonzero value no larger than config.callback_timeout_us. */
+    uint32_t max_callback_us;
+    uint32_t reserved;
 };
 
 struct vp_sampler_config {
@@ -120,6 +143,7 @@ struct vp_sampler_config {
     uint32_t frame_capacity;
     uint32_t max_depth;
     uint32_t required_capabilities;
+    uint32_t callback_timeout_us;
     uint32_t reserved;
 };
 
@@ -133,6 +157,7 @@ struct vp_sampler {
     uint32_t frame_capacity;
     uint32_t max_depth;
     uint32_t capabilities;
+    uint32_t callback_timeout_us;
     uint32_t active;
     uint32_t release_pending;
     uint32_t initialized;
@@ -154,6 +179,7 @@ struct vp_sample {
 struct vp_sampler_status {
     uint32_t capabilities;
     uint32_t max_depth;
+    uint32_t callback_timeout_us;
     uint32_t active;
     uint32_t release_pending;
     int32_t last_provider_error;
@@ -163,7 +189,11 @@ struct vp_sampler_status {
  * required_capabilities is an explicit opt-in and must be a subset of the
  * provider's advertised capabilities. Stack capabilities require their PC
  * counterpart and BOUNDED_STACK_READ. Foreign capabilities additionally
- * require STABLE_IDENTITY and FOREIGN_CONTEXT_CONFIDENCE.
+ * require ABI v2, STABLE_IDENTITY, EXIT_AWARE_IDENTITY,
+ * FOREIGN_CONTEXT_CONFIDENCE, BOUNDED_CALLBACKS, RELEASE_ROLLBACK, and a
+ * nonzero bounded callback budget. Foreign stacks additionally require
+ * FAULT_CONTAINED_READ. ABI-v1 providers remain accepted for current-thread
+ * sampling only.
  */
 int vp_sampler_init(struct vp_sampler* sampler,
                     const struct vp_sample_provider* provider,

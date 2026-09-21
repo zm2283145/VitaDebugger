@@ -17,8 +17,8 @@ The current increment provides:
   and interrupt preemptions.
 - A caller-owned, fixed-capacity event ring with multi-producer/single-consumer
   operation and explicit drop accounting.
-- A versioned 32-byte stream header and 32-byte event encoding with fixed-width
-  fields and explicit little-endian serialization.
+- A byte-compatible version-1 stream plus a CRC-checked, sequence-numbered
+  wire-v2 live session/chunk envelope around unchanged 32-byte events.
 - A bounded caller-owned name dictionary, automatic names for the eight Vita
   metrics, and a separately versioned little-endian dictionary block for trace
   receivers. The event wire ABI remains version 1.
@@ -33,15 +33,19 @@ The current increment provides:
   metric, and generation-aware raw `runClocks` delta handling.
 - A dependency-free Tk desktop viewer over those same receiver, decoder,
   analyzer, and export APIs, with background work, cancellation, filtering,
-  selection, and explicit wire-v1 loss-reporting limits.
+  selection, a live frame/zone timeline for v2, and explicit incomplete/loss
+  indicators.
 - Cooperative, header-independent CPU wall-time hooks for application-owned
-  VitaGL/SceGxm submissions, waits, swaps, draws, shader/state changes,
+  VitaGL/SceGxm submissions, waits/fences, swaps, draws/clears,
+  shader/program changes, render-target/buffer transitions, uploads,
   allocations, and frame markers, with stable IDs, a bounded scope stack, and
   compile-time no-op call-site macros.
 - An opt-in, allocation-free PC/call-stack sampling provider boundary with
   explicit current/foreign capabilities, exact foreign identities, bounded
   caller-owned frame storage and reads, per-sample foreign register-context
-  confidence, deterministic partial results, and retained release obligations.
+  confidence, exit/generation revalidation, protected-read faults, bounded
+  callback/watchdog contracts, deterministic partial results, and retained
+  release obligations.
   No built-in Vita foreign-thread provider is enabled.
 - A guarded PMU provider/lease abstraction plus an injectable owned-reset
   adapter for the public ScePerf semantics. The adapter retains failed cleanup
@@ -70,6 +74,15 @@ calls it; it never initializes or terminates SceNet. The separate
 development-computer tool owns its TCP listener and output files. PMU discovery
 is an optional companion capability, not a hidden dependency of the portable
 profiler core.
+
+## Milestone status
+
+| Surface | Host status | Remaining gate |
+| --- | --- | --- |
+| Wire v2 framing/metadata | Implemented with native writer/cursor, Python incremental decoder, v1 compatibility, strict CRC/lifecycle validation, and C-to-Python fixtures | Vita TCP production capture/recovery validation |
+| Desktop live timeline | Implemented over the shared decoder/analyzer with worker-thread parsing and a replacing size-one UI queue | Visual/Tcl platform checks and Vita live-session validation |
+| VitaGL/SceGxm hooks | Source-owned CPU hooks cover submissions, waits/fences, draw/clear, scene/frame/swap, shader/program, transitions, allocation, and upload | Opt-in pinned-source integration and overhead/loss measurement |
+| Foreign-thread sampler | ABI-v2 proof contract and deterministic exit/reuse/fault/timeout/release tests implemented; capability remains disabled | Exact retained generation, confident context, protected reads, validated ARM/Thumb unwind, bounded watchdog, and cleanup hardware proof |
 
 On Vita, `vp_vita_init()` uses `sceKernelGetProcessTimeWide()` for the event
 clock. It is a monotonic microsecond process-time basis and matches Vita
@@ -255,6 +268,7 @@ built-in Vita sample names.
 | Renderer/audio/allocator metrics | Generic counters and zones are ready | Integration hooks in each subsystem |
 | All-process thread enumeration | Cooperative/known IDs only | Narrow process-owned enumeration |
 | Statistical PC/call-stack sampling | Bounded provider/session policy; cooperative current-thread capture only through an application-supplied provider | Existing all-stop/register reads are not yet a generation-stable, fault-contained foreign sampler |
+| Live trace framing | Wire v1 compatibility plus bounded incremental wire v2 with explicit identity/metadata/loss | Hardware validation of the v2 producer/transport lifecycle |
 | PMU hardware counters | Provider boundary, named raw samples, and injected owned-reset adapter tests; direct ScePerf initialization fails closed on tested retail 3.65 | Read-only inventory and the isolated lane-5 software-increment transaction pass on application cores 0-2. The default-off transport passed bounded core-0 `0x01`, `0x03`, and `0x10` samples with exact restoration, plus same-boot re-arm after its owning worker exited. Process-exit/crash, disconnect, timeout, and ownership-conflict gates remain |
 | GPU workload timing | Explicit CPU-side VitaGL/SceGxm call-site hooks | GPU timestamps or automatic interposition are not implemented |
 
@@ -318,15 +332,18 @@ The native tests check validation, bounded drop/reuse behavior, FIFO ordering,
 zone/frame semantics, exact event and dictionary wire bytes, dictionary
 collisions/capacity/truncation, concurrent multi-producer delivery, concurrent
 read-only name resolution after sealing, combined stream drain/decoding,
-fail-closed sink behavior, bounded/partial Vita TCP transport behavior, PMU
+fail-closed sink behavior, v2 CRC/sequence/lifecycle validation,
+bounded/partial Vita TCP transport behavior, PMU
 ownership/restoration policy, public-ScePerf
 adapter sequencing and cleanup, graphics hook ordering/nesting/bounds, and
 compile-time/runtime disabled behavior.
 The sampling suite additionally checks hard frame/storage bounds, unsupported
 capabilities, bounded-read opt-in, foreign register-context confidence,
-deterministic partial unwind results, stale foreign identities, release
-quarantine/retry, malformed frame progress, and stable output.
-The Python suite adds corrupt/truncated capture rejection, fragmented loopback
+thread exit, UID reuse/generation mismatch, protected read faults, watchdog
+timeouts, deterministic partial unwind results, release quarantine/retry,
+malformed frame progress, and stable output.
+The Python suite adds v1 compatibility, exhaustive v2 prefix truncation and
+deterministic mutation rejection, incremental framing, fragmented loopback
 TCP reception, byte bounds, named zone analysis, and graphics event
 JSON/Perfetto output.
 

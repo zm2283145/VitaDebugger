@@ -25,15 +25,15 @@ static int file_sink(void* user, const uint8_t* data, size_t size)
     return fwrite(data, 1u, size, output) == size ? 0 : -1;
 }
 
-static int generate_fixture(const char* path)
+static int generate_fixture(const char* path, int wire_v2)
 {
     struct vp_context context;
     struct vp_slot slots[16];
     struct fixture_source source = {1000u, 7u};
     struct vp_config config;
     struct vp_name_dictionary names;
-    struct vp_name_entry entries[32];
-    char name_text[1024];
+    struct vp_name_entry entries[64];
+    char name_text[4096];
     struct vp_name_dictionary_config name_config;
     uint32_t update_id = 0u;
     uint32_t draws_id = 0u;
@@ -45,6 +45,9 @@ static int generate_fixture(const char* path)
     uint8_t dictionary_buffer[4096];
     struct vp_stream_writer writer;
     struct vp_stream_writer_config writer_config;
+    struct vp_stream_v2_session session;
+    struct vp_stream_v2_thread thread;
+    struct vp_stream_v2_module module;
     size_t drained = 0u;
     FILE* output = NULL;
     int result = 1;
@@ -61,7 +64,7 @@ static int generate_fixture(const char* path)
 
     memset(&name_config, 0, sizeof(name_config));
     name_config.entries = entries;
-    name_config.entry_capacity = 32u;
+    name_config.entry_capacity = 64u;
     name_config.text = name_text;
     name_config.text_capacity = sizeof(name_text);
     if (vp_name_dictionary_init(&names, &name_config) != VP_RESULT_OK ||
@@ -119,9 +122,45 @@ static int generate_fixture(const char* path)
     writer_config.write_user = output;
     writer_config.dictionary_buffer = dictionary_buffer;
     writer_config.dictionary_buffer_capacity = sizeof(dictionary_buffer);
-    if (vp_stream_writer_init(&writer, &writer_config) != VP_RESULT_OK ||
-        vp_stream_writer_begin(&writer, 900u) != VP_RESULT_OK ||
-        vp_stream_writer_drain(&writer, 16u, &drained) != VP_RESULT_OK ||
+    if (vp_stream_writer_init(&writer, &writer_config) != VP_RESULT_OK)
+        goto done;
+    if (wire_v2) {
+        memset(&session, 0, sizeof(session));
+        session.session_id = UINT64_C(0x0102030405060708);
+        session.process_id = 73u;
+        session.process_identity = UINT64_C(0x1122334455667788);
+        session.timer_source = "sceKernelGetProcessTimeWide";
+        session.timer_unit = "microseconds";
+        session.flags = VP_STREAM_V2_SESSION_PROCESS_ID |
+                        VP_STREAM_V2_SESSION_PROCESS_IDENTITY |
+                        VP_STREAM_V2_SESSION_TIMER_SOURCE |
+                        VP_STREAM_V2_SESSION_TIMER_UNIT;
+        memset(&thread, 0, sizeof(thread));
+        thread.identity = UINT64_C(0xaabbccdd00000002);
+        thread.thread_id = 7u;
+        thread.generation = 2u;
+        thread.name_id = update_id;
+        thread.flags = VP_STREAM_V2_THREAD_IDENTITY;
+        memset(&module, 0, sizeof(module));
+        module.module_id = 4u;
+        module.generation = 1u;
+        module.address_start = UINT32_C(0x81000000);
+        module.address_end = UINT32_C(0x81010000);
+        module.name_id = update_id;
+        module.flags = VP_STREAM_V2_MODULE_EXECUTABLE |
+                       VP_STREAM_V2_MODULE_ARM |
+                       VP_STREAM_V2_MODULE_THUMB;
+        if (vp_stream_writer_begin_v2(&writer, 900u, &session) !=
+                VP_RESULT_OK ||
+            vp_stream_writer_write_thread_v2(&writer, &thread) !=
+                VP_RESULT_OK ||
+            vp_stream_writer_write_module_v2(&writer, &module) !=
+                VP_RESULT_OK)
+            goto done;
+    } else if (vp_stream_writer_begin(&writer, 900u) != VP_RESULT_OK) {
+        goto done;
+    }
+    if (vp_stream_writer_drain(&writer, 16u, &drained) != VP_RESULT_OK ||
         drained != 10u ||
         vp_stream_writer_close(&writer) != VP_RESULT_OK ||
         fflush(output) != 0)
@@ -143,10 +182,13 @@ done:
 
 int main(int argc, char** argv)
 {
-    if (argc != 2)
+    int wire_v2 = 0;
+    if (argc == 3 && strcmp(argv[1], "--v2") == 0)
+        wire_v2 = 1;
+    else if (argc != 2)
     {
-        fputs("usage: generate_vitaprofiler_fixture OUTPUT\n", stderr);
+        fputs("usage: generate_vitaprofiler_fixture [--v2] OUTPUT\n", stderr);
         return 2;
     }
-    return generate_fixture(argv[1]);
+    return generate_fixture(argv[wire_v2 ? 2 : 1], wire_v2);
 }

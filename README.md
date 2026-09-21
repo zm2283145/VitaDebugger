@@ -605,6 +605,7 @@ to another firmware or configuration.
 | Debugger RSP admission | [Terminal record](docs/hardware/rsp-completion-terminal-3.65.json), [curation scope](docs/rsp-curation-record.md) | **RSP NOT QUALIFIED**; selected admission/reset observations passed, but the completion connection received neither ACK nor response and no hardware pass is claimed |
 | User-mode profiler | [13-check record](docs/hardware/profiler-name-dictionary-3.65.json) | Event order, zones, counters, snapshots, bounded pressure, encoding, names, and drop accounting passed without the kernel plugin |
 | Profiler TCP | [Transport record](docs/hardware/profiler-tcp-stream-retail-3.65.md) | Named capture, clean EOF, cancellation, forced disconnect, and recovery relaunch passed |
+| Profiler wire v2/live timeline | Host native/Python/GUI-model suites | CRC-framed incremental sessions, bounded identity/module/loss metadata, v1 compatibility, and incomplete-session display pass host tests; Vita transport validation remains pending |
 | PMU mutation boundary | [Per-core record](docs/hardware/profiler-pmu-session-gate-3.65.md) | Fixed lane-5 software-increment transaction and exact snapshot restoration passed on application cores 0-2 |
 | PMU real events | [`0x01`](kernel/pmu-profiler-gate/hardware-results/2026-09-15-event-01/README.md), [`0x03`](kernel/pmu-profiler-gate/hardware-results/2026-09-15-event-03/README.md), [`0x10`](kernel/pmu-profiler-gate/hardware-results/2026-09-15-event-10/README.md) | One bounded normal-close sample per event passed with exact restoration |
 | PMU safe re-arm | [Dormant-thread record](kernel/pmu-profiler-thread-exit-gate/hardware-results/2026-09-15-first-attempt/README.md) | Same-process, same-boot re-arm after the original controller thread terminated passed; broader terminal paths remain pending |
@@ -656,6 +657,9 @@ comparator. The detailed record is
 - [Profiler guide](profiler/README.md)
 - [Profiler binary trace](profiler/docs/binary-trace.md)
 - [Profiler TCP stream](profiler/docs/vita-tcp-stream.md)
+- [Profiler desktop/live timeline](profiler/docs/desktop-gui.md)
+- [Profiler graphics hooks](profiler/docs/graphics-hooks.md)
+- [Profiler thread sampling](profiler/docs/thread-sampling.md)
 - [PMU failure matrix](profiler/docs/pmu-failure-matrix.md)
 - [External-attach scaffold](attach/README.md)
 - [VitaDevDeploy guide](deploy/README.md)

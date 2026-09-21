@@ -47,6 +47,9 @@ enum vp_result {
     VP_ERROR_RESTORE_REQUIRED = -14,
     VP_ERROR_STALE_IDENTITY = -15,
     VP_ERROR_RELEASE_REQUIRED = -16,
+    VP_ERROR_TIMEOUT = -17,
+    VP_ERROR_READ_FAULT = -18,
+    VP_ERROR_THREAD_EXITED = -19,
 };
 
 enum vp_name_flags {

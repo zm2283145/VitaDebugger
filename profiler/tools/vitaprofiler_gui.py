@@ -28,6 +28,9 @@ class ProfilerApp:
             max_workers=1, thread_name_prefix="vitaprofiler")
         self.cancel_event = threading.Event()
         self.status_messages: queue.SimpleQueue[str] = queue.SimpleQueue()
+        self.live_updates: queue.Queue[
+            tuple[desktop.LoadedCapture, desktop.TableRows]
+        ] = queue.Queue(maxsize=1)
         self.busy = False
         self.cancellable = False
         self.row_objects: dict[tuple[str, str], object] = {}
@@ -120,16 +123,22 @@ class ProfilerApp:
         self.frame_tree = self._add_table(
             "Frames",
             ("index", "time", "duration", "fps", "name", "thread",
-             "sequence", "flags"),
-            (70, 120, 100, 80, 240, 110, 90, 180))
+             "generation", "sequence", "flags"),
+            (70, 120, 100, 80, 240, 110, 90, 90, 180))
+        self.timeline_tree = self._add_table(
+            "Timeline",
+            ("kind", "begin", "duration", "name", "thread",
+             "generation", "flags"),
+            (80, 120, 100, 300, 110, 90, 180))
         self.zone_tree = self._add_table(
             "Zones",
             ("name", "thread", "begin", "duration", "correlation", "flags"),
             (260, 110, 120, 100, 100, 180))
         self.counter_tree = self._add_table(
             "Counters",
-            ("index", "time", "name", "value", "type", "thread", "flags"),
-            (70, 120, 260, 120, 130, 110, 180))
+            ("index", "time", "name", "value", "type", "thread",
+             "generation", "flags"),
+            (70, 120, 260, 120, 130, 110, 90, 180))
         self.event_tree = self._add_table(
             "Events",
             ("index", "time", "type", "name", "value", "thread",
@@ -217,12 +226,28 @@ class ProfilerApp:
         )
 
         def receive() -> desktop.LoadedCapture:
+            def publish_live(loaded: desktop.LoadedCapture) -> None:
+                update = (
+                    loaded,
+                    loaded.view_model.filter_tables(
+                        "", None, DISPLAY_ROW_LIMIT),
+                )
+                try:
+                    self.live_updates.put_nowait(update)
+                except queue.Full:
+                    try:
+                        self.live_updates.get_nowait()
+                    except queue.Empty:
+                        pass
+                    self.live_updates.put_nowait(update)
+
             return self.controller.receive_capture(
                 config, self.cancel_event.is_set,
                 lambda address: self.status_messages.put(
                     f"Listening on {address[0]}:{address[1]}..."),
                 lambda count: self.status_messages.put(
-                    f"Receiving capture: {count:,} bytes..."))
+                    f"Receiving capture: {count:,} bytes..."),
+                publish_live)
 
         self._start_task(receive, self._load_capture,
                          "Starting TCP receiver...", cancellable=True)
@@ -275,6 +300,7 @@ class ProfilerApp:
     def _poll_task(self, future: concurrent.futures.Future[object],
                    on_success: Callable[[object], None]) -> None:
         self._drain_status()
+        self._drain_live_updates()
         if not future.done():
             self.root.after(50, self._poll_task, future, on_success)
             return
@@ -301,6 +327,21 @@ class ProfilerApp:
         if latest is not None:
             self.status.set(latest)
 
+    def _drain_live_updates(self) -> None:
+        latest = None
+        while True:
+            try:
+                latest = self.live_updates.get_nowait()
+            except queue.Empty:
+                break
+        if latest is None:
+            return
+        loaded, rows = latest
+        self._apply_loaded_capture(loaded, reset_filters=False)
+        self._apply_table_rows(rows)
+        self.status.set(
+            f"LIVE / INCOMPLETE: {len(loaded.capture.events):,} events")
+
     def _set_action_state(self) -> None:
         normal = tk.DISABLED if self.busy else tk.NORMAL
         self.open_button.configure(state=normal)
@@ -322,6 +363,15 @@ class ProfilerApp:
     def _load_capture(self, loaded: object) -> None:
         if not isinstance(loaded, desktop.LoadedCapture):
             raise TypeError("background operation returned an invalid capture")
+        self._apply_loaded_capture(loaded, reset_filters=True)
+        self.status.set(
+            f"Loaded {loaded.source}: "
+            f"{len(loaded.capture.events):,} events. Preparing display...")
+        self._refresh_tables()
+        self._set_action_state()
+
+    def _apply_loaded_capture(self, loaded: desktop.LoadedCapture,
+                              reset_filters: bool) -> None:
         self.loaded = loaded
         self.model = loaded.view_model
         self._fill_key_values(self.metadata_tree, self.model.metadata_rows())
@@ -330,13 +380,9 @@ class ProfilerApp:
             "All threads",
             *(f"0x{thread:08x}" for thread in self.model.threads),
         ))
-        self.thread_filter.set("All threads")
-        self.filter_text.set("")
-        self.status.set(
-            f"Loaded {loaded.source}: "
-            f"{len(loaded.capture.events):,} events. Preparing display...")
-        self._refresh_tables()
-        self._set_action_state()
+        if reset_filters:
+            self.thread_filter.set("All threads")
+            self.filter_text.set("")
 
     def _clear_filter(self) -> None:
         self.filter_text.set("")
@@ -363,13 +409,24 @@ class ProfilerApp:
             raise TypeError("background filter returned invalid rows")
         self.row_objects.clear()
         self._fill_rows(
+            "timeline", self.timeline_tree,
+            result.timeline.rows,
+            lambda row: (
+                row.kind, f"{row.begin_us:,}", f"{row.duration_us:,}",
+                row.name, f"0x{row.thread_id:08x}",
+                "-" if row.thread_generation is None else
+                row.thread_generation,
+                ", ".join(row.flags) or "-"))
+        self._fill_rows(
             "frames", self.frame_tree,
             result.frames.rows,
             lambda row: (
                 row.event_index, f"{row.timestamp_us:,}",
                 "-" if row.duration_us is None else f"{row.duration_us:,}",
                 "-" if row.fps is None else f"{row.fps:.2f}",
-                row.name, f"0x{row.thread_id:08x}", row.sequence,
+                row.name, f"0x{row.thread_id:08x}",
+                "-" if row.thread_generation is None else
+                row.thread_generation, row.sequence,
                 ", ".join(row.flags) or "-"))
         self._fill_rows(
             "zones", self.zone_tree,
@@ -384,6 +441,8 @@ class ProfilerApp:
             lambda row: (
                 row.event_index, f"{row.timestamp_us:,}", row.name,
                 row.value, row.sample_type, f"0x{row.thread_id:08x}",
+                "-" if row.thread_generation is None else
+                row.thread_generation,
                 ", ".join(row.flags) or "-"))
         self._fill_rows(
             "events", self.event_tree,
@@ -394,7 +453,8 @@ class ProfilerApp:
                 f"0x{row.thread_id:08x}", row.correlation_id,
                 ", ".join(row.flag_names) or "-"))
         truncated = any((
-            result.frames.truncated, result.zones.truncated,
+            result.timeline.truncated, result.frames.truncated,
+            result.zones.truncated,
             result.counters.truncated, result.events.truncated,
         ))
         suffix = (" (additional matching rows hidden by the display limit)"

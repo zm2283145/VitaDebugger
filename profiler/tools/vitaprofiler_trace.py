@@ -18,6 +18,7 @@ import sys
 import tempfile
 import time
 import unicodedata
+import zlib
 from pathlib import Path
 from typing import Callable, Iterable, Sequence
 
@@ -28,6 +29,45 @@ WIRE_HEADER_SIZE = 32
 WIRE_EVENT_SIZE = 32
 WIRE_FLAGS = 1
 WIRE_CLOCK_HZ = 1_000_000
+
+STREAM_V2_CHUNK_MAGIC = 0x32435056
+STREAM_V2_VERSION = 2
+STREAM_V2_CHUNK_HEADER_SIZE = 32
+STREAM_V2_SESSION_PAYLOAD_SIZE = 96
+STREAM_V2_THREAD_PAYLOAD_SIZE = 32
+STREAM_V2_MODULE_PAYLOAD_SIZE = 32
+STREAM_V2_STATS_PAYLOAD_SIZE = 32
+STREAM_V2_TIMER_SOURCE_MAX = 40
+STREAM_V2_TIMER_UNIT_MAX = 16
+STREAM_V2_MAX_CHUNK_PAYLOAD = 2 * 1024 * 1024
+
+STREAM_V2_CHUNK_SESSION = 1
+STREAM_V2_CHUNK_DICTIONARY = 2
+STREAM_V2_CHUNK_EVENTS = 3
+STREAM_V2_CHUNK_THREAD = 4
+STREAM_V2_CHUNK_MODULE = 5
+STREAM_V2_CHUNK_STATS = 6
+STREAM_V2_CHUNK_END = 7
+
+STREAM_V2_SESSION_PROCESS_ID = 1 << 0
+STREAM_V2_SESSION_PROCESS_IDENTITY = 1 << 1
+STREAM_V2_SESSION_TIMER_SOURCE = 1 << 2
+STREAM_V2_SESSION_TIMER_UNIT = 1 << 3
+STREAM_V2_SESSION_FLAGS_ALL = (
+    STREAM_V2_SESSION_PROCESS_ID |
+    STREAM_V2_SESSION_PROCESS_IDENTITY |
+    STREAM_V2_SESSION_TIMER_SOURCE |
+    STREAM_V2_SESSION_TIMER_UNIT
+)
+STREAM_V2_THREAD_IDENTITY = 1 << 0
+STREAM_V2_MODULE_EXECUTABLE = 1 << 0
+STREAM_V2_MODULE_ARM = 1 << 1
+STREAM_V2_MODULE_THUMB = 1 << 2
+STREAM_V2_MODULE_FLAGS_ALL = (
+    STREAM_V2_MODULE_EXECUTABLE |
+    STREAM_V2_MODULE_ARM |
+    STREAM_V2_MODULE_THUMB
+)
 
 NAME_MAGIC = 0x4D4E5056
 NAME_VERSION = 1
@@ -56,6 +96,11 @@ WIRE_HEADER = struct.Struct("<IHHHHIQQ")
 WIRE_EVENT = struct.Struct("<QqIIIHH")
 NAME_HEADER = struct.Struct("<IHHHHIII")
 NAME_ENTRY_HEADER = struct.Struct("<IHH")
+STREAM_V2_CHUNK_HEADER = struct.Struct("<IHHHHIIIQ")
+STREAM_V2_SESSION = struct.Struct("<QQQIIHHI40s16s")
+STREAM_V2_THREAD = struct.Struct("<QIIIIQ")
+STREAM_V2_MODULE = struct.Struct("<IIIIIIQ")
+STREAM_V2_STATS = struct.Struct("<IIIIQQ")
 
 DEFAULT_PORT = 18195
 DEFAULT_MAX_BYTES = 16 * 1024 * 1024
@@ -134,6 +179,46 @@ class TraceHeader:
 
 
 @dataclasses.dataclass(frozen=True)
+class SessionMetadata:
+    session_id: int
+    process_id: int | None
+    process_identity: int | None
+    timer_source: str | None
+    timer_unit: str | None
+
+
+@dataclasses.dataclass(frozen=True)
+class ThreadIdentity:
+    thread_id: int
+    generation: int
+    identity: int | None
+    name_id: int
+    first_event_index: int
+
+
+@dataclasses.dataclass(frozen=True)
+class ModuleRange:
+    module_id: int
+    generation: int
+    address_start: int
+    address_end: int
+    name_id: int
+    executable: bool
+    arm: bool
+    thumb: bool
+
+
+@dataclasses.dataclass(frozen=True)
+class LossCounters:
+    producer_accepted: int
+    producer_dropped: int
+    transport_lost: int
+    sink_lost: int
+    events_written: int
+    bytes_written: int
+
+
+@dataclasses.dataclass(frozen=True)
 class Event:
     index: int
     timestamp_us: int
@@ -168,6 +253,11 @@ class TraceCapture:
     events: tuple[Event, ...]
     dictionary_size: int
     raw_size: int
+    session: SessionMetadata | None = None
+    thread_identities: tuple[ThreadIdentity, ...] = ()
+    module_ranges: tuple[ModuleRange, ...] = ()
+    loss: LossCounters | None = None
+    complete: bool = True
 
     def resolve_name(self, name_id: int) -> str:
         if name_id == 0:
@@ -186,6 +276,8 @@ class ZoneSpan:
     end_us: int
     duration_us: int
     flags: int
+    begin_event_index: int
+    end_event_index: int
 
 
 @dataclasses.dataclass(frozen=True)
@@ -221,16 +313,20 @@ _UNSAFE_BIDI_CLASSES = frozenset({
 
 
 def _decode_safe_name(raw_name: bytes, index: int) -> str:
+    return _decode_safe_text(raw_name, f"VPNM entry {index}")
+
+
+def _decode_safe_text(raw_text: bytes, label: str) -> str:
     try:
-        name = raw_name.decode("utf-8", errors="strict")
+        name = raw_text.decode("utf-8", errors="strict")
     except UnicodeDecodeError as error:
         raise TraceFormatError(
-            f"VPNM entry {index} is not valid UTF-8") from error
+            f"{label} is not valid UTF-8") from error
     for character in name:
         if (unicodedata.category(character) in {"Cc", "Cf", "Cs", "Zl", "Zp"} or
                 unicodedata.bidirectional(character) in _UNSAFE_BIDI_CLASSES):
             raise TraceFormatError(
-                f"VPNM entry {index} contains unsafe display controls")
+                f"{label} contains unsafe display controls")
     return name
 
 
@@ -335,8 +431,7 @@ def _decode_header(data: bytes, offset: int) -> TraceHeader:
     return TraceHeader(version, flags, clock_hz, stream_start_us)
 
 
-def decode_capture(data: bytes) -> TraceCapture:
-    """Decode one optional VPNM block plus one complete VPRF-to-EOF block."""
+def _decode_v1_capture(data: bytes) -> TraceCapture:
     if len(data) < 4:
         raise TraceFormatError("capture is too short to contain a magic")
     first_magic = struct.unpack_from("<I", data)[0]
@@ -367,6 +462,279 @@ def decode_capture(data: bytes) -> TraceCapture:
                             correlation_id, event_type, flags))
     return TraceCapture(header, names, tuple(events), dictionary_size,
                         len(data))
+
+
+class IncrementalTraceDecoder:
+    """Bounded incremental decoder for v2, with strict v1 EOF fallback."""
+
+    def __init__(self, max_bytes: int = DEFAULT_MAX_BYTES,
+                 max_events: int = MAX_DECODED_EVENTS) -> None:
+        if max_bytes < WIRE_HEADER_SIZE or max_events < 0:
+            raise ValueError("invalid incremental decoder bounds")
+        self.max_bytes = max_bytes
+        self.max_events = max_events
+        self._buffer = bytearray()
+        self._v1_data = bytearray()
+        self._mode: str | None = None
+        self._raw_size = 0
+        self._processed_size = 0
+        self._current_chunk_end = 0
+        self._next_sequence = 0
+        self._session: SessionMetadata | None = None
+        self._header: TraceHeader | None = None
+        self._names: dict[int, NameEntry] = {}
+        self._dictionary_size = 0
+        self._events: list[Event] = []
+        self._threads: list[ThreadIdentity] = []
+        self._modules: list[ModuleRange] = []
+        self._loss: LossCounters | None = None
+        self._complete = False
+        self._finished = False
+
+    @property
+    def is_v2(self) -> bool:
+        return self._mode == "v2"
+
+    @property
+    def complete(self) -> bool:
+        return self._complete
+
+    def feed(self, data: bytes) -> bool:
+        if self._finished:
+            raise TraceFormatError("capture decoder is already finished")
+        if not data:
+            return False
+        self._raw_size += len(data)
+        if self._raw_size > self.max_bytes:
+            raise TraceFormatError(
+                f"capture exceeds the {self.max_bytes}-byte safety limit")
+        if self._mode == "v1":
+            self._v1_data.extend(data)
+            return False
+        self._buffer.extend(data)
+        if self._mode is None:
+            if len(self._buffer) < 4:
+                return False
+            magic = struct.unpack_from("<I", self._buffer)[0]
+            if magic == STREAM_V2_CHUNK_MAGIC:
+                self._mode = "v2"
+            elif magic in (NAME_MAGIC, WIRE_MAGIC):
+                self._mode = "v1"
+                self._v1_data.extend(self._buffer)
+                self._buffer.clear()
+                return False
+            else:
+                raise TraceFormatError(
+                    "capture must begin with VPNM, VPRF, or v2 chunk")
+
+        changed = False
+        while len(self._buffer) >= STREAM_V2_CHUNK_HEADER_SIZE:
+            fields = STREAM_V2_CHUNK_HEADER.unpack_from(self._buffer)
+            (magic, version, header_size, chunk_type, flags, payload_size,
+             sequence, checksum, reserved) = fields
+            if magic != STREAM_V2_CHUNK_MAGIC:
+                raise TraceFormatError("bad v2 chunk magic")
+            if version != STREAM_V2_VERSION:
+                raise TraceFormatError(
+                    f"unsupported profiler stream version {version}")
+            if header_size != STREAM_V2_CHUNK_HEADER_SIZE:
+                raise TraceFormatError("unsupported v2 chunk header size")
+            if chunk_type not in range(STREAM_V2_CHUNK_SESSION,
+                                       STREAM_V2_CHUNK_END + 1):
+                raise TraceFormatError(f"unknown v2 chunk type {chunk_type}")
+            if flags or reserved:
+                raise TraceFormatError("v2 chunk reserved fields are not zero")
+            if payload_size > STREAM_V2_MAX_CHUNK_PAYLOAD:
+                raise TraceFormatError("v2 chunk payload exceeds safety limit")
+            total_size = STREAM_V2_CHUNK_HEADER_SIZE + payload_size
+            if len(self._buffer) < total_size:
+                return changed
+            payload = bytes(self._buffer[STREAM_V2_CHUNK_HEADER_SIZE:
+                                         total_size])
+            if zlib.crc32(payload) & 0xFFFFFFFF != checksum:
+                raise TraceFormatError("v2 chunk payload CRC mismatch")
+            if sequence != self._next_sequence:
+                raise TraceFormatError(
+                    f"v2 chunk sequence {sequence} does not match "
+                    f"{self._next_sequence}")
+            if self._complete:
+                raise TraceFormatError("v2 data follows the END chunk")
+            self._current_chunk_end = self._processed_size + total_size
+            self._decode_v2_chunk(chunk_type, payload)
+            del self._buffer[:total_size]
+            self._processed_size = self._current_chunk_end
+            self._next_sequence += 1
+            changed = True
+        return changed
+
+    def _decode_v2_chunk(self, chunk_type: int, payload: bytes) -> None:
+        if self._next_sequence == 0:
+            if chunk_type != STREAM_V2_CHUNK_SESSION:
+                raise TraceFormatError("v2 stream must begin with SESSION")
+            self._decode_v2_session(payload)
+            return
+        if self._next_sequence == 1:
+            if chunk_type != STREAM_V2_CHUNK_DICTIONARY:
+                raise TraceFormatError(
+                    "v2 SESSION must be followed by DICTIONARY")
+            self._names, self._dictionary_size = _decode_dictionary(payload)
+            if self._dictionary_size != len(payload):
+                raise TraceFormatError("v2 dictionary has trailing bytes")
+            return
+        if chunk_type in (STREAM_V2_CHUNK_SESSION,
+                          STREAM_V2_CHUNK_DICTIONARY):
+            raise TraceFormatError("duplicate v2 lifecycle chunk")
+        if chunk_type == STREAM_V2_CHUNK_EVENTS:
+            self._decode_v2_events(payload)
+        elif chunk_type == STREAM_V2_CHUNK_THREAD:
+            self._decode_v2_thread(payload)
+        elif chunk_type == STREAM_V2_CHUNK_MODULE:
+            self._decode_v2_module(payload)
+        elif chunk_type in (STREAM_V2_CHUNK_STATS, STREAM_V2_CHUNK_END):
+            loss = self._decode_v2_stats(payload)
+            if self._loss is not None and (
+                    loss.events_written < self._loss.events_written or
+                    loss.bytes_written < self._loss.bytes_written):
+                raise TraceFormatError("v2 loss counters regressed")
+            if loss.events_written > len(self._events):
+                raise TraceFormatError(
+                    "v2 stats claim events not present in the stream")
+            self._loss = loss
+            if chunk_type == STREAM_V2_CHUNK_END:
+                if loss.events_written != len(self._events):
+                    raise TraceFormatError(
+                        "v2 END event count does not match the stream")
+                if loss.sink_lost:
+                    raise TraceFormatError(
+                        "v2 END cannot claim a clean sink after sink loss")
+                if loss.bytes_written != self._current_chunk_end:
+                    raise TraceFormatError(
+                        "v2 END byte count does not match the stream")
+                self._complete = True
+
+    def _decode_v2_session(self, payload: bytes) -> None:
+        if len(payload) != STREAM_V2_SESSION_PAYLOAD_SIZE:
+            raise TraceFormatError("invalid v2 SESSION payload size")
+        (session_id, process_identity, stream_start_us, process_id, flags,
+         source_length, unit_length, reserved, source, unit) = (
+            STREAM_V2_SESSION.unpack(payload))
+        if not session_id or flags & ~STREAM_V2_SESSION_FLAGS_ALL or reserved:
+            raise TraceFormatError("invalid v2 SESSION metadata")
+        if (source_length > STREAM_V2_TIMER_SOURCE_MAX or
+                unit_length > STREAM_V2_TIMER_UNIT_MAX):
+            raise TraceFormatError("v2 timer metadata exceeds its bound")
+        if any(source[source_length:]) or any(unit[unit_length:]):
+            raise TraceFormatError("v2 timer metadata has nonzero padding")
+        has_source = bool(flags & STREAM_V2_SESSION_TIMER_SOURCE)
+        has_unit = bool(flags & STREAM_V2_SESSION_TIMER_UNIT)
+        if has_source != bool(source_length) or has_unit != bool(unit_length):
+            raise TraceFormatError("v2 timer metadata flags disagree")
+        if (not flags & STREAM_V2_SESSION_PROCESS_ID and process_id) or (
+                not flags & STREAM_V2_SESSION_PROCESS_IDENTITY and
+                process_identity):
+            raise TraceFormatError("v2 process metadata flags disagree")
+        timer_source = (_decode_safe_text(
+            source[:source_length], "v2 timer source") if has_source else None)
+        timer_unit = (_decode_safe_text(
+            unit[:unit_length], "v2 timer unit") if has_unit else None)
+        self._session = SessionMetadata(
+            session_id=session_id,
+            process_id=(process_id if flags &
+                        STREAM_V2_SESSION_PROCESS_ID else None),
+            process_identity=(process_identity if flags &
+                              STREAM_V2_SESSION_PROCESS_IDENTITY else None),
+            timer_source=timer_source,
+            timer_unit=timer_unit,
+        )
+        self._header = TraceHeader(
+            STREAM_V2_VERSION, WIRE_FLAGS, WIRE_CLOCK_HZ, stream_start_us)
+
+    def _decode_v2_events(self, payload: bytes) -> None:
+        if not payload or len(payload) % WIRE_EVENT_SIZE:
+            raise TraceFormatError("v2 EVENTS payload has a partial event")
+        event_count = len(payload) // WIRE_EVENT_SIZE
+        if len(self._events) + event_count > self.max_events:
+            raise TraceFormatError(
+                f"v2 stream exceeds decoded event limit {self.max_events}")
+        for offset in range(0, len(payload), WIRE_EVENT_SIZE):
+            values = WIRE_EVENT.unpack_from(payload, offset)
+            self._events.append(Event(len(self._events), *values))
+
+    def _decode_v2_thread(self, payload: bytes) -> None:
+        if len(payload) != STREAM_V2_THREAD_PAYLOAD_SIZE:
+            raise TraceFormatError("invalid v2 THREAD payload size")
+        identity, thread_id, generation, name_id, flags, reserved = (
+            STREAM_V2_THREAD.unpack(payload))
+        if (not thread_id or flags & ~STREAM_V2_THREAD_IDENTITY or reserved or
+                bool(flags & STREAM_V2_THREAD_IDENTITY) != bool(identity)):
+            raise TraceFormatError("invalid v2 THREAD metadata")
+        item = ThreadIdentity(
+            thread_id, generation,
+            identity if flags & STREAM_V2_THREAD_IDENTITY else None, name_id,
+            len(self._events))
+        if any((existing.thread_id, existing.generation) ==
+               (thread_id, generation) for existing in self._threads):
+            raise TraceFormatError("duplicate v2 thread generation")
+        self._threads.append(item)
+
+    def _decode_v2_module(self, payload: bytes) -> None:
+        if len(payload) != STREAM_V2_MODULE_PAYLOAD_SIZE:
+            raise TraceFormatError("invalid v2 MODULE payload size")
+        (module_id, generation, start, end, name_id, flags, reserved) = (
+            STREAM_V2_MODULE.unpack(payload))
+        if (not module_id or start >= end or
+                flags & ~STREAM_V2_MODULE_FLAGS_ALL or
+                not flags & (STREAM_V2_MODULE_ARM |
+                             STREAM_V2_MODULE_THUMB) or reserved):
+            raise TraceFormatError("invalid v2 MODULE metadata")
+        item = ModuleRange(
+            module_id, generation, start, end, name_id,
+            bool(flags & STREAM_V2_MODULE_EXECUTABLE),
+            bool(flags & STREAM_V2_MODULE_ARM),
+            bool(flags & STREAM_V2_MODULE_THUMB))
+        if any((existing.module_id, existing.generation) ==
+               (module_id, generation) for existing in self._modules):
+            raise TraceFormatError("duplicate v2 module generation")
+        self._modules.append(item)
+
+    @staticmethod
+    def _decode_v2_stats(payload: bytes) -> LossCounters:
+        if len(payload) != STREAM_V2_STATS_PAYLOAD_SIZE:
+            raise TraceFormatError("invalid v2 STATS payload size")
+        return LossCounters(*STREAM_V2_STATS.unpack(payload))
+
+    def snapshot(self, allow_incomplete: bool = True) -> TraceCapture:
+        if self._mode != "v2" or self._header is None or self._session is None:
+            raise TraceFormatError("v2 session metadata is not complete")
+        if self._next_sequence < 2:
+            raise TraceFormatError("v2 dictionary is not complete")
+        if not allow_incomplete and not self._complete:
+            raise TraceFormatError("v2 session ended without an END chunk")
+        return TraceCapture(
+            self._header, dict(self._names), tuple(self._events),
+            self._dictionary_size, self._raw_size, self._session,
+            tuple(self._threads), tuple(self._modules), self._loss,
+            self._complete)
+
+    def finish(self) -> TraceCapture:
+        if self._finished:
+            raise TraceFormatError("capture decoder is already finished")
+        self._finished = True
+        if self._mode == "v1":
+            return _decode_v1_capture(bytes(self._v1_data))
+        if self._mode != "v2":
+            raise TraceFormatError("capture is too short to contain a magic")
+        if self._buffer:
+            raise TraceFormatError("v2 stream ends with a truncated chunk")
+        return self.snapshot(allow_incomplete=False)
+
+
+def decode_capture(data: bytes) -> TraceCapture:
+    """Decode one complete v1 capture or CRC-framed v2 session."""
+    decoder = IncrementalTraceDecoder(max_bytes=max(DEFAULT_MAX_BYTES,
+                                                    len(data)))
+    decoder.feed(data)
+    return decoder.finish()
 
 
 def analyze_zones(capture: TraceCapture) -> ZoneAnalysis:
@@ -408,6 +776,8 @@ def analyze_zones(capture: TraceCapture) -> ZoneAnalysis:
             end_us=event.timestamp_us,
             duration_us=max(0, event.value),
             flags=begin.flags | event.flags,
+            begin_event_index=begin.index,
+            end_event_index=event.index,
         ))
 
     unmatched_begins = tuple(
@@ -609,6 +979,7 @@ def render_summary(capture: TraceCapture) -> str:
         f"  bytes: {capture.raw_size}",
         f"  stream start: {capture.header.stream_start_us} us",
         f"  events: {len(events)} over {span_us} us",
+        f"  session complete: {'yes' if capture.complete else 'no'}",
         f"  dictionary: {len(capture.names)} names "
         f"({len(unresolved)} referenced IDs unresolved)",
         "  threads: " + (", ".join(f"0x{thread:08x}" for thread in threads)
@@ -619,6 +990,16 @@ def render_summary(capture: TraceCapture) -> str:
         lines.extend(["", "Event types:"])
         rows = [(name, str(count)) for name, count in sorted(type_counts.items())]
         lines.extend(_format_table(rows, ("type", "count")))
+
+    if capture.loss is not None:
+        lines.extend([
+            "",
+            "Loss counters:",
+            f"  producer accepted: {capture.loss.producer_accepted}",
+            f"  producer dropped: {capture.loss.producer_dropped}",
+            f"  transport lost: {capture.loss.transport_lost}",
+            f"  sink lost: {capture.loss.sink_lost}",
+        ])
 
     if zones.spans:
         aggregate: dict[str, list[int]] = {}
@@ -738,9 +1119,38 @@ def render_events(capture: TraceCapture, limit: int | None = None) -> str:
 
 
 def capture_to_json(capture: TraceCapture) -> dict[str, object]:
+    thread_metadata = [
+        {
+            **dataclasses.asdict(item),
+            "thread_id_hex": f"0x{item.thread_id:08x}",
+            "identity_hex": (
+                f"0x{item.identity:016x}" if item.identity is not None else
+                None),
+            "name": capture.resolve_name(item.name_id),
+        }
+        for item in capture.thread_identities
+    ]
+    module_metadata = [
+        {
+            **dataclasses.asdict(item),
+            "address_start_hex": f"0x{item.address_start:08x}",
+            "address_end_hex": f"0x{item.address_end:08x}",
+            "name": capture.resolve_name(item.name_id),
+        }
+        for item in capture.module_ranges
+    ]
     return {
-        "format": "vitaprofiler-decoded-v1",
+        "format": ("vitaprofiler-decoded-v2"
+                   if capture.header.version == STREAM_V2_VERSION else
+                   "vitaprofiler-decoded-v1"),
         "header": dataclasses.asdict(capture.header),
+        "complete": capture.complete,
+        "session": (dataclasses.asdict(capture.session)
+                    if capture.session is not None else None),
+        "loss": (dataclasses.asdict(capture.loss)
+                 if capture.loss is not None else None),
+        "thread_identities": thread_metadata,
+        "module_ranges": module_metadata,
         "dictionary_size": capture.dictionary_size,
         "raw_size": capture.raw_size,
         "names": [
@@ -784,17 +1194,31 @@ def capture_to_json(capture: TraceCapture) -> dict[str, object]:
 
 def capture_to_chrome_trace(capture: TraceCapture) -> dict[str, object]:
     """Return Chrome Trace Event JSON, also loadable by Perfetto."""
+    process_id = (capture.session.process_id
+                  if capture.session is not None and
+                  capture.session.process_id is not None else 1)
     trace_events: list[dict[str, object]] = [{
-        "name": "process_name", "ph": "M", "pid": 1, "tid": 0,
+        "name": "process_name", "ph": "M", "pid": process_id, "tid": 0,
         "args": {"name": "PS Vita application"},
     }]
+    for identity in capture.thread_identities:
+        trace_events.append({
+            "name": "thread_name", "ph": "M", "pid": process_id,
+            "tid": identity.thread_id,
+            "args": {
+                "name": capture.resolve_name(identity.name_id),
+                "generation": identity.generation,
+                "identity": identity.identity,
+                "first_event_index": identity.first_event_index,
+            },
+        })
     zones = analyze_zones(capture)
     for span in zones.spans:
         trace_events.append({
             "name": span.name,
             "cat": "cpu.zone",
             "ph": "X",
-            "pid": 1,
+            "pid": process_id,
             "tid": span.thread_id,
             "ts": span.begin_us,
             "dur": span.duration_us,
@@ -810,7 +1234,7 @@ def capture_to_chrome_trace(capture: TraceCapture) -> dict[str, object]:
     unmatched.update(event.index for event in zones.unmatched_ends)
     for event in capture.events:
         name = capture.resolve_name(event.name_id)
-        base = {"name": name, "pid": 1, "tid": event.thread_id,
+        base = {"name": name, "pid": process_id, "tid": event.thread_id,
                 "ts": event.timestamp_us}
         if event.event_type in (EVENT_ZONE_BEGIN, EVENT_ZONE_END):
             if event.index not in unmatched:
@@ -869,7 +1293,7 @@ def capture_to_chrome_trace(capture: TraceCapture) -> dict[str, object]:
                 "name": "vita.thread.run_clocks.delta_raw",
                 "cat": "thread_sample.raw_unknown_unit",
                 "ph": "C",
-                "pid": 1,
+                "pid": process_id,
                 "tid": sample["thread_id"],
                 "ts": sample["timestamp_us"],
                 "args": {
@@ -890,7 +1314,7 @@ def capture_to_chrome_trace(capture: TraceCapture) -> dict[str, object]:
                 "cat": "diagnostic.run_clocks",
                 "ph": "i",
                 "s": "t",
-                "pid": 1,
+                "pid": process_id,
                 "tid": sample["thread_id"],
                 "ts": sample["timestamp_us"],
                 "args": {
@@ -913,6 +1337,18 @@ def capture_to_chrome_trace(capture: TraceCapture) -> dict[str, object]:
             "stream_start_us": capture.header.stream_start_us,
             "event_count": len(capture.events),
             "dictionary_entries": len(capture.names),
+            "complete": capture.complete,
+            "session": (dataclasses.asdict(capture.session)
+                        if capture.session is not None else None),
+            "loss": (dataclasses.asdict(capture.loss)
+                     if capture.loss is not None else None),
+            "thread_identities": [
+                dataclasses.asdict(item)
+                for item in capture.thread_identities
+            ],
+            "module_ranges": [
+                dataclasses.asdict(item) for item in capture.module_ranges
+            ],
             "unmatched_zone_begins": len(zones.unmatched_begins),
             "unmatched_zone_ends": len(zones.unmatched_ends),
             "run_clocks": run_clocks["semantics"],
@@ -926,6 +1362,7 @@ def receive_socket(connection: socket.socket, max_bytes: int,
                    total_timeout: float | None = DEFAULT_CAPTURE_TIMEOUT,
                    cancelled: Callable[[], bool] | None = None,
                    on_progress: Callable[[int], None] | None = None,
+                   on_chunk: Callable[[bytes], None] | None = None,
                    ) -> bytes:
     """Read one capture through EOF with hard memory and time bounds."""
     if max_bytes < WIRE_HEADER_SIZE:
@@ -981,6 +1418,8 @@ def receive_socket(connection: socket.socket, max_bytes: int,
             raise TraceReceiveError(
                 f"capture exceeded the {max_bytes}-byte safety limit")
         chunks.append(chunk)
+        if on_chunk is not None:
+            on_chunk(chunk)
         if idle_timeout is not None:
             idle_deadline = time.monotonic() + idle_timeout
         if on_progress is not None:
@@ -995,6 +1434,7 @@ def receive_tcp_once(bind: str, port: int, source: str | None,
                      capture_timeout: float | None = DEFAULT_CAPTURE_TIMEOUT,
                      cancelled: Callable[[], bool] | None = None,
                      on_progress: Callable[[int], None] | None = None,
+                     on_chunk: Callable[[bytes], None] | None = None,
                      ) -> tuple[bytes, tuple[str, int]]:
     """Accept one allowlisted IPv4 sender and read until its clean EOF."""
     if accept_timeout is not None:
@@ -1041,7 +1481,7 @@ def receive_tcp_once(bind: str, port: int, source: str | None,
             with connection:
                 return receive_socket(connection, max_bytes, idle_timeout,
                                       capture_timeout, cancelled,
-                                      on_progress), peer
+                                      on_progress, on_chunk), peer
 
 
 def _metadata_text(value: object, field: str) -> str:

@@ -26,6 +26,20 @@ static const char* const vp_graphics_zone_names[VP_GRAPHICS_ZONE_COUNT] = {
     "scegxm.display_queue_add.cpu_wait",
     "scegxm.display_callback.cpu",
     "display.vblank.cpu_wait",
+    "vitagl.command.cpu_submit",
+    "vitagl.clear.cpu_call",
+    "vitagl.fence.cpu_wait",
+    "vitagl.program.cpu",
+    "vitagl.render_target.cpu_transition",
+    "vitagl.buffer.cpu_transition",
+    "vitagl.upload.cpu",
+    "scegxm.command.cpu_submit",
+    "scegxm.clear.cpu_submit",
+    "scegxm.fence.cpu_wait",
+    "scegxm.program.cpu",
+    "scegxm.render_target.cpu_transition",
+    "scegxm.buffer.cpu_transition",
+    "scegxm.upload.cpu",
 };
 
 static const char* const
@@ -38,6 +52,12 @@ static const char* const
         "scegxm.state_changes",
         "vitagl.allocation_bytes",
         "scegxm.allocation_bytes",
+        "vitagl.clear_calls",
+        "scegxm.clear_calls",
+        "vitagl.program_changes",
+        "scegxm.program_changes",
+        "vitagl.upload_bytes",
+        "scegxm.upload_bytes",
     };
 
 static const char* const vp_graphics_frame_names[VP_GRAPHICS_FRAME_COUNT] = {

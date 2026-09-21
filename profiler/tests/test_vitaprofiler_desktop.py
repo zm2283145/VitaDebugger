@@ -1,8 +1,10 @@
 import queue
+import dataclasses
 import socket
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 
@@ -13,7 +15,7 @@ sys.path.insert(0, str(TOOLS))
 
 import vitaprofiler_desktop as desktop  # noqa: E402
 import vitaprofiler_trace as trace  # noqa: E402
-from test_vitaprofiler_trace import make_capture  # noqa: E402
+from test_vitaprofiler_trace import make_capture, make_v2_capture  # noqa: E402
 
 
 class ViewModelTests(unittest.TestCase):
@@ -42,6 +44,7 @@ class ViewModelTests(unittest.TestCase):
         self.assertEqual(self.model.zones[0].name, "update")
         self.assertEqual(self.model.zones[0].duration_us, 250)
         self.assertEqual(len(self.model.frames), 2)
+        self.assertEqual(len(self.model.timeline), 3)
         self.assertIsNone(self.model.frames[0].duration_us)
         self.assertAlmostEqual(self.model.frames[1].fps, 63.2911, places=3)
         self.assertEqual(
@@ -56,6 +59,8 @@ class ViewModelTests(unittest.TestCase):
         self.assertFalse(self.model.filter_frames(thread_id=8))
         self.assertEqual(len(self.model.filter_events("zone_end")), 1)
         bounded = self.model.filter_tables("", None, 1)
+        self.assertEqual(len(bounded.timeline.rows), 1)
+        self.assertTrue(bounded.timeline.truncated)
         self.assertEqual(len(bounded.events.rows), 1)
         self.assertTrue(bounded.events.truncated)
         self.assertEqual(len(bounded.zones.rows), 1)
@@ -66,6 +71,36 @@ class ViewModelTests(unittest.TestCase):
         details = dict(self.model.details(self.capture.events[1]))
         self.assertEqual(details["Name"], "draw calls")
         self.assertEqual(details["Type Name"], "counter")
+
+    def test_v2_identity_loss_and_timeline_views(self):
+        capture = trace.decode_capture(make_v2_capture())
+        model = desktop.ProfilerViewModel(capture, "live.vptrace")
+        metadata = dict(model.metadata_rows())
+        loss = dict(model.loss_rows())
+        self.assertEqual(metadata["Session state"], "Complete")
+        self.assertIn("0x0102030405060708",
+                      metadata["Session/process ID"])
+        self.assertEqual(metadata["Raw timer source"],
+                         "sceKernelGetProcessTimeWide")
+        self.assertEqual(metadata["Thread generations"], "1")
+        self.assertEqual(metadata["Module ranges"], "1")
+        self.assertEqual(metadata["ARM/Thumb state"], "ARM, Thumb")
+        self.assertIn("1 dropped", loss["Producer ring drops"])
+        self.assertIn("2 transport", loss["TCP/sink loss"])
+        self.assertTrue(all(row.thread_generation == 2
+                            for row in model.timeline))
+
+    def test_latest_generation_wins_at_same_event_boundary(self):
+        identities = (
+            trace.ThreadIdentity(7, 1, 0x101, 0, 0),
+            trace.ThreadIdentity(7, 2, 0x202, 0, 0),
+        )
+        capture = dataclasses.replace(
+            self.capture, thread_identities=identities)
+        model = desktop.ProfilerViewModel(capture, "generations.vptrace")
+        self.assertTrue(model.frames)
+        self.assertTrue(all(frame.thread_generation == 2
+                            for frame in model.frames))
 
 
 class ControllerTests(unittest.TestCase):
@@ -145,6 +180,60 @@ class ControllerTests(unittest.TestCase):
         self.assertFalse(thread.is_alive())
         self.assertIsInstance(outcome.get_nowait(),
                               trace.TraceReceiveCancelled)
+
+    def test_v2_receiver_publishes_incomplete_live_models(self):
+        raw = make_v2_capture()
+        chunks: list[bytes] = []
+        offset = 0
+        while offset < len(raw):
+            header = trace.STREAM_V2_CHUNK_HEADER.unpack_from(raw, offset)
+            chunk_size = trace.STREAM_V2_CHUNK_HEADER_SIZE + header[5]
+            chunks.append(raw[offset:offset + chunk_size])
+            offset += chunk_size
+        events_index = next(
+            index for index, chunk in enumerate(chunks)
+            if trace.STREAM_V2_CHUNK_HEADER.unpack_from(chunk)[3] ==
+            trace.STREAM_V2_CHUNK_EVENTS)
+        listening: queue.Queue[tuple[str, int]] = queue.Queue()
+        outcome: queue.Queue[object] = queue.Queue()
+        updates: list[desktop.LoadedCapture] = []
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "live.vptrace"
+            config = desktop.ReceiveConfig(
+                output=output, bind="127.0.0.1", port=0,
+                source="127.0.0.1", accept_timeout=3.0,
+                idle_timeout=3.0, capture_timeout=3.0)
+
+            def receive() -> None:
+                try:
+                    outcome.put(desktop.ProfilerController().receive_capture(
+                        config, on_listening=listening.put,
+                        on_live_update=updates.append))
+                except BaseException as error:
+                    outcome.put(error)
+
+            thread = threading.Thread(target=receive)
+            thread.start()
+            with socket.create_connection(listening.get(timeout=3),
+                                          timeout=3) as sender:
+                sender.sendall(b"".join(chunks[:events_index]))
+                time.sleep(2.05)
+                sender.sendall(chunks[events_index])
+                time.sleep(0.1)
+                sender.sendall(b"".join(chunks[events_index + 1:]))
+                sender.shutdown(socket.SHUT_WR)
+            thread.join(timeout=3)
+            self.assertFalse(thread.is_alive())
+            result = outcome.get_nowait()
+            if isinstance(result, BaseException):
+                raise result
+            self.assertTrue(result.capture.complete)
+            self.assertTrue(updates)
+            self.assertTrue(any(not item.capture.complete and
+                                item.capture.events for item in updates))
+            self.assertEqual(
+                updates[-1].capture.events,
+                result.capture.events[:len(updates[-1].capture.events)])
 
 
 if __name__ == "__main__":

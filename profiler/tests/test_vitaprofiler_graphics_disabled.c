@@ -24,6 +24,12 @@ int main(void)
             VP_RESULT_OK ||
         VP_GRAPHICS_SCOPE_POP(hooks + touched++, stack + touched++) !=
             VP_RESULT_OK ||
+        VP_GRAPHICS_ZONE_BEGIN(hooks + touched++,
+                               VP_GRAPHICS_ZONE_SCEGXM_FENCE_WAIT,
+                               scope + touched++) != VP_RESULT_OK ||
+        VP_GRAPHICS_COUNTER(hooks + touched++,
+                            VP_GRAPHICS_COUNTER_VITAGL_UPLOAD_BYTES,
+                            touched++) != VP_RESULT_OK ||
         touched != 0) {
         fputs("disabled graphics instrumentation evaluated an argument\n",
               stderr);

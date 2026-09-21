@@ -1,6 +1,7 @@
 #include "vitaprofiler_stream.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 static int failures;
@@ -25,6 +26,59 @@ struct memory_sink {
     uint32_t fail_call;
 };
 
+struct counting_sink {
+    uint64_t bytes;
+    size_t largest_write;
+};
+
+static uint64_t read_u64_le(const uint8_t* input)
+{
+    uint64_t value = 0u;
+    for (uint32_t index = 0u; index < 8u; ++index)
+        value |= (uint64_t)input[index] << (index * 8u);
+    return value;
+}
+
+static uint32_t read_u32_le(const uint8_t* input)
+{
+    uint32_t value = 0u;
+    for (uint32_t index = 0u; index < 4u; ++index)
+        value |= (uint32_t)input[index] << (index * 8u);
+    return value;
+}
+
+static void write_u32_le(uint8_t* output, uint32_t value)
+{
+    for (uint32_t index = 0u; index < 4u; ++index)
+        output[index] = (uint8_t)(value >> (index * 8u));
+}
+
+static void write_u64_le(uint8_t* output, uint64_t value)
+{
+    for (uint32_t index = 0u; index < 8u; ++index)
+        output[index] = (uint8_t)(value >> (index * 8u));
+}
+
+static uint32_t test_crc32(const uint8_t* data, size_t size)
+{
+    uint32_t crc = UINT32_MAX;
+    for (size_t index = 0u; index < size; ++index) {
+        crc ^= data[index];
+        for (uint32_t bit = 0u; bit < 8u; ++bit)
+            crc = (crc >> 1u) ^
+                  (UINT32_C(0xedb88320) & (uint32_t)-(int32_t)(crc & 1u));
+    }
+    return ~crc;
+}
+
+static void refresh_chunk_crc(uint8_t* chunk)
+{
+    uint32_t payload_size = read_u32_le(chunk + 12u);
+    write_u32_le(
+        chunk + 20u,
+        test_crc32(chunk + VP_STREAM_V2_CHUNK_HEADER_SIZE, payload_size));
+}
+
 static uint64_t fake_clock(void* user)
 {
     return ((struct fake_source*)user)->now;
@@ -45,6 +99,17 @@ static int memory_write(void* user, const uint8_t* data, size_t size)
         return -1;
     memcpy(sink->data + sink->used, data, size);
     sink->used += size;
+    return 0;
+}
+
+static int counting_write(void* user, const uint8_t* data, size_t size)
+{
+    struct counting_sink* sink = (struct counting_sink*)user;
+    if (data == NULL && size != 0u)
+        return -1;
+    sink->bytes += size;
+    if (size > sink->largest_write)
+        sink->largest_write = size;
     return 0;
 }
 
@@ -226,10 +291,271 @@ static void test_fail_closed_sink_lifecycle(void)
           "failed writer cannot resume or claim clean close");
 }
 
+static void test_v2_incremental_session_round_trip(void)
+{
+    struct vp_context context;
+    struct vp_slot slots[8];
+    struct fake_source source = {1000u, 7u};
+    struct vp_name_dictionary names;
+    struct vp_name_entry entries[4];
+    char text[128];
+    uint32_t zone_id = 0u;
+    uint32_t counter_id = 0u;
+    uint8_t dictionary_buffer[1024];
+    struct memory_sink sink;
+    struct vp_stream_writer writer;
+    struct vp_stream_writer_config config;
+    struct vp_stream_v2_session session;
+    struct vp_stream_v2_thread thread;
+    struct vp_stream_v2_module module;
+    struct vp_stream_v2_cursor cursor;
+    struct vp_stream_v2_info info;
+    struct vp_stream_v2_chunk_view chunk;
+    struct vp_event event;
+    struct vp_zone_scope zone;
+    size_t drained = 0u;
+    size_t event_chunks = 0u;
+    size_t decoded_events = 0u;
+    uint64_t end_bytes_written = 0u;
+
+    memset(&sink, 0, sizeof(sink));
+    init_context(&context, slots, &source);
+    init_names(&names, entries, text, &zone_id, &counter_id);
+    CHECK(vp_zone_begin(&context, zone_id, &zone) == VP_RESULT_OK,
+          "record v2 zone begin");
+    source.now = 1250u;
+    CHECK(vp_counter(&context, counter_id, 42) == VP_RESULT_OK &&
+              vp_zone_end(&context, &zone) == VP_RESULT_OK,
+          "record v2 remaining events");
+
+    memset(&config, 0, sizeof(config));
+    config.context = &context;
+    config.names = &names;
+    config.write = memory_write;
+    config.write_user = &sink;
+    config.dictionary_buffer = dictionary_buffer;
+    config.dictionary_buffer_capacity = sizeof(dictionary_buffer);
+    memset(&session, 0, sizeof(session));
+    session.session_id = UINT64_C(0x0102030405060708);
+    session.process_id = 73u;
+    session.process_identity = UINT64_C(0x1122334455667788);
+    session.timer_source = "sceKernelGetProcessTimeWide";
+    session.timer_unit = "microseconds";
+    session.flags = VP_STREAM_V2_SESSION_PROCESS_ID |
+                    VP_STREAM_V2_SESSION_PROCESS_IDENTITY |
+                    VP_STREAM_V2_SESSION_TIMER_SOURCE |
+                    VP_STREAM_V2_SESSION_TIMER_UNIT;
+    memset(&thread, 0, sizeof(thread));
+    thread.thread_id = 7u;
+    thread.generation = 2u;
+    thread.identity = UINT64_C(0xaabbccdd00000002);
+    thread.name_id = zone_id;
+    thread.flags = VP_STREAM_V2_THREAD_IDENTITY;
+    memset(&module, 0, sizeof(module));
+    module.module_id = 4u;
+    module.generation = 1u;
+    module.address_start = UINT32_C(0x81000000);
+    module.address_end = UINT32_C(0x81010000);
+    module.name_id = zone_id;
+    module.flags = VP_STREAM_V2_MODULE_EXECUTABLE |
+                   VP_STREAM_V2_MODULE_ARM |
+                   VP_STREAM_V2_MODULE_THUMB;
+
+    CHECK(vp_stream_writer_init(&writer, &config) == VP_RESULT_OK &&
+              vp_stream_writer_begin_v2(&writer, 900u, &session) ==
+                  VP_RESULT_OK &&
+              vp_stream_writer_write_thread_v2(&writer, &thread) ==
+                  VP_RESULT_OK &&
+              vp_stream_writer_write_module_v2(&writer, &module) ==
+                  VP_RESULT_OK,
+          "begin v2 session and publish supplied identity metadata");
+    CHECK(vp_stream_writer_drain(&writer, 2u, &drained) == VP_RESULT_OK &&
+              drained == 2u &&
+              vp_stream_writer_write_stats_v2(&writer) == VP_RESULT_OK,
+          "publish a bounded live v2 event chunk and stats snapshot");
+    CHECK(vp_stream_writer_drain(&writer, 8u, &drained) == VP_RESULT_OK &&
+              drained == 1u &&
+              vp_stream_writer_set_transport_loss_v2(
+                  &writer, UINT32_MAX) == VP_RESULT_OK &&
+              vp_stream_writer_write_stats_v2(&writer) == VP_RESULT_OK &&
+              vp_stream_writer_set_transport_loss_v2(&writer, 2u) ==
+                  VP_RESULT_OK &&
+              vp_stream_writer_close(&writer) == VP_RESULT_OK,
+          "close v2 session after wrapping transport loss counter");
+
+    CHECK(vp_stream_v2_cursor_init(
+              &cursor, sink.data, sink.used, &info) == VP_RESULT_OK &&
+              info.complete == 1u &&
+              info.session_id == session.session_id &&
+              info.event_count == 3u,
+          "v2 receiver validates the complete lifecycle");
+    while (vp_stream_v2_cursor_next(&cursor, &chunk) == VP_RESULT_OK) {
+        if (chunk.header.type != VP_STREAM_V2_CHUNK_EVENTS)
+        {
+            if (chunk.header.type == VP_STREAM_V2_CHUNK_END)
+                end_bytes_written = read_u64_le(chunk.payload + 24);
+            continue;
+        }
+        ++event_chunks;
+        for (size_t offset = 0u;
+             offset < chunk.header.payload_size;
+             offset += VP_WIRE_EVENT_SIZE) {
+            CHECK(vp_decode_event_le(
+                      chunk.payload + offset,
+                      chunk.header.payload_size - offset, &event) ==
+                      VP_RESULT_OK,
+                  "decode event from v2 chunk");
+            ++decoded_events;
+        }
+    }
+    CHECK(event_chunks == 2u && decoded_events == 3u &&
+              end_bytes_written == sink.used,
+          "v2 chunks expose incremental event batches");
+
+    {
+        uint8_t damaged[4096];
+        size_t chunk_offset = 0u;
+        size_t stats_offset = 0u;
+        size_t end_offset = 0u;
+        size_t last_chunk_size =
+            VP_STREAM_V2_CHUNK_HEADER_SIZE +
+            VP_STREAM_V2_STATS_PAYLOAD_SIZE;
+        memcpy(damaged, sink.data, sink.used);
+        while (chunk_offset < sink.used) {
+            uint32_t chunk_type =
+                (uint32_t)damaged[chunk_offset + 8u] |
+                ((uint32_t)damaged[chunk_offset + 9u] << 8u);
+            if (chunk_type == VP_STREAM_V2_CHUNK_STATS &&
+                stats_offset == 0u)
+                stats_offset = chunk_offset;
+            if (chunk_type == VP_STREAM_V2_CHUNK_END)
+                end_offset = chunk_offset;
+            chunk_offset += VP_STREAM_V2_CHUNK_HEADER_SIZE +
+                            read_u32_le(damaged + chunk_offset + 12u);
+        }
+        damaged[VP_STREAM_V2_CHUNK_HEADER_SIZE + 40u] ^= 1u;
+        CHECK(vp_stream_v2_cursor_init(
+                  &cursor, damaged, sink.used, NULL) ==
+                  VP_ERROR_MALFORMED,
+              "v2 payload CRC corruption fails closed");
+        memcpy(damaged, sink.data, sink.used);
+        damaged[4] = (uint8_t)(VP_STREAM_V2_VERSION + 1u);
+        CHECK(vp_stream_v2_cursor_init(
+                  &cursor, damaged, sink.used, NULL) ==
+                  VP_ERROR_UNSUPPORTED,
+              "v2 chunk version mismatch fails closed");
+        CHECK(vp_stream_v2_cursor_init(
+                  &cursor, sink.data, sink.used - 1u, NULL) ==
+                  VP_ERROR_MALFORMED &&
+                  vp_stream_v2_cursor_init(
+                      &cursor, sink.data,
+                      sink.used - last_chunk_size, NULL) ==
+                      VP_ERROR_MALFORMED,
+              "truncated and incomplete v2 sessions fail closed");
+        memcpy(damaged, sink.data, sink.used);
+        write_u64_le(
+            damaged + stats_offset + VP_STREAM_V2_CHUNK_HEADER_SIZE + 16u,
+            3u);
+        refresh_chunk_crc(damaged + stats_offset);
+        CHECK(vp_stream_v2_cursor_init(
+                  &cursor, damaged, sink.used, NULL) == VP_ERROR_MALFORMED,
+              "intermediate stats cannot claim unseen events");
+        memcpy(damaged, sink.data, sink.used);
+        write_u64_le(
+            damaged + end_offset + VP_STREAM_V2_CHUNK_HEADER_SIZE + 24u,
+            sink.used - 1u);
+        refresh_chunk_crc(damaged + end_offset);
+        CHECK(vp_stream_v2_cursor_init(
+                  &cursor, damaged, sink.used, NULL) == VP_ERROR_MALFORMED,
+              "END byte count must include its own complete chunk");
+    }
+}
+
+static void test_v2_drain_caps_oversized_staging_buffer(void)
+{
+    const uint32_t slot_count = UINT32_C(131072);
+    const size_t maximum_events =
+        VP_STREAM_V2_MAX_CHUNK_PAYLOAD / VP_WIRE_EVENT_SIZE;
+    struct vp_slot* slots =
+        (struct vp_slot*)calloc(slot_count, sizeof(*slots));
+    uint8_t* staging =
+        (uint8_t*)malloc(VP_STREAM_V2_MAX_CHUNK_PAYLOAD +
+                         VP_WIRE_EVENT_SIZE);
+    struct vp_context context;
+    struct vp_config context_config;
+    struct fake_source source = {1u, 2u};
+    struct vp_name_dictionary names;
+    struct vp_name_entry entries[4];
+    char text[128];
+    uint32_t zone_id = 0u;
+    uint32_t counter_id = 0u;
+    struct counting_sink sink;
+    struct vp_stream_writer writer;
+    struct vp_stream_writer_config config;
+    struct vp_stream_v2_session session;
+    struct vp_stats ring;
+    size_t drained = 0u;
+
+    CHECK(slots != NULL && staging != NULL,
+          "allocate oversized-staging regression storage");
+    if (slots == NULL || staging == NULL) {
+        free(slots);
+        free(staging);
+        return;
+    }
+    memset(&sink, 0, sizeof(sink));
+    memset(&context_config, 0, sizeof(context_config));
+    context_config.slots = slots;
+    context_config.capacity = slot_count;
+    context_config.clock = fake_clock;
+    context_config.clock_user = &source;
+    context_config.thread_id = fake_thread;
+    context_config.thread_user = &source;
+    CHECK(vp_init(&context, &context_config) == VP_RESULT_OK,
+          "initialize large ring for staging cap");
+    init_names(&names, entries, text, &zone_id, &counter_id);
+    for (size_t index = 0u; index < maximum_events + 1u; ++index)
+        CHECK(vp_counter(&context, counter_id, (int64_t)index) ==
+                  VP_RESULT_OK,
+              "fill large ring for staging cap");
+
+    memset(&config, 0, sizeof(config));
+    config.context = &context;
+    config.names = &names;
+    config.write = counting_write;
+    config.write_user = &sink;
+    config.dictionary_buffer = staging;
+    config.dictionary_buffer_capacity =
+        VP_STREAM_V2_MAX_CHUNK_PAYLOAD + VP_WIRE_EVENT_SIZE;
+    memset(&session, 0, sizeof(session));
+    session.session_id = 1u;
+    CHECK(vp_stream_writer_init(&writer, &config) == VP_RESULT_OK &&
+              vp_stream_writer_begin_v2(&writer, 0u, &session) ==
+                  VP_RESULT_OK &&
+              vp_stream_writer_drain(&writer, SIZE_MAX, &drained) ==
+                  VP_RESULT_OK &&
+              drained == maximum_events &&
+              sink.largest_write <= VP_STREAM_V2_MAX_CHUNK_PAYLOAD &&
+              vp_get_stats(&context, &ring) == VP_RESULT_OK &&
+              ring.pending == 1u,
+          "oversized staging is capped before events leave the ring");
+    CHECK(vp_stream_writer_drain(&writer, SIZE_MAX, &drained) ==
+                  VP_RESULT_OK &&
+              drained == 1u &&
+              vp_stream_writer_close(&writer) == VP_RESULT_OK,
+          "remaining event drains into a second valid v2 chunk");
+    vp_name_dictionary_deinit(&names);
+    vp_deinit(&context);
+    free(staging);
+    free(slots);
+}
+
 int main(void)
 {
     test_combined_stream_round_trip();
     test_fail_closed_sink_lifecycle();
+    test_v2_incremental_session_round_trip();
+    test_v2_drain_caps_oversized_staging_buffer();
     if (failures != 0) {
         fprintf(stderr, "%d profiler stream test(s) failed\n", failures);
         return 1;

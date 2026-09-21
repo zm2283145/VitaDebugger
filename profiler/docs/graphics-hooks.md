@@ -44,10 +44,20 @@ original zones and two draw counters; deeper helpers return
 | Zone | `scegxm.shader.cpu` | Program registration, binding, or release |
 | Zone | `scegxm.state.cpu` | State setter or a bounded state batch |
 | Zone | `scegxm.alloc.cpu` | SceGxm-related allocation or release call |
+| Zone | `vitagl.command.cpu_submit`, `scegxm.command.cpu_submit` | Source-owned command submission/batch boundary |
+| Zone | `vitagl.clear.cpu_call`, `scegxm.clear.cpu_submit` | Clear entry/submission |
+| Zone | `vitagl.fence.cpu_wait`, `scegxm.fence.cpu_wait` | Existing CPU-side fence/synchronization wait |
+| Zone | `vitagl.program.cpu`, `scegxm.program.cpu` | Program create/bind/release operation |
+| Zone | `vitagl.render_target.cpu_transition`, `scegxm.render_target.cpu_transition` | Source-owned render-target transition |
+| Zone | `vitagl.buffer.cpu_transition`, `scegxm.buffer.cpu_transition` | Source-owned buffer transition |
+| Zone | `vitagl.upload.cpu`, `scegxm.upload.cpu` | Allocation-independent data upload/copy path |
 | Counter | `vitagl.draw_calls`, `scegxm.draw_calls` | Per-frame submitted draw totals |
 | Counter | `vitagl.shader_changes`, `scegxm.shader_changes` | Per-frame shader changes |
 | Counter | `vitagl.state_changes`, `scegxm.state_changes` | Per-frame state changes |
 | Counter | `vitagl.allocation_bytes`, `scegxm.allocation_bytes` | Caller-defined live or allocated byte total |
+| Counter | `vitagl.clear_calls`, `scegxm.clear_calls` | Per-frame clear totals |
+| Counter | `vitagl.program_changes`, `scegxm.program_changes` | Per-frame program changes |
+| Counter | `vitagl.upload_bytes`, `scegxm.upload_bytes` | Caller-defined uploaded-byte total |
 | Frame | `graphics.frame.cpu` | One designated frame stream per profiler context |
 
 Allocation counters intentionally do not impose live-versus-cumulative
@@ -172,6 +182,10 @@ explicit vblank wait. Keep an explicit vblank wait in
 Adding that call solely for profiling perturbs normal CPU/GPU overlap; only
 instrument an existing opt-in completion point. Application code outside
 VitaGL must not claim to wrap SceGxm calls that VitaGL owns internally.
+The same restriction applies to fences, resource transitions, and uploads:
+place a hook only where the pinned source owns the operation and its lifetime.
+These remain CPU call/wait durations. They are not true GPU timestamps,
+automatic interposition, or proof that submitted work completed.
 
 ## Ordering, overload, and export
 

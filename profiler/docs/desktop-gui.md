@@ -58,6 +58,17 @@ rendering cannot apply backpressure to Vita-side profiler callbacks. At most
 one background operation runs at a time, and closing the window requests
 receiver cancellation.
 
+For wire v2, the receiver worker feeds the shared incremental decoder and
+builds the same analyzer/view model after complete chunks. A size-one GUI
+update queue replaces stale snapshots instead of blocking the receiver. The
+Timeline tab combines complete CPU zones and frame intervals, ordered by start
+time with thread-generation labels when supplied. Frames, counters, and the
+overview update before EOF. Parsing, CRC work, zone pairing, and bounded table
+filtering remain off the Tk event thread. The Overview labels the prefix
+**LIVE / INCOMPLETE** until a valid `END` chunk arrives; cancellation leaves
+the latest prefix visibly incomplete and never publishes it as a completed
+capture file.
+
 ## Loss reporting and limitations
 
 The viewer reports unmatched zone records, duplicate active correlation IDs,
@@ -77,10 +88,15 @@ The GUI labels those fields **Unavailable**; it does not infer them from
 addresses or invent placeholder values. Timestamps are the normalized
 microseconds and fixed frequency actually encoded by v1.
 
+Wire v2 displays producer, transport, and sink counters from the latest
+validated `STATS`/`END` chunk, plus only the session, process, thread
+generation, timer, module range, and ARM/Thumb metadata actually supplied.
+Absence remains **Unavailable**, never inferred.
+
 Other current limits:
 
-- TCP captures appear after the sender cleanly closes because EOF frames wire
-  version 1; there is no incremental live timeline.
+- Version-1 TCP captures still appear only after clean EOF; incremental live
+  viewing requires wire v2.
 - The GUI accepts one sender and one capture per receiver start.
 - Filtering and tables retain at most 3,000 matching display rows each to keep
   memory and Tk work bounded; exports always include the complete validated

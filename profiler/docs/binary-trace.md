@@ -4,9 +4,9 @@ VitaProfiler now has a complete, host-tested path from its bounded event ring to
 a validated capture and standard timeline output. The path stays independent of
 GDB and does not require a kernel plugin.
 
-## Capture layout
+## Capture layouts
 
-One `.vptrace` capture is:
+The decoder preserves the version-1 layout:
 
 1. one sealed `VPNM` name-dictionary block;
 2. one `VPRF` header; and
@@ -14,9 +14,40 @@ One `.vptrace` capture is:
 
 There is deliberately no native-struct dump and no implicit host byte order.
 Every integer is encoded little endian. `VPNM.total_size` locates the `VPRF`
-header. The version-1 `VPRF` format has no trailer or embedded event count, so a
+header. Version-1 `VPRF` has no trailer or embedded event count, so a
 file boundary or a clean TCP half-close is the framing boundary. A truncated
 final event is rejected.
+
+Wire version 2 is an outer live-session envelope. It does not change `VPNM` or
+the 32-byte event record. A v2 capture is a sequence of independently framed
+chunks:
+
+1. `SESSION`, exactly once and first;
+2. `DICTIONARY`, exactly once and second;
+3. zero or more `THREAD`, `MODULE`, `EVENTS`, and `STATS` chunks; and
+4. `END`, exactly once and last.
+
+Every chunk has a 32-byte little-endian header with magic `VPC2`, version 2,
+type, payload size, contiguous sequence number, CRC32 of the payload, and
+zeroed reserved fields. Payloads are capped at 2 MiB. `EVENTS` contains one or
+more unchanged 32-byte records. `SESSION` carries a required nonzero 64-bit
+session ID and only the bounded process identity, process ID, timer source, and
+timer unit whose presence bits the producer sets. `THREAD` carries a numeric
+thread ID, generation, optional exact identity, and optional dictionary name
+ID. `MODULE` carries an ID/generation, half-open 32-bit address range, optional
+name ID, and explicitly supplied executable/ARM/Thumb bits. No missing value is
+inferred.
+
+`STATS` snapshots carry producer accepted/dropped, caller-reported transport
+loss, writer sink loss, events written, and bytes written. `END` repeats the
+final counters. A clean `END` must have zero sink loss and an event count equal
+to the records already framed. Missing `END`, trailing data, sequence gaps,
+64-bit event/byte counter regression, CRC failure, malformed metadata, and
+partial chunks all fail closed. The four 32-bit counters use raw wrapping
+unsigned arithmetic, so a numerically smaller snapshot is not by itself
+malformed. An incremental viewer may display a validated prefix as
+**LIVE / INCOMPLETE**, but `decode_capture()` and file publication require the
+clean `END`.
 
 The portable receiver functions in `vitaprofiler.h` validate and iterate an
 event block without allocating:
@@ -58,15 +89,36 @@ struct vp_stream_writer_config config = {
 struct vp_stream_writer writer;
 size_t sent;
 
+struct vp_stream_v2_session session = {
+    .session_id = application_session_epoch,
+    .process_id = process_id,
+    .flags = VP_STREAM_V2_SESSION_PROCESS_ID |
+             VP_STREAM_V2_SESSION_TIMER_SOURCE |
+             VP_STREAM_V2_SESSION_TIMER_UNIT,
+    .timer_source = "sceKernelGetProcessTimeWide",
+    .timer_unit = "microseconds",
+};
+
 if (vp_stream_writer_init(&writer, &config) == VP_RESULT_OK &&
-    vp_stream_writer_begin(&writer, capture_start_us) == VP_RESULT_OK) {
+    vp_stream_writer_begin_v2(
+        &writer, capture_start_us, &session) == VP_RESULT_OK) {
     while (capturing)
         vp_stream_writer_drain(&writer, 64, &sent);
     vp_stream_writer_drain(&writer, SIZE_MAX, &sent);
     vp_stream_writer_close(&writer);
-    shutdown_send_side(&connection); /* TCP EOF frames the capture. */
+    shutdown_send_side(&connection); /* END already frames clean v2 close. */
 }
 ```
+
+`vp_stream_writer_begin()` remains the byte-for-byte v1 path.
+`vp_stream_writer_write_thread_v2()` and
+`vp_stream_writer_write_module_v2()` publish only source-owned metadata.
+`vp_stream_writer_write_stats_v2()` can expose loss while a session is live,
+and `vp_stream_writer_set_transport_loss_v2()` snapshots caller-owned wrapping
+`uint32_t` accounting. The dictionary buffer is reused as bounded event chunk
+staging after v2 begin, so no new allocation or unbounded queue is introduced.
+Each drain still removes at most the requested count and at most one
+staging-buffer batch.
 
 Call `vp_name_dictionary_wire_size()` to size `dictionary_wire`. Initialization
 checks that the dictionary is sealed and the buffer is large enough before it
@@ -109,6 +161,11 @@ accept, idle, and absolute post-accept capture limits are 30, 5, and 300
 seconds. `--accept-timeout`, `--idle-timeout`, `--capture-timeout`, and
 `--max-bytes` tune those bounds; only accept and idle may be set to zero because
 the absolute capture deadline remains mandatory in the CLI.
+
+For v2, `IncrementalTraceDecoder.feed()` validates and exposes each complete
+chunk before EOF while retaining only one bounded partial-chunk buffer and the
+bounded decoded event list. The same decoder's `finish()` enforces clean
+session completion. Version 1 remains EOF-framed.
 
 The text view reports:
 
@@ -160,9 +217,11 @@ The source filter is not cryptographic authentication.
 
 The host pipeline is tested with fragmented loopback TCP delivery, byte/event
 and absolute-time bounds, corrupt and truncated headers/events/dictionaries,
+all-prefix v2 truncation, deterministic byte-flip fuzzing, CRC/version/
+sequence/lifecycle rejection, incremental chunk delivery,
 safe display-name enforcement, linear-time named-zone pairing, built-in metric
 resolution, race-safe no-clobber publication, summaries, and both JSON exports.
-A C-generated stream fixture is decoded by Python so the two implementations do
-not merely self-validate duplicated constants. The library has been
+A C-generated v1 fixture and a C-generated v2 session are decoded by Python so
+the two implementations do not merely self-validate duplicated constants. The library has been
 cross-compiled for Vita, but its socket integration has not been run on Vita
-hardware in this increment.
+hardware for wire v2 in this increment.

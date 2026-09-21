@@ -21,13 +21,29 @@ struct fake_provider {
     uint32_t begin_calls;
     uint32_t next_calls;
     uint32_t end_calls;
+    uint32_t validate_calls;
+    uint32_t fail_validate_call;
     uint32_t fail_next_call;
     int begin_result;
     int next_result;
     int end_result;
+    int validate_result;
     int32_t current_thread_id;
     uint64_t observed_identity;
 };
+
+static int fake_validate(void* user, uint64_t lease_token,
+                         const struct vp_sample_target* target)
+{
+    struct fake_provider* fake = (struct fake_provider*)user;
+    if (lease_token != UINT64_C(0x123456789) ||
+        target->kind != VP_SAMPLE_TARGET_FOREIGN)
+        return VP_ERROR_STATE;
+    ++fake->validate_calls;
+    if (fake->validate_calls == fake->fail_validate_call)
+        return fake->validate_result;
+    return VP_RESULT_OK;
+}
 
 static int fake_begin(void* user, const struct vp_sample_target* target,
                       uint32_t max_depth, uint64_t* lease_token,
@@ -89,6 +105,8 @@ static struct fake_provider make_fake(uint32_t capabilities,
     fake.provider.next_frame = fake_next;
     fake.provider.end_sample = fake_end;
     fake.provider.user = &fake;
+    fake.provider.validate_sample = fake_validate;
+    fake.provider.max_callback_us = 500u;
     fake.current_thread_id = 17;
     fake.cursor_count = cursor_count;
     for (uint32_t i = 0u; i < cursor_count; ++i) {
@@ -112,7 +130,7 @@ static struct vp_sampler_config make_config(
     uint32_t capabilities)
 {
     const struct vp_sampler_config config = {
-        frames, capacity, depth, capabilities, 0u};
+        frames, capacity, depth, capabilities, 1000u, 0u};
     return config;
 }
 
@@ -131,15 +149,23 @@ static void test_validation_and_capabilities(void)
     CHECK(vp_sampler_init(&sampler, NULL, &config) ==
               VP_ERROR_UNSUPPORTED,
           "missing provider fails closed");
-    --fake.provider.abi_version;
+    fake.provider.abi_version = 99u;
     CHECK(vp_sampler_init(&sampler, &fake.provider, &config) ==
               VP_ERROR_UNSUPPORTED,
           "provider ABI mismatch is unsupported");
+    fake.provider.abi_version = VP_SAMPLE_PROVIDER_ABI_VERSION_LEGACY;
+    CHECK(vp_sampler_init(&sampler, &fake.provider, &config) ==
+              VP_RESULT_OK &&
+              vp_sampler_deinit(&sampler) == VP_RESULT_OK,
+          "legacy ABI remains supported for current-thread providers");
     fake.provider.abi_version = VP_SAMPLE_PROVIDER_ABI_VERSION;
     config.required_capabilities =
         VP_SAMPLE_CAP_FOREIGN_THREAD_PC |
         VP_SAMPLE_CAP_STABLE_IDENTITY |
-        VP_SAMPLE_CAP_FOREIGN_CONTEXT_CONFIDENCE;
+        VP_SAMPLE_CAP_FOREIGN_CONTEXT_CONFIDENCE |
+        VP_SAMPLE_CAP_EXIT_AWARE_IDENTITY |
+        VP_SAMPLE_CAP_BOUNDED_CALLBACKS |
+        VP_SAMPLE_CAP_RELEASE_ROLLBACK;
     CHECK(vp_sampler_init(&sampler, &fake.provider, &config) ==
               VP_ERROR_UNSUPPORTED,
           "unadvertised foreign sampling is unsupported");
@@ -297,7 +323,11 @@ static void test_foreign_identity_and_release_quarantine(void)
         VP_SAMPLE_CAP_FOREIGN_THREAD_STACK |
         VP_SAMPLE_CAP_STABLE_IDENTITY |
         VP_SAMPLE_CAP_BOUNDED_STACK_READ |
-        VP_SAMPLE_CAP_FOREIGN_CONTEXT_CONFIDENCE;
+        VP_SAMPLE_CAP_FOREIGN_CONTEXT_CONFIDENCE |
+        VP_SAMPLE_CAP_EXIT_AWARE_IDENTITY |
+        VP_SAMPLE_CAP_FAULT_CONTAINED_READ |
+        VP_SAMPLE_CAP_BOUNDED_CALLBACKS |
+        VP_SAMPLE_CAP_RELEASE_ROLLBACK;
     struct vp_sampler sampler;
     struct vp_sample_frame frames[4];
     struct vp_sample sample;
@@ -360,6 +390,92 @@ static void test_foreign_identity_and_release_quarantine(void)
           "successful retry discharges ownership before teardown");
 }
 
+static void test_foreign_exit_fault_timeout_and_uid_reuse(void)
+{
+    const uint32_t capabilities =
+        VP_SAMPLE_CAP_FOREIGN_THREAD_PC |
+        VP_SAMPLE_CAP_FOREIGN_THREAD_STACK |
+        VP_SAMPLE_CAP_STABLE_IDENTITY |
+        VP_SAMPLE_CAP_BOUNDED_STACK_READ |
+        VP_SAMPLE_CAP_FOREIGN_CONTEXT_CONFIDENCE |
+        VP_SAMPLE_CAP_EXIT_AWARE_IDENTITY |
+        VP_SAMPLE_CAP_FAULT_CONTAINED_READ |
+        VP_SAMPLE_CAP_BOUNDED_CALLBACKS |
+        VP_SAMPLE_CAP_RELEASE_ROLLBACK;
+    struct vp_sampler sampler;
+    struct vp_sample_frame frames[4];
+    struct vp_sample sample;
+    struct fake_provider fake = make_fake(capabilities, 2u);
+    struct vp_sampler_config config =
+        make_config(frames, 4u, 4u, capabilities);
+    memset(&sampler, 0, sizeof(sampler));
+    fix_fake_user(&fake);
+    fake.cursors[0].flags |= VP_SAMPLE_FRAME_FLAG_CONTEXT_CONFIDENT;
+
+    fake.provider.max_callback_us = 2000u;
+    CHECK(vp_sampler_init(&sampler, &fake.provider, &config) ==
+              VP_ERROR_UNSUPPORTED,
+          "foreign provider callback bound must fit caller watchdog");
+    fake.provider.max_callback_us = 500u;
+    CHECK(vp_sampler_init(&sampler, &fake.provider, &config) ==
+              VP_RESULT_OK,
+          "fully guarded foreign provider initializes");
+
+    fake.observed_identity = UINT64_C(0x2222);
+    CHECK(vp_sampler_sample_foreign(
+              &sampler, 9, UINT64_C(0x1111), &sample) ==
+              VP_ERROR_STALE_IDENTITY &&
+              sample.stop_reason == VP_SAMPLE_STOP_STALE_IDENTITY,
+          "UID reuse with a different generation fails closed");
+    fake.observed_identity = 0u;
+
+    fake.validate_calls = 0u;
+    fake.fail_validate_call = 1u;
+    fake.validate_result = VP_RESULT_END;
+    CHECK(vp_sampler_sample_foreign(
+              &sampler, 9, UINT64_C(0x1111), &sample) ==
+              VP_ERROR_MALFORMED &&
+              sample.frame_count == 0u &&
+              sample.stop_reason == VP_SAMPLE_STOP_MALFORMED,
+          "unexpected positive identity status fails closed");
+
+    fake.validate_calls = 0u;
+    fake.fail_validate_call = 1u;
+    fake.validate_result = VP_ERROR_THREAD_EXITED;
+    CHECK(vp_sampler_sample_foreign(
+              &sampler, 9, UINT64_C(0x1111), &sample) ==
+              VP_ERROR_THREAD_EXITED &&
+              sample.frame_count == 0u &&
+              sample.stop_reason == VP_SAMPLE_STOP_THREAD_EXITED,
+          "thread exit before first frame produces no stale sample");
+
+    fake.validate_calls = 0u;
+    fake.fail_validate_call = 2u;
+    fake.validate_result = VP_ERROR_TIMEOUT;
+    CHECK(vp_sampler_sample_foreign(
+              &sampler, 9, UINT64_C(0x1111), &sample) ==
+              VP_RESULT_PARTIAL &&
+              sample.frame_count == 1u &&
+              sample.stop_reason == VP_SAMPLE_STOP_TIMEOUT &&
+              sample.provider_error == VP_ERROR_TIMEOUT,
+          "watchdog timeout preserves only the validated prefix");
+
+    fake.validate_calls = 0u;
+    fake.fail_validate_call = 0u;
+    fake.fail_next_call = 1u;
+    fake.next_calls = 0u;
+    fake.next_result = VP_ERROR_READ_FAULT;
+    CHECK(vp_sampler_sample_foreign(
+              &sampler, 9, UINT64_C(0x1111), &sample) ==
+              VP_RESULT_PARTIAL &&
+              sample.frame_count == 1u &&
+              sample.stop_reason == VP_SAMPLE_STOP_READ_FAULT &&
+              sample.provider_error == VP_ERROR_READ_FAULT,
+          "fault-contained read failure is explicit and bounded");
+    CHECK(vp_sampler_deinit(&sampler) == VP_RESULT_OK,
+          "guarded foreign sampler releases every failed attempt");
+}
+
 static void test_malformed_unwind_progress(void)
 {
     struct vp_sampler sampler;
@@ -396,6 +512,7 @@ int main(void)
     test_depth_bound_and_canaries();
     test_partial_unwind_and_output_stability();
     test_foreign_identity_and_release_quarantine();
+    test_foreign_exit_fault_timeout_and_uid_reuse();
     test_malformed_unwind_progress();
 
     if (failures != 0) {
