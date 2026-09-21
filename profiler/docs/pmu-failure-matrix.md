@@ -22,17 +22,23 @@ replaces, the register-level backend/session suites:
 
 The cross-layer fixture adds the missing assertion that a TCP failure while a
 real-event lease is live cannot silently strand, forget, or re-arm PMU state.
+The independently default-off
+[`VDCP00013` cleanup gate](../../kernel/pmu-profiler-cleanup-gate/README.md)
+turns the remaining acceptance rows into five serialized packages with
+checksummed baseline/restored/final snapshots. These packages remain
+hardware-pending.
 
 ## Coverage and promotion status
 
 | Scenario | Native evidence | Required observable result | Retail 3.65 status |
 | --- | --- | --- | --- |
-| Peer disconnect during a live lease | Cross-layer fixture injects a disconnected-send error, verifies bounded socket shutdown/close, then performs authenticated PMU close | Socket failure remains visible; PMU stays owned until close; close restores the complete snapshot; only then may a later real event open | Required |
+| Peer disconnect during a live lease | Cross-layer fixture and hardware stage use a 5 s lease; require successful initial PMU open/read and network start/connect/prelude plus an initial sample authenticated to the same nonzero handle and fixed event/core/lane; then require exact `VP_ERROR_IO`, another authenticated PMU read, successful PMU close, socket close, and network teardown | Incomplete setup, zero/mismatched identities, wrong metadata, and partial cleanup are rejected; socket failure remains visible and cannot be confused with the lease timeout path; PMU stays owned until close; close restores the complete snapshot; only then may a later real event open | Required |
+| Stage-5 kill deadline or failed-slot race | Host tests expire the absolute two-second deadline during final slot-C transfer, deliver slot-C bytes followed by FTP `550`, and expose slot C from the companion's pre-send callback | The companion transmits no command after deadline expiry or any observed slot-C payload; FTP timeouts are recomputed for every receive and final response | Required |
 | Send deadline expires | Cross-layer fixture injects repeated would-block plus a finite wait; existing TCP tests cover partial-send and late-success variants | Sink reports `SEND_TIMEOUT`, closes its socket, and the PMU lease is still recoverable by exact close or owner-exit cleanup | Required |
 | Other send error | Cross-layer fixture injects a non-disconnect I/O error | Native error is retained, socket is closed, and PMU cleanup follows the same fail-closed path | Required |
-| Owner process exits without close | Cross-layer fixture leaves the PMU lease active, proves the process gone through the retained identity provider, and invokes the watchdog | Watchdog restores exactly, releases the retained identity once, retires the old handle, and only then re-arms | Required |
+| Owner process exits without close | Cross-layer fixture and process-event transport tests prove the callback only releases the retained identity once and records terminal proof; watchdog-only restoration survives failure/retry without querying a torn-down UID; lock-contention deferral restores but quarantines; terminal delivery both before and after watchdog observation of an expired lease is explicitly injected | Process callback remains bounded, watchdog restores exactly, the old handle is retired, and re-arm occurs only after exact reference release; active-exit/kill evidence increments only if the callback observed an `ACTIVE`, unexpired lease, so a prior timeout cannot masquerade as process cleanup; uncertain late release never re-arms | Required |
 | Controller thread exits while process remains | Cross-layer fixture proves the captured thread gone while the process remains | Same result as process exit; process survival must not keep an exited controller's lease live | Required |
-| Competing owner/process/thread | Session, bridge, and cross-layer fixtures attempt concurrent open plus foreign read/close | Open returns busy; foreign read/close returns owner error; no PMU callback or live-owner state mutation is performed for the intruder | Required |
+| Competing owner/process/thread | Session, bridge, and cross-layer fixtures attempt concurrent open plus foreign read/close; cleanup-journal tests cover raw host `-42`, exact Vita syscall encoding `0xBFFFFFD6`, neighboring values, and unrelated errors | Open returns exactly provider busy in one of its two approved representations; foreign read/close returns owner error; no PMU callback or live-owner state mutation is performed for the intruder; only the exact busy result permits the bounded same-boot re-arm | Required |
 | Registers match but independent restore evidence is pending | Cross-layer fixture restores the fake PMU bytes while retaining backend recovery/restore flags | A new Open services one bounded recovery pass, returns `RESTORE_REQUIRED`, leaves the transport `CLEANUP_REQUIRED`, and cannot advertise or grant re-arm | Host passed; retain as a hardware fault-injection stop condition |
 | Lease timeout with owner alive | Bridge and cross-layer fixtures expire a lease without an owner terminal event | Hardware restores exactly, but transport remains `RESTORED_AWAITING_OWNER`; a new real event stays blocked | Required |
 | Lease timeout with owner unknown | Cross-layer fixture makes liveness indeterminate before and after exact restore | Unknown is never treated as gone; quarantine and the original handle remain intact | Required |
@@ -81,6 +87,8 @@ failure mode. Do not add these modes to a normal application or companion.
 Preserve the fixed application core 0, physical lane 5, reviewed event
 allowlist, bounded lease, boot-loaded plugin, physical attendance, and
 known-good recovery path from `pmu-hardware-gate.md`.
+The normative remaining-gate procedure and binary schema are in the
+[`VDCP00013` runbook](../../kernel/pmu-profiler-cleanup-gate/README.md).
 
 Every attempted hardware row needs two durable, checksummed journal phases:
 
@@ -95,6 +103,17 @@ Every attempted hardware row needs two durable, checksummed journal phases:
    old-handle rejection, and the result of the single planned follow-up open.
    Mark `RESTORE_PROVEN` only when the independent complete snapshot comparison
    and every backend/bridge obligation check pass.
+
+The cleanup record mirrors the compiled C ABI, including four zero alignment
+bytes before `samples[]`: handles end at offset 284 and samples begin at 288.
+Both C and Python validators reject the obsolete unaligned sample placement.
+The current competing-owner retry writes only the explicit
+`pmu-cleanup-v2-conflict-r2-{a,b,c}.bin` namespace. Host tests require all 15
+stage/slot paths to be unique, ASCII, within the fixed C storage bound, and
+mirrored exactly by the producer and Python tools. Hardware decoding records
+the exact remote source name plus expected stage and slot; the immutable
+historical `pmu-cleanup-v2-conflict-{a,b,c}.bin` names fail that provenance
+check and cannot satisfy the retry.
 
 For a refusal row, success means the follow-up open is refused and the exact
 restoration/owner obligation remains observable.  For an acceptance row,

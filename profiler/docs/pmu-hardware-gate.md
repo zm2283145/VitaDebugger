@@ -120,9 +120,16 @@ restoration, a matching owner token and generation, and either a matching
 explicit close or positive proof that the retained owner thread object is
 dormant/gone. Unknown liveness, UID/object mismatch, or any reference-release
 uncertainty restores the PMU state and permanently quarantines re-arm and
-unload. This candidate is not promoted until the disposable
-[two-launch lifecycle gate](../../kernel/pmu-profiler-lifecycle-gate/README.md)
-passes on hardware.
+unload. Process exit/kill observation is independently compiled only for the
+new
+[`VDCP00013` serialized cleanup gate](../../kernel/pmu-profiler-cleanup-gate/README.md).
+Its callback only performs a bounded one-shot UID lookup, exact retained-object
+comparison, and reference release before teardown, then records
+process-terminal proof; watchdog context alone dispatches PMU restoration.
+Proof survives bounded restore retries without querying a torn-down UID. Lock
+contention uses one nonblocking atomic handoff and restores into permanent
+quarantine rather than guessing that a late UID release is safe. The
+candidate is not promoted until all five `VDCP00013` stages pass on hardware.
 
 The three owner-attended retail-3.65 runs passed events `0x01`, `0x03`, and
 `0x10`: all transport calls succeeded, sample values were 56, 23, and 97 on
@@ -135,6 +142,107 @@ records. These are bounded samples, not approval for continuous sampling. The
 narrower dormant-owner-thread safe-rearm gate now passes; disconnect and
 whole-process exit/crash cleanup still require their hardware gates. This plan
 does not use or claim support for the unavailable public `ScePerf` route.
+
+## Serialized `VDCP00013` cleanup matrix
+
+The independently default-off `VDCP00013` candidate is the only approved
+runner for the remaining lifecycle rows. Its authoritative build and evidence
+details are in the
+[cleanup-gate runbook](../../kernel/pmu-profiler-cleanup-gate/README.md).
+Run exactly one package at a time, in this order, without rebooting between a
+stage's cleanup and its re-arm proof:
+
+1. stage `1`: competing-owner refusal and first-owner exact close; accept only
+   raw host `-42` or exact retail syscall encoding `0xBFFFFFD6` as provider
+   `BUSY`, then require the bounded same-boot re-arm. The retry uses only the
+   fresh `pmu-cleanup-v2-conflict-r2-{a,b,c}.bin` namespace; historical
+   `pmu-cleanup-v2-conflict-{a,b,c}.bin` evidence remains immutable and is not
+   accepted as retry evidence;
+2. stage `2`: 250 ms timeout/watchdog restore and matching acknowledgement;
+3. stage `3`: production TCP sink receiver disconnect under a 5 s live lease,
+   with successful initial PMU open/read and network start/connect/prelude,
+   an initial sample authenticated to the nonzero handle and fixed
+   event/core/lane, followed by exact `VP_ERROR_IO`, a required post-error PMU
+   read, and authenticated close;
+4. stage `4`: owning-process normal return and same-boot relaunch; and
+5. stage `5`: approved Vita Companion `kill VDCP00013`, exercising the
+   SceShell `.kill` callback, and same-boot relaunch.
+
+Every build requires these explicit flags:
+
+```text
+-DVITADEBUG_EXPERIMENTAL_PMU_PROFILER=ON
+-DVITADEBUG_EXPERIMENTAL_PMU_PROFILER_REAL_EVENTS=ON
+-DVITADEBUG_EXPERIMENTAL_PMU_PROFILER_SAFE_REARM=ON
+-DVITADEBUG_EXPERIMENTAL_PMU_PROFILER_PROCESS_EXIT_GATE=ON
+-DVITADEBUG_PMU_CLEANUP_GATE_STAGE=<1..5>
+```
+
+Stage 3 additionally requires all four
+`VITADEBUG_PMU_CLEANUP_HOST_{A,B,C,D}` octets and
+`VITADEBUG_PMU_CLEANUP_PORT=18196`; a loopback host is rejected. Start its
+one-shot host peer before pressing X:
+
+```powershell
+py -3 tools/pmu_disconnect_receiver.py `
+  --bind 0.0.0.0 --port 18196 `
+  --evidence .\evidence\disconnect-receiver.json
+```
+
+Before each stage, capture the exact device/firmware identity, active-title and
+installed-title inventory, plugin path/hash, Git commit/tree, stage VPK hash,
+host timestamp, and absence of that stage's three journal paths. Verify and
+install only through the approved signed deployment client:
+
+```powershell
+py -3 -m host.vitadevdeploy verify $StageVpk
+py -3 -m host.vitadevdeploy deploy $StageVpk `
+  --vita 10.1.1.217 --private-key $PrivateKey --action install_launch `
+  --output $StageDeployEvidence
+```
+
+Retrieve each immutable journal slot into a stage-specific evidence directory,
+hash it, and decode it without deleting the device copy:
+
+```powershell
+curl.exe --fail --show-error `
+  "ftp://10.1.1.217:1337/ux0:/data/VitaDebugger/$Record" `
+  --output ".\evidence\$Record"
+Get-FileHash ".\evidence\$Record" -Algorithm SHA256
+py -3 tools/decode_pmu_cleanup_record.py `
+  ".\evidence\$Record" `
+  --source-journal-name $Record `
+  --expected-stage $Stage --expected-slot $Suffix `
+  --output ".\evidence\$Record.json"
+```
+
+Use the exact stage/suffix loop and hash-addressed immutable archive naming
+from the cleanup-gate runbook. Device journal slots are never deleted or
+reused during this matrix; stage 1 uses the collision-free `conflict-r2`
+namespace and each later stage uses its distinct paths.
+
+An accepted terminal record contains idle baseline, restored, and final
+snapshots that match byte-for-byte; zero recovery/restore/reference-uncertainty
+flags; an action-specific cleanup result; a later bounded open/read/close; and
+an increased re-arm count. Stage 4 also requires an increased active-normal-
+exit cleanup count with no kill-count change; stage 5 requires an increased
+active-SceShell-kill cleanup count with no normal-exit-count change across the
+same boot. Those counters advance only if the callback observed an `ACTIVE`
+and unexpired lease. The stage-5 helper must archive a nonzero owner token and generation,
+carry one absolute deadline through its evidence, FTP, connect, send, and
+reply operations, recheck failed slot `c` at the true pre-send boundary, and
+receive the successful kill reply within two seconds of armed observation.
+The device independently safe-closes after four seconds; an expired deadline
+or observed slot `c` prohibits command transmission.
+
+Stop the whole matrix on a device/identity mismatch, missing or conflicting
+journal, checksum/schema failure, cleanup failure, PMU snapshot mismatch,
+uncertain state, unexpected process-return path, reboot/power loss, or re-arm
+outside the bound. Preserve evidence and do not retry, unload, erase records,
+or advance. The matrix is PMU-only: no debugger/GDB attach, external-attach
+listener, loader/injection experiment, system-process target, unrelated
+hardware work, or concurrent test is authorized. Unrestricted counters remain
+disabled regardless of the outcome.
 
 ## Remaining promotion gates for live counters
 
@@ -162,7 +270,9 @@ mismatch, and one-shot quarantine after uncertain reference release. The
 original `VDCP00011` multi-stage lifecycle attempt exposed a process-exit
 safety problem and was stopped. Its replacement `VDCP00012` thread-only gate
 passed dormant-owner recovery and same-boot re-arm with a fresh identity and
-exact-restoring close. Whole-process exit/crash remains disabled and unproved.
+exact-restoring close. `VDCP00013` now provides separate conflict, timeout,
+receiver-disconnect, normal-exit, and abrupt-exit packages with complete
+baseline/restored/final PMU snapshots; every row remains hardware-pending.
 
 The real-world application gate proves that bounded samples can enter the
 existing named event ring and VitaProfiler TCP transport. Sony's unavailable

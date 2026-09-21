@@ -275,6 +275,29 @@ class CompanionTests(unittest.TestCase):
         with self.assertRaises(DeploymentError):
             client.command("launch TEST00001; reboot")
 
+    def test_kill_rechecks_deadline_after_pre_send_callback(self) -> None:
+        port, received, thread = self._server(b"Killed.\n")
+        now = [0.0]
+        client = VitaCompanionClient(
+            "127.0.0.1", port=port, timeout=2
+        )
+
+        def expire() -> None:
+            now[0] = 1.0
+
+        with self.assertRaisesRegex(
+            DeploymentError, "deadline expired before transmission"
+        ):
+            client.kill(
+                "TEST00001",
+                require_success=True,
+                deadline=1.0,
+                monotonic=lambda: now[0],
+                before_send=expire,
+            )
+        thread.join(2)
+        self.assertEqual(received, [b""])
+
 
 if __name__ == "__main__":
     unittest.main()

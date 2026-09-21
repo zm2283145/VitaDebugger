@@ -338,6 +338,18 @@ int vdPmuBackendRecoveryPending(void)
     return fake_kernel.recovery_pending != 0;
 }
 
+int vdPmuBackendSnapshotIdle(
+    uint32_t core_id, struct vd_pmu_snapshot* snapshot)
+{
+    if(core_id != VD_KERNEL_PMU_PROFILER_FIXED_CORE || !snapshot)
+        return VD_PMU_BACKEND_ERROR_INVALID;
+    if(!vdPmuBackendReady() || vdPmuBackendRecoveryPending() ||
+       vdPmuBackendHasRestoreObligation())
+        return VD_PMU_BACKEND_ERROR_BUSY;
+    *snapshot = fake_kernel.current;
+    return 0;
+}
+
 int vdPmuBackendRecover(void)
 {
     if(fake_kernel.restore_obligation != 0 ||
@@ -419,6 +431,7 @@ static struct vd_pmu_profiler_owner_backend owner_backend(
         .capture = fake_owner_capture,
         .query = fake_owner_query,
         .release = fake_owner_release,
+        .release_terminal = fake_owner_release,
     };
     return backend;
 }

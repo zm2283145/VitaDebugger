@@ -1,5 +1,8 @@
 #include <psp2kern/kernel/cpu.h>
 #include <psp2kern/kernel/modulemgr.h>
+#if defined(VD_KERNEL_ENABLE_EXPERIMENTAL_PMU_PROFILER_PROCESS_EVENTS)
+#include <psp2kern/kernel/proc_event.h>
+#endif
 #include <psp2kern/kernel/sysmem/data_transfers.h>
 #include <psp2kern/kernel/sysmem/uid_guid.h>
 #include <psp2kern/kernel/threadmgr/debugger.h>
@@ -14,6 +17,7 @@
 #endif
 #ifdef VD_KERNEL_ENABLE_EXPERIMENTAL_PMU_PROFILER_TRANSPORT
 #include "pmu_backend.h"
+#include "pmu_process_event_pending.h"
 #include "pmu_profiler_transport.h"
 #endif
 
@@ -70,6 +74,12 @@ static volatile int pmu_profiler_lock;
 static volatile int pmu_profiler_stopping = 1;
 static volatile int pmu_profiler_backend_present;
 static volatile int pmu_profiler_transport_ready;
+#if VD_PMU_PROFILER_PROCESS_EVENTS_COMPILED
+static SceUID pmu_profiler_process_event = -1;
+static volatile uint32_t pmu_profiler_pending_exit_state;
+static volatile int32_t pmu_profiler_owner_pid_hint = -1;
+static volatile int32_t pmu_profiler_opening_pid_hint = -1;
+#endif
 #endif
 
 static void lock_sessions(void)
@@ -114,7 +124,7 @@ static void lock_pmu_profiler(void)
 static int try_lock_pmu_profiler(void)
 {
     int expected = 0;
-    return __atomic_compare_exchange_n(&pmu_profiler_lock, &expected, 1, 0,
+    return __atomic_compare_exchange_n(&pmu_profiler_lock, &expected, 1, 1,
                                         __ATOMIC_SEQ_CST,
                                         __ATOMIC_SEQ_CST);
 }
@@ -123,6 +133,74 @@ static void unlock_pmu_profiler(void)
 {
     __atomic_store_n(&pmu_profiler_lock, 0, __ATOMIC_SEQ_CST);
 }
+
+#if VD_PMU_PROFILER_PROCESS_EVENTS_COMPILED
+static void sync_pmu_profiler_owner_hint_locked(void)
+{
+    const int32_t owner_pid =
+        pmu_profiler_transport.state ==
+            VD_PMU_PROFILER_TRANSPORT_IDLE ?
+            -1 : pmu_profiler_transport.owner_pid;
+    __atomic_store_n(
+        &pmu_profiler_owner_pid_hint, owner_pid, __ATOMIC_RELEASE);
+}
+
+static int pmu_profiler_process_terminal(
+    SceUID pid, uint32_t terminal_kind)
+{
+    if(pid < 0 ||
+       !__atomic_load_n(&pmu_profiler_transport_ready,
+                        __ATOMIC_ACQUIRE) ||
+       __atomic_load_n(&pmu_profiler_stopping, __ATOMIC_ACQUIRE) ||
+       (__atomic_load_n(&pmu_profiler_owner_pid_hint,
+                        __ATOMIC_ACQUIRE) != pid &&
+        __atomic_load_n(&pmu_profiler_opening_pid_hint,
+                        __ATOMIC_ACQUIRE) != pid))
+        return 0;
+    if(try_lock_pmu_profiler())
+    {
+        (void)vdPmuProfilerTransportOwnerProcessExit(
+            &pmu_profiler_transport, pid, terminal_kind);
+        unlock_pmu_profiler();
+        return 0;
+    }
+
+    /* Never block a kernel process-event callback. The watchdog will consume
+     * this exact PID under the ordinary PMU lock. If teardown makes retained
+     * reference release uncertain first, the transport quarantines re-arm. */
+    (void)vdPmuProcessEventPublish(
+        &pmu_profiler_pending_exit_state, pid);
+    return 0;
+}
+
+static int pmu_profiler_process_exit(
+    SceUID pid, SceProcEventInvokeParam1* param, int arg)
+{
+    (void)param;
+    (void)arg;
+    return pmu_profiler_process_terminal(
+        pid, VD_KERNEL_PMU_PROFILER_TERMINAL_EXIT);
+}
+
+static int pmu_profiler_process_kill(
+    SceUID pid, SceProcEventInvokeParam1* param, int arg)
+{
+    (void)param;
+    (void)arg;
+    return pmu_profiler_process_terminal(
+        pid, VD_KERNEL_PMU_PROFILER_TERMINAL_KILL);
+}
+
+static const SceProcEventHandler pmu_profiler_process_event_handler = {
+    .size = sizeof(SceProcEventHandler),
+    .create = NULL,
+    .exit = pmu_profiler_process_exit,
+    .kill = pmu_profiler_process_kill,
+    .stop = NULL,
+    .start = NULL,
+    .switch_process = NULL,
+};
+#endif
 
 #if VD_PMU_PROFILER_SAFE_REARM_COMPILED
 static int capture_pmu_owner_identity(
@@ -244,6 +322,11 @@ static const struct vd_pmu_profiler_owner_backend
         .capture = capture_pmu_owner_identity,
         .query = query_pmu_owner_identity,
         .release = release_pmu_owner_identity,
+#if VD_PMU_PROFILER_PROCESS_EVENTS_COMPILED
+        /* Process callbacks use the same bounded one-shot UID/object check,
+         * but never enter PMU dispatch or a delay loop. */
+        .release_terminal = release_pmu_owner_identity,
+#endif
     };
 #endif
 #endif
@@ -401,8 +484,31 @@ static int watchdog_main(SceSize args, void* argp)
         {
             /* This also services an ownerless backend obligation left by a
              * failed initial snapshot while the transport itself is IDLE. */
-            (void)vdPmuProfilerTransportWatchdog(
-                &pmu_profiler_transport);
+#if VD_PMU_PROFILER_PROCESS_EVENTS_COMPILED
+            const uint32_t pending =
+                vdPmuProcessEventTake(
+                    &pmu_profiler_pending_exit_state);
+            SceUID pending_pid = -1;
+            if(vdPmuProcessEventDecode(pending, &pending_pid))
+                (void)vdPmuProfilerTransportOwnerProcessExitDeferred(
+                    &pmu_profiler_transport, pending_pid);
+            else if(pending == VD_PMU_PROCESS_EVENT_AMBIGUOUS &&
+                    pmu_profiler_transport.state !=
+                        VD_PMU_PROFILER_TRANSPORT_IDLE)
+            {
+                pmu_profiler_transport.owner_process_terminal_kind =
+                    VD_KERNEL_PMU_PROFILER_TERMINAL_UNCERTAIN;
+                pmu_profiler_transport.owner_identity_release_uncertain = 1;
+                (void)vdPmuProfilerTransportWatchdog(
+                    &pmu_profiler_transport);
+            }
+            else
+#endif
+                (void)vdPmuProfilerTransportWatchdog(
+                    &pmu_profiler_transport);
+#if VD_PMU_PROFILER_PROCESS_EVENTS_COMPILED
+            sync_pmu_profiler_owner_hint_locked();
+#endif
             unlock_pmu_profiler();
         }
 #endif
@@ -427,6 +533,16 @@ int module_start(SceSize args, void* argp)
     __atomic_store_n(&pmu_profiler_transport_ready, 0,
                      __ATOMIC_SEQ_CST);
     __atomic_store_n(&pmu_profiler_stopping, 1, __ATOMIC_SEQ_CST);
+#if VD_PMU_PROFILER_PROCESS_EVENTS_COMPILED
+    pmu_profiler_process_event = -1;
+    __atomic_store_n(&pmu_profiler_pending_exit_state,
+                     VD_PMU_PROCESS_EVENT_EMPTY,
+                     __ATOMIC_SEQ_CST);
+    __atomic_store_n(&pmu_profiler_owner_pid_hint, -1,
+                     __ATOMIC_SEQ_CST);
+    __atomic_store_n(&pmu_profiler_opening_pid_hint, -1,
+                     __ATOMIC_SEQ_CST);
+#endif
     int pmu_start_result = vdPmuBackendStart();
     if(pmu_start_result != 0)
     {
@@ -457,6 +573,18 @@ int module_start(SceSize args, void* argp)
                          __ATOMIC_SEQ_CST);
         return SCE_KERNEL_START_FAILED;
     }
+#if VD_PMU_PROFILER_PROCESS_EVENTS_COMPILED
+    pmu_profiler_process_event = ksceKernelRegisterProcEventHandler(
+        "vd pmu owner exit", &pmu_profiler_process_event_handler, 0);
+    if(pmu_profiler_process_event < 0)
+    {
+        if(vdPmuBackendStop() < 0)
+            return SCE_KERNEL_START_SUCCESS;
+        __atomic_store_n(&pmu_profiler_backend_present, 0,
+                         __ATOMIC_SEQ_CST);
+        return SCE_KERNEL_START_FAILED;
+    }
+#endif
     __atomic_store_n(&pmu_profiler_transport_ready, 1,
                      __ATOMIC_SEQ_CST);
     __atomic_store_n(&pmu_profiler_stopping, 0, __ATOMIC_SEQ_CST);
@@ -466,6 +594,13 @@ int module_start(SceSize args, void* argp)
     {
 #ifdef VD_KERNEL_ENABLE_EXPERIMENTAL_PMU_PROFILER_TRANSPORT
         __atomic_store_n(&pmu_profiler_stopping, 1, __ATOMIC_SEQ_CST);
+#if VD_PMU_PROFILER_PROCESS_EVENTS_COMPILED
+        if(pmu_profiler_process_event >= 0 &&
+           ksceKernelUnregisterProcEventHandler(
+               pmu_profiler_process_event) < 0)
+            return SCE_KERNEL_START_SUCCESS;
+        pmu_profiler_process_event = -1;
+#endif
         if(vdPmuBackendStop() < 0)
             return SCE_KERNEL_START_SUCCESS;
         __atomic_store_n(&pmu_profiler_backend_present, 0,
@@ -503,12 +638,21 @@ int module_start(SceSize args, void* argp)
         int pmu_transport_result = vdPmuProfilerTransportShutdown(
             &pmu_profiler_transport);
         unlock_pmu_profiler();
-        if(pmu_transport_result < 0 || vdPmuBackendStop() < 0)
+        if(pmu_transport_result < 0)
         {
             /* Keep code resident if exact restoration/worker teardown was not
              * proved. */
             return SCE_KERNEL_START_SUCCESS;
         }
+#if VD_PMU_PROFILER_PROCESS_EVENTS_COMPILED
+        if(pmu_profiler_process_event >= 0 &&
+           ksceKernelUnregisterProcEventHandler(
+               pmu_profiler_process_event) < 0)
+            return SCE_KERNEL_START_SUCCESS;
+        pmu_profiler_process_event = -1;
+#endif
+        if(vdPmuBackendStop() < 0)
+            return SCE_KERNEL_START_SUCCESS;
         __atomic_store_n(&pmu_profiler_backend_present, 0,
                          __ATOMIC_SEQ_CST);
         __atomic_store_n(&pmu_profiler_transport_ready, 0,
@@ -539,6 +683,19 @@ int module_stop(SceSize args, void* argp)
                              __ATOMIC_SEQ_CST);
             return SCE_KERNEL_STOP_FAIL;
         }
+#if VD_PMU_PROFILER_PROCESS_EVENTS_COMPILED
+        if(pmu_profiler_process_event >= 0)
+        {
+            if(ksceKernelUnregisterProcEventHandler(
+                   pmu_profiler_process_event) < 0)
+            {
+                __atomic_store_n(&pmu_profiler_stopping, 0,
+                                 __ATOMIC_SEQ_CST);
+                return SCE_KERNEL_STOP_FAIL;
+            }
+            pmu_profiler_process_event = -1;
+        }
+#endif
         __atomic_store_n(&pmu_profiler_transport_ready, 0,
                          __ATOMIC_SEQ_CST);
     }
@@ -1175,9 +1332,18 @@ int vdKernelPmuProfilerOpen(
         if(__atomic_load_n(&pmu_profiler_stopping, __ATOMIC_SEQ_CST))
             result = VD_KERNEL_ERROR_PMU_PROFILER_DISABLED;
         else
+        {
+#if VD_PMU_PROFILER_PROCESS_EVENTS_COMPILED
+            /* Open may recover an old terminal lease and install this caller
+             * before the persistent owner hint can be updated. */
+            __atomic_store_n(
+                &pmu_profiler_opening_pid_hint, caller_pid,
+                __ATOMIC_RELEASE);
+#endif
             result = vdPmuProfilerTransportOpen(
                 &pmu_profiler_transport, caller_pid, caller_thread,
                 &kernel_request, &kernel_handle);
+        }
         if(result >= 0)
         {
             const int copy_result = ksceKernelMemcpyKernelToUser(
@@ -1192,6 +1358,11 @@ int vdKernelPmuProfilerOpen(
                 result = copy_result;
             }
         }
+#if VD_PMU_PROFILER_PROCESS_EVENTS_COMPILED
+        sync_pmu_profiler_owner_hint_locked();
+        __atomic_store_n(
+            &pmu_profiler_opening_pid_hint, -1, __ATOMIC_RELEASE);
+#endif
         unlock_pmu_profiler();
     }
     EXIT_SYSCALL(syscall_state);
@@ -1199,6 +1370,55 @@ int vdKernelPmuProfilerOpen(
 #else
     (void)request;
     (void)handle;
+    EXIT_SYSCALL(syscall_state);
+    return VD_KERNEL_ERROR_PMU_PROFILER_DISABLED;
+#endif
+}
+
+int vdKernelPmuProfilerGetStatus(
+    struct vd_kernel_pmu_profiler_status* status)
+{
+    uint32_t syscall_state;
+    ENTER_SYSCALL(syscall_state);
+#ifdef VD_KERNEL_ENABLE_EXPERIMENTAL_PMU_PROFILER_TRANSPORT
+    if(!__atomic_load_n(&pmu_profiler_transport_ready,
+                        __ATOMIC_SEQ_CST) ||
+       __atomic_load_n(&pmu_profiler_stopping, __ATOMIC_SEQ_CST))
+    {
+        EXIT_SYSCALL(syscall_state);
+        return VD_KERNEL_ERROR_PMU_PROFILER_DISABLED;
+    }
+    if(!status)
+    {
+        EXIT_SYSCALL(syscall_state);
+        return VD_KERNEL_ERROR_PMU_PROFILER_INVALID;
+    }
+    struct vd_kernel_pmu_profiler_status kernel_status;
+    int status_available = 0;
+    int result = ksceKernelMemcpyUserToKernel(
+        &kernel_status, status, sizeof(kernel_status));
+    if(result >= 0)
+    {
+        lock_pmu_profiler();
+        if(__atomic_load_n(&pmu_profiler_stopping, __ATOMIC_SEQ_CST))
+            result = VD_KERNEL_ERROR_PMU_PROFILER_DISABLED;
+        else
+            result = vdPmuProfilerTransportGetStatus(
+                &pmu_profiler_transport, &kernel_status);
+        status_available = 1;
+        unlock_pmu_profiler();
+    }
+    if(status_available)
+    {
+        const int copy_result = ksceKernelMemcpyKernelToUser(
+            status, &kernel_status, sizeof(kernel_status));
+        if(copy_result < 0)
+            result = copy_result;
+    }
+    EXIT_SYSCALL(syscall_state);
+    return result;
+#else
+    (void)status;
     EXIT_SYSCALL(syscall_state);
     return VD_KERNEL_ERROR_PMU_PROFILER_DISABLED;
 #endif
@@ -1236,6 +1456,9 @@ int vdKernelPmuProfilerRead(
             result = vdPmuProfilerTransportRead(
                 &pmu_profiler_transport, ksceKernelGetProcessId(),
                 ksceKernelGetThreadId(), &kernel_handle, &kernel_sample);
+#if VD_PMU_PROFILER_PROCESS_EVENTS_COMPILED
+        sync_pmu_profiler_owner_hint_locked();
+#endif
         unlock_pmu_profiler();
     }
     if(result >= 0)
@@ -1281,6 +1504,9 @@ int vdKernelPmuProfilerClose(
             result = vdPmuProfilerTransportClose(
                 &pmu_profiler_transport, ksceKernelGetProcessId(),
                 ksceKernelGetThreadId(), &kernel_handle);
+#if VD_PMU_PROFILER_PROCESS_EVENTS_COMPILED
+        sync_pmu_profiler_owner_hint_locked();
+#endif
         unlock_pmu_profiler();
     }
     EXIT_SYSCALL(syscall_state);

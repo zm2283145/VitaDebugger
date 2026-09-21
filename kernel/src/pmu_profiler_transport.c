@@ -50,6 +50,35 @@ static uint32_t take_nonzero(uint32_t* next)
     return value;
 }
 
+static void record_process_cleanup(
+    struct vd_pmu_profiler_transport* transport, uint32_t terminal_kind)
+{
+    uint32_t* count =
+        terminal_kind == VD_KERNEL_PMU_PROFILER_TERMINAL_KILL ?
+            &transport->active_process_kill_cleanup_count :
+            &transport->active_process_normal_exit_cleanup_count;
+    ++*count;
+    if(*count == 0)
+        *count = 1;
+}
+
+#if VD_PMU_PROFILER_PROCESS_EVENTS_COMPILED
+static int active_lease_unexpired(
+    const struct vd_pmu_profiler_transport* transport)
+{
+    if(!transport ||
+       transport->state != VD_PMU_PROFILER_TRANSPORT_ACTIVE ||
+       transport->bridge.session.state != VD_PMU_SESSION_ACTIVE ||
+       !transport->bridge.session.backend.now_ms)
+        return 0;
+    uint64_t now_ms = 0;
+    if(transport->bridge.session.backend.now_ms(
+           transport->bridge.session.backend.context, &now_ms) != 0)
+        return 0;
+    return now_ms < transport->bridge.session.deadline_ms;
+}
+#endif
+
 static void clear_session(struct vd_pmu_profiler_transport* transport)
 {
     transport->state = VD_PMU_PROFILER_TRANSPORT_IDLE;
@@ -63,16 +92,34 @@ static void clear_session(struct vd_pmu_profiler_transport* transport)
     transport->exact_restore_proven = 0;
     transport->owner_identity_valid = 0;
     transport->owner_identity_release_uncertain = 0;
+    transport->owner_process_terminal_kind =
+        VD_KERNEL_PMU_PROFILER_TERMINAL_NONE;
+    transport->owner_process_terminal_was_active = 0;
+    transport->owner_terminal_reference_released = 0;
     zero_bytes(&transport->owner_identity,
                sizeof(transport->owner_identity));
     zero_bytes(&transport->bridge, sizeof(transport->bridge));
+}
+
+static void copy_bytes(void* destination, const void* source, size_t size)
+{
+    volatile unsigned char* output =
+        (volatile unsigned char*)destination;
+    const volatile unsigned char* input =
+        (const volatile unsigned char*)source;
+    for(size_t i = 0; i < size; ++i)
+        output[i] = input[i];
 }
 
 static int owner_backend_valid(
     const struct vd_pmu_profiler_owner_backend* backend)
 {
     return backend && backend->capture && backend->query &&
-        backend->release;
+        backend->release
+#if VD_PMU_PROFILER_PROCESS_EVENTS_COMPILED
+        && backend->release_terminal
+#endif
+        ;
 }
 
 #if VD_PMU_PROFILER_SAFE_REARM_COMPILED
@@ -168,6 +215,37 @@ static int release_owner_identity(
     return 0;
 }
 
+#if VD_PMU_PROFILER_PROCESS_EVENTS_COMPILED
+static int release_terminal_owner_identity(
+    struct vd_pmu_profiler_transport* transport)
+{
+    if(transport->owner_identity_valid == 0 ||
+       transport->owner_identity_release_uncertain != 0 ||
+       !owner_backend_valid(&transport->owner_backend))
+    {
+        transport->owner_identity_release_uncertain = 1;
+        transport->last_result =
+            VD_KERNEL_ERROR_PMU_PROFILER_RESTORE_REQUIRED;
+        return transport->last_result;
+    }
+    const int result = transport->owner_backend.release_terminal(
+        transport->owner_backend.context, transport->owner_pid,
+        transport->owner_thread, &transport->owner_identity);
+    if(result != 0)
+    {
+        transport->owner_identity_release_uncertain = 1;
+        transport->last_result =
+            VD_KERNEL_ERROR_PMU_PROFILER_RESTORE_REQUIRED;
+        return transport->last_result;
+    }
+    transport->owner_identity_valid = 0;
+    transport->owner_terminal_reference_released = 1;
+    zero_bytes(&transport->owner_identity,
+               sizeof(transport->owner_identity));
+    return 0;
+}
+#endif
+
 static int release_owner_and_clear(
     struct vd_pmu_profiler_transport* transport)
 {
@@ -189,6 +267,22 @@ static int info_query_valid(
         return 0;
     for(uint32_t i = 0; i < VD_KERNEL_PMU_PROFILER_MAX_EVENTS; ++i)
         if(info->event_codes[i] != 0 || info->reserved[i] != 0)
+            return 0;
+    return 1;
+}
+
+static int status_query_valid(
+    const struct vd_kernel_pmu_profiler_status* status)
+{
+    if(!status || status->struct_size != sizeof(*status) ||
+       status->abi_version !=
+           VD_KERNEL_PMU_PROFILER_STATUS_ABI_VERSION)
+        return 0;
+    const unsigned char* bytes = (const unsigned char*)status;
+    for(size_t i = sizeof(status->struct_size) +
+                       sizeof(status->abi_version);
+        i < sizeof(*status); ++i)
+        if(bytes[i] != 0)
             return 0;
     return 1;
 }
@@ -361,11 +455,17 @@ static int finish_exact_restoration(
         if((terminal_proof == REARM_TERMINAL_EXPLICIT_CLOSE &&
             identity_matches) ||
            (terminal_proof == REARM_TERMINAL_OWNER_GONE &&
-            identity_matches && transport->owner_identity_valid != 0))
+            identity_matches &&
+            (transport->owner_identity_valid != 0 ||
+             transport->owner_terminal_reference_released != 0)))
         {
-            const int release_result = release_owner_identity(transport);
-            if(release_result < 0)
-                return release_result;
+            if(transport->owner_identity_valid != 0)
+            {
+                const int release_result =
+                    release_owner_identity(transport);
+                if(release_result < 0)
+                    return release_result;
+            }
             transport->real_event_attempted = 0;
             ++transport->rearm_count;
             if(transport->rearm_count == 0)
@@ -414,12 +514,16 @@ static int acknowledge_restored_owner(
         return VD_KERNEL_ERROR_PMU_PROFILER_RESTORE_REQUIRED;
     if(terminal_proof != REARM_TERMINAL_EXPLICIT_CLOSE &&
        (terminal_proof != REARM_TERMINAL_OWNER_GONE ||
-        transport->owner_identity_valid == 0))
+        (transport->owner_identity_valid == 0 &&
+         transport->owner_terminal_reference_released == 0)))
         return VD_KERNEL_ERROR_PMU_PROFILER_RESTORE_REQUIRED;
 
-    const int release_result = release_owner_identity(transport);
-    if(release_result < 0)
-        return release_result;
+    if(transport->owner_identity_valid != 0)
+    {
+        const int release_result = release_owner_identity(transport);
+        if(release_result < 0)
+            return release_result;
+    }
     transport->real_event_attempted = 0;
     ++transport->rearm_count;
     if(transport->rearm_count == 0)
@@ -517,6 +621,10 @@ int vdPmuProfilerTransportGetInfo(
 #if VD_PMU_PROFILER_SAFE_REARM_COMPILED
     info->capabilities |=
         VD_KERNEL_PMU_PROFILER_CAP_SAFE_POST_RESTORE_REARM;
+#if VD_PMU_PROFILER_PROCESS_EVENTS_COMPILED
+    info->capabilities |=
+        VD_KERNEL_PMU_PROFILER_CAP_PROCESS_EXIT_CLEANUP;
+#endif
 #else
     info->capabilities |=
         VD_KERNEL_PMU_PROFILER_CAP_SINGLE_REAL_EVENT_PER_BOOT;
@@ -529,6 +637,60 @@ int vdPmuProfilerTransportGetInfo(
         VD_KERNEL_PMU_PROFILER_EVENT_BRANCH_MISPREDICT;
 #endif
     return 0;
+}
+
+int vdPmuProfilerTransportGetStatus(
+    const struct vd_pmu_profiler_transport* transport,
+    struct vd_kernel_pmu_profiler_status* status)
+{
+    if(!transport_initialized(transport))
+        return VD_KERNEL_ERROR_PMU_PROFILER_DISABLED;
+    if(!status_query_valid(status))
+        return VD_KERNEL_ERROR_PMU_PROFILER_INVALID;
+
+    struct vd_kernel_pmu_profiler_status local;
+    struct vd_pmu_snapshot snapshot;
+    zero_bytes(&local, sizeof(local));
+    zero_bytes(&snapshot, sizeof(snapshot));
+    local.struct_size = sizeof(local);
+    local.abi_version = VD_KERNEL_PMU_PROFILER_STATUS_ABI_VERSION;
+    local.transport_state = transport->state;
+    local.last_result = transport->last_result;
+    local.owner_pid = transport->owner_pid;
+    local.owner_thread = transport->owner_thread;
+    local.owner_token = transport->owner_token;
+    local.generation = transport->generation;
+    local.real_event_attempted = transport->real_event_attempted;
+    local.exact_restore_proven = transport->exact_restore_proven;
+    local.owner_identity_valid = transport->owner_identity_valid;
+    local.owner_identity_release_uncertain =
+        transport->owner_identity_release_uncertain;
+    local.rearm_count = transport->rearm_count;
+    local.active_process_normal_exit_cleanup_count =
+        transport->active_process_normal_exit_cleanup_count;
+    local.active_process_kill_cleanup_count =
+        transport->active_process_kill_cleanup_count;
+    local.owner_process_terminal_kind =
+        transport->owner_process_terminal_kind;
+    local.owner_terminal_reference_released =
+        transport->owner_terminal_reference_released;
+    local.backend_ready = vdPmuBackendReady() ? 1u : 0u;
+    local.backend_recovery_pending =
+        vdPmuBackendRecoveryPending() ? 1u : 0u;
+    local.backend_restore_obligation =
+        vdPmuBackendHasRestoreObligation() ? 1u : 0u;
+    if(transport->state != VD_PMU_PROFILER_TRANSPORT_IDLE ||
+       local.backend_recovery_pending != 0 ||
+       local.backend_restore_obligation != 0)
+        local.snapshot_result = VD_PMU_BACKEND_ERROR_BUSY;
+    else
+        local.snapshot_result = vdPmuBackendSnapshotIdle(
+            VD_KERNEL_PMU_PROFILER_FIXED_CORE, &snapshot);
+    if(local.snapshot_result == 0)
+        copy_bytes(&local.snapshot, &snapshot, sizeof(snapshot));
+    copy_bytes(status, &local, sizeof(*status));
+    return local.snapshot_result == 0 ? 0 :
+        VD_KERNEL_ERROR_PMU_PROFILER_RESTORE_REQUIRED;
 }
 
 int vdPmuProfilerTransportOpen(
@@ -900,7 +1062,14 @@ int vdPmuProfilerTransportWatchdog(
         return 1;
     }
 
-    const int owner_status = query_owner_status(transport);
+    const uint32_t terminal_kind =
+        transport->owner_process_terminal_kind;
+    const int process_terminal =
+        terminal_kind != VD_KERNEL_PMU_PROFILER_TERMINAL_NONE;
+    const int process_terminal_was_active =
+        transport->owner_process_terminal_was_active != 0;
+    const int owner_status = process_terminal ?
+        VD_PMU_PROFILER_OWNER_GONE : query_owner_status(transport);
     if(transport->owner_identity_release_uncertain != 0)
         return restore_for_owner_reference_quarantine(transport);
     if(transport->state ==
@@ -911,6 +1080,9 @@ int vdPmuProfilerTransportWatchdog(
         const int result = acknowledge_restored_owner(
             transport, REARM_TERMINAL_OWNER_GONE,
             transport->owner_token, transport->generation);
+        if(result > 0 && process_terminal &&
+           process_terminal_was_active)
+            record_process_cleanup(transport, terminal_kind);
         return result > 0 ? 1 : result;
     }
 
@@ -931,13 +1103,85 @@ int vdPmuProfilerTransportWatchdog(
         const int result = finish_exact_restoration(
             transport, REARM_TERMINAL_OWNER_GONE,
             transport->owner_token, transport->generation);
+        if(result > 0 && process_terminal &&
+           process_terminal_was_active)
+            record_process_cleanup(transport, terminal_kind);
         return result > 0 ? 1 : result;
     }
 
-    return cleanup_once(
+    const int result = cleanup_once(
         transport,
         owner_status == VD_PMU_PROFILER_OWNER_GONE ?
             REARM_TERMINAL_OWNER_GONE : REARM_TERMINAL_NONE);
+    if(result > 0 && process_terminal &&
+       process_terminal_was_active)
+        record_process_cleanup(transport, terminal_kind);
+    return result;
+}
+
+int vdPmuProfilerTransportOwnerProcessExit(
+    struct vd_pmu_profiler_transport* transport,
+    int32_t owner_pid, uint32_t terminal_kind)
+{
+#if VD_PMU_PROFILER_PROCESS_EVENTS_COMPILED
+    if(!transport_initialized(transport))
+        return VD_KERNEL_ERROR_PMU_PROFILER_DISABLED;
+    if(owner_pid < 0 ||
+       (terminal_kind != VD_KERNEL_PMU_PROFILER_TERMINAL_EXIT &&
+        terminal_kind != VD_KERNEL_PMU_PROFILER_TERMINAL_KILL))
+        return VD_KERNEL_ERROR_PMU_PROFILER_INVALID;
+    if(transport->state == VD_PMU_PROFILER_TRANSPORT_IDLE ||
+       transport->owner_pid != owner_pid)
+        return 0;
+    if(transport->owner_process_terminal_kind ==
+           VD_KERNEL_PMU_PROFILER_TERMINAL_NONE)
+        transport->owner_process_terminal_was_active =
+            active_lease_unexpired(transport);
+    if(transport->owner_process_terminal_kind !=
+           VD_KERNEL_PMU_PROFILER_TERMINAL_NONE &&
+       transport->owner_process_terminal_kind != terminal_kind)
+    {
+        transport->owner_process_terminal_kind =
+            VD_KERNEL_PMU_PROFILER_TERMINAL_UNCERTAIN;
+        transport->owner_identity_release_uncertain = 1;
+        return VD_KERNEL_ERROR_PMU_PROFILER_RESTORE_REQUIRED;
+    }
+    transport->owner_process_terminal_kind = terminal_kind;
+    if(!is_real_event(transport->event_code))
+        return 1;
+    if(transport->owner_terminal_reference_released != 0)
+        return 1;
+    return release_terminal_owner_identity(transport) == 0 ? 1 :
+        VD_KERNEL_ERROR_PMU_PROFILER_RESTORE_REQUIRED;
+#else
+    (void)transport;
+    (void)owner_pid;
+    (void)terminal_kind;
+    return VD_KERNEL_ERROR_PMU_PROFILER_DISABLED;
+#endif
+}
+
+int vdPmuProfilerTransportOwnerProcessExitDeferred(
+    struct vd_pmu_profiler_transport* transport,
+    int32_t owner_pid)
+{
+#if VD_PMU_PROFILER_PROCESS_EVENTS_COMPILED
+    if(!transport_initialized(transport))
+        return VD_KERNEL_ERROR_PMU_PROFILER_DISABLED;
+    if(owner_pid < 0)
+        return VD_KERNEL_ERROR_PMU_PROFILER_INVALID;
+    if(transport->state == VD_PMU_PROFILER_TRANSPORT_IDLE ||
+       transport->owner_pid != owner_pid)
+        return 0;
+    transport->owner_process_terminal_kind =
+        VD_KERNEL_PMU_PROFILER_TERMINAL_UNCERTAIN;
+    transport->owner_identity_release_uncertain = 1;
+    return restore_for_owner_reference_quarantine(transport);
+#else
+    (void)transport;
+    (void)owner_pid;
+    return VD_KERNEL_ERROR_PMU_PROFILER_DISABLED;
+#endif
 }
 
 int vdPmuProfilerTransportShutdown(
