@@ -268,6 +268,30 @@ static void test_config(void)
           "public endpoint rejected");
 }
 
+static void test_ipv4_text(void)
+{
+    static const uint8_t expected[4] = {10u, 1u, 1u, 217u};
+
+    CHECK(vd_endpoint_ipv4_text_matches(
+              expected, "10.1.1.217") == 1,
+          "exact configured interface address matches");
+    CHECK(vd_endpoint_ipv4_text_matches(
+              expected, "10.1.1.216") == 0,
+          "different interface address is rejected");
+    CHECK(vd_endpoint_ipv4_text_matches(
+              expected, "10.1.1.217x") == 0,
+          "trailing address data is rejected");
+    CHECK(vd_endpoint_ipv4_text_matches(
+              expected, "10.1.1") == 0,
+          "truncated address is rejected");
+    CHECK(vd_endpoint_ipv4_text_matches(
+              expected, "10.1.1.999") == 0,
+          "out-of-range address is rejected");
+    CHECK(vd_endpoint_ipv4_text_matches(
+              expected, "") == 0,
+          "empty address is rejected");
+}
+
 static void test_receive(void)
 {
     struct io_fixture fixture;
@@ -553,6 +577,7 @@ static void test_virtual_filesystem(void)
 int main(void)
 {
     test_config();
+    test_ipv4_text();
     test_receive();
     test_send();
     test_virtual_filesystem();

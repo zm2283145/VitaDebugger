@@ -65,6 +65,7 @@ target_link_libraries(vitadebug_companion_gate
     SceDisplay_stub
     SceIofilemgr_stub
     SceNet_stub
+    SceNetCtl_stub
     SceSysmodule_stub
     SceLibKernel_stub
 )

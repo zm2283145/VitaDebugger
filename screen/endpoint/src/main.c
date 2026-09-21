@@ -7,6 +7,7 @@
 #include <psp2/kernel/rng.h>
 #include <psp2/kernel/threadmgr.h>
 #include <psp2/net/net.h>
+#include <psp2/net/netctl.h>
 #include <psp2/sysmodule.h>
 
 #include <malloc.h>
@@ -35,6 +36,7 @@ struct gate_transport {
     int listener;
     int client;
     int screen;
+    int screen_epoll;
     uint8_t screen_host[4];
     uint8_t control_bind[4];
     struct gate_app* app;
@@ -56,6 +58,7 @@ struct gate_app {
     uint32_t client_accepted;
     uint32_t net_module_loaded;
     uint32_t net_initialized;
+    uint32_t netctl_initialized;
     uint32_t shutdown_requested;
     int terminal_error;
 };
@@ -151,10 +154,19 @@ static int gate_screen_close(void* user)
 {
     struct gate_transport* transport =
         (struct gate_transport*)user;
+    int result = 0;
 
-    return transport == NULL
-               ? -1
-               : gate_close_socket(&transport->screen);
+    if (transport == NULL)
+        return -1;
+    if (transport->screen_epoll >= 0) {
+        if (sceNetEpollDestroy(transport->screen_epoll) < 0)
+            result = -1;
+        else
+            transport->screen_epoll = GATE_INVALID_SOCKET;
+    }
+    if (gate_close_socket(&transport->screen) != 0)
+        result = -1;
+    return result;
 }
 
 static int gate_control_bind(void* user, uint32_t network_scope,
@@ -337,6 +349,23 @@ static int gate_screen_connect(void* user, uint32_t network_scope,
         &enabled, (unsigned int)sizeof(enabled));
     if (result < 0)
         goto fail;
+    transport->screen_epoll =
+        sceNetEpollCreate("vitadebug companion screen", 0);
+    if (transport->screen_epoll < 0)
+        goto fail;
+    {
+        SceNetEpollEvent event;
+
+        memset(&event, 0, sizeof(event));
+        event.events =
+            SCE_NET_EPOLLOUT | SCE_NET_EPOLLERR | SCE_NET_EPOLLHUP;
+        event.data.fd = transport->screen;
+        result = sceNetEpollControl(
+            transport->screen_epoll, SCE_NET_EPOLL_CTL_ADD,
+            transport->screen, &event);
+        if (result < 0)
+            goto fail;
+    }
     host = ((uint32_t)transport->screen_host[0] << 24) |
            ((uint32_t)transport->screen_host[1] << 16) |
            ((uint32_t)transport->screen_host[2] << 8) |
@@ -350,23 +379,44 @@ static int gate_screen_connect(void* user, uint32_t network_scope,
         transport->screen, (const SceNetSockaddr*)&address,
         (unsigned int)sizeof(address));
     if (result == 0)
-        return 0;
+        goto connected;
     if (!gate_would_block(result))
         goto fail;
 
     deadline = gate_now_ms(NULL) +
                VD_ENDPOINT_RECEIVE_DEADLINE_MS;
-    while (gate_now_ms(NULL) < deadline) {
+    for (;;) {
+        SceNetEpollEvent event;
         int socket_error = 0;
         unsigned int length =
             (unsigned int)sizeof(socket_error);
+        const uint64_t now = gate_now_ms(NULL);
+        uint64_t remaining;
+
+        if (now >= deadline)
+            goto fail;
+        remaining = deadline - now;
+
+        memset(&event, 0, sizeof(event));
+        result = sceNetEpollWait(
+            transport->screen_epoll, &event, 1,
+            (int)(remaining * UINT64_C(1000)));
+        if (result <= 0)
+            goto fail;
+        if (event.data.fd != transport->screen ||
+            (event.events &
+             (SCE_NET_EPOLLERR | SCE_NET_EPOLLHUP)) != 0u)
+            goto fail;
         result = sceNetGetsockopt(
             transport->screen, SCE_NET_SOL_SOCKET,
             SCE_NET_SO_ERROR, &socket_error, &length);
         if (result < 0)
             goto fail;
-        if (socket_error == 0)
-            return 0;
+        if (socket_error == 0 ||
+            socket_error == SCE_NET_EISCONN ||
+            (uint32_t)socket_error ==
+                (uint32_t)SCE_NET_ERROR_EISCONN)
+            goto connected;
         if (socket_error != SCE_NET_EINPROGRESS &&
             socket_error != SCE_NET_EALREADY &&
             socket_error != SCE_NET_EAGAIN &&
@@ -377,10 +427,18 @@ static int gate_screen_connect(void* user, uint32_t network_scope,
             (uint32_t)socket_error !=
                 (uint32_t)SCE_NET_ERROR_EAGAIN)
             goto fail;
-        sceKernelDelayThread(1000u);
     }
+    goto fail;
+
+connected:
+    result = sceNetEpollDestroy(transport->screen_epoll);
+    if (result < 0)
+        goto fail;
+    transport->screen_epoll = GATE_INVALID_SOCKET;
+    return 0;
+
 fail:
-    (void)gate_close_socket(&transport->screen);
+    (void)gate_screen_close(transport);
     return -1;
 }
 
@@ -427,6 +485,7 @@ static int gate_read_config(struct vd_endpoint_config* config)
 static int gate_start_network(struct gate_app* app)
 {
     SceNetInitParam init;
+    uint64_t deadline;
     int result;
 
     result = sceSysmoduleLoadModule(SCE_SYSMODULE_NET);
@@ -440,7 +499,35 @@ static int gate_start_network(struct gate_app* app)
     if (result < 0)
         return result;
     app->net_initialized = 1u;
-    return 0;
+    result = sceNetCtlInit();
+    if (result < 0)
+        return result;
+    app->netctl_initialized = 1u;
+    deadline = gate_now_ms(NULL) +
+               VD_ENDPOINT_NETWORK_READY_DEADLINE_MS;
+    while (gate_now_ms(NULL) < deadline) {
+        int state = SCE_NETCTL_STATE_DISCONNECTED;
+
+        result = sceNetCtlInetGetState(&state);
+        if (result < 0)
+            return result;
+        if (state == SCE_NETCTL_STATE_CONNECTED) {
+            SceNetCtlInfo info;
+
+            memset(&info, 0, sizeof(info));
+            result = sceNetCtlInetGetInfo(
+                SCE_NETCTL_INFO_GET_IP_ADDRESS, &info);
+            if (result < 0)
+                return result;
+            return vd_endpoint_ipv4_text_matches(
+                       app->endpoint_config.bind_ipv4,
+                       info.ip_address)
+                       ? 0
+                       : VD_ENDPOINT_ERROR_CONFIG;
+        }
+        sceKernelDelayThread(100000u);
+    }
+    return VD_ENDPOINT_ERROR_DEADLINE;
 }
 
 static int gate_random_identity(uint64_t* generation,
@@ -775,7 +862,12 @@ static void gate_cleanup(struct gate_app* app)
 
     if (app->transport.client < 0 &&
         app->transport.listener < 0 &&
-        app->transport.screen < 0) {
+        app->transport.screen < 0 &&
+        app->transport.screen_epoll < 0) {
+        if (app->netctl_initialized != 0u) {
+            sceNetCtlTerm();
+            app->netctl_initialized = 0u;
+        }
         if (app->net_initialized != 0u &&
             sceNetTerm() >= 0)
             app->net_initialized = 0u;
@@ -831,6 +923,7 @@ int main(void)
     app.transport.listener = GATE_INVALID_SOCKET;
     app.transport.client = GATE_INVALID_SOCKET;
     app.transport.screen = GATE_INVALID_SOCKET;
+    app.transport.screen_epoll = GATE_INVALID_SOCKET;
     app.transport.app = &app;
     (void)sceCtrlSetSamplingMode(SCE_CTRL_MODE_ANALOG);
     if (gate_allocate_frames(&app) != 0) {

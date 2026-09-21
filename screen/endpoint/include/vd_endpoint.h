@@ -17,6 +17,7 @@ extern "C" {
 #define VD_ENDPOINT_DEBUG_ROOT \
     "ux0:data/VitaDebuggerCompanion/debug"
 #define VD_ENDPOINT_RECEIVE_DEADLINE_MS 5000u
+#define VD_ENDPOINT_NETWORK_READY_DEADLINE_MS 10000u
 #define VD_ENDPOINT_STATUS_SIZE 64u
 
 #define VD_ENDPOINT_IO_OK 0
@@ -78,6 +79,8 @@ struct vd_endpoint_virtual_fs {
 void vd_endpoint_config_init(struct vd_endpoint_config* config);
 int vd_endpoint_config_parse(struct vd_endpoint_config* config,
                              const uint8_t* data, size_t size);
+int vd_endpoint_ipv4_text_matches(const uint8_t expected[4],
+                                  const char* actual);
 
 void vd_endpoint_receiver_init(struct vd_endpoint_receiver* receiver);
 int vd_endpoint_receiver_arm(struct vd_endpoint_receiver* receiver,

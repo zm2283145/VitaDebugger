@@ -92,6 +92,14 @@ Select+Start and relaunch with a fresh random PID/generation/session binding.
 Local Select+Triangle toggles explicitly consented recording and
 Select+Square starts explicitly consented playback of a ready trace.
 
+At startup, the title initializes NetCtl and waits at most ten seconds for a
+connected interface. The interface-reported IPv4 address must exactly match
+the configured Vita bind address before either socket is created. Screen
+connection completion is gated by SceNet epoll writability plus `SO_ERROR`;
+an immediate zero `SO_ERROR` without a readiness event is not treated as a
+completed nonblocking connection. Any timeout, address mismatch, or connection
+error fails closed without selecting another interface or port.
+
 Known limitations before hardware qualification:
 
 - no hardware or install behavior has been exercised;

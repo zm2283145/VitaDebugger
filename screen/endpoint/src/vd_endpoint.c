@@ -53,6 +53,36 @@ static int vd_private_ipv4(const uint8_t address[4])
            (address[0] == 192u && address[1] == 168u);
 }
 
+int vd_endpoint_ipv4_text_matches(const uint8_t expected[4],
+                                  const char* actual)
+{
+    uint8_t parsed[4];
+    size_t component;
+    const char* cursor;
+
+    if (expected == NULL || actual == NULL)
+        return 0;
+    cursor = actual;
+    for (component = 0u; component < 4u; ++component) {
+        unsigned int value = 0u;
+        size_t digits = 0u;
+
+        while (*cursor >= '0' && *cursor <= '9') {
+            value = value * 10u + (unsigned int)(*cursor - '0');
+            if (value > 255u || ++digits > 3u)
+                return 0;
+            ++cursor;
+        }
+        if (digits == 0u ||
+            (component < 3u ? *cursor != '.' : *cursor != '\0'))
+            return 0;
+        parsed[component] = (uint8_t)value;
+        if (component < 3u)
+            ++cursor;
+    }
+    return memcmp(parsed, expected, sizeof(parsed)) == 0;
+}
+
 void vd_endpoint_config_init(struct vd_endpoint_config* config)
 {
     if (config != NULL)
