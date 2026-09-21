@@ -18,6 +18,7 @@ from tools.decode_pmu_cleanup_record import SIZE, decode_record
 TITLE_ID = "VDCP00013"
 ARMED_PATH = "ux0:/data/VitaDebugger/pmu-cleanup-v2-abrupt-exit-b.bin"
 FAILED_PATH = "ux0:/data/VitaDebugger/pmu-cleanup-v2-abrupt-exit-c.bin"
+MAX_KILL_DELAY_SECONDS = 2.0
 
 
 def _utc_now() -> str:
@@ -43,14 +44,67 @@ def _write_json_atomic(path: Path, evidence: dict[str, object]) -> None:
     os.replace(temporary, path)
 
 
-def _read_optional(ftp: ftplib.FTP, path: str) -> bytes | None:
+def _remaining(
+    deadline: float,
+    monotonic: Callable[[], float],
+    operation: str,
+) -> float:
+    remaining = deadline - monotonic()
+    if remaining <= 0:
+        raise TimeoutError(f"deadline expired before {operation}")
+    return remaining
+
+
+def _prepare_ftp(
+    ftp: ftplib.FTP,
+    deadline: float,
+    monotonic: Callable[[], float],
+    operation: str,
+) -> float:
+    remaining = _remaining(deadline, monotonic, operation)
+    ftp.timeout = remaining
+    sock = getattr(ftp, "sock", None)
+    if sock is not None:
+        sock.settimeout(remaining)
+    return remaining
+
+
+def _read_optional_before(
+    ftp: ftplib.FTP,
+    path: str,
+    deadline: float,
+    monotonic: Callable[[], float],
+    operation: str,
+) -> bytes | None:
     chunks: list[bytes] = []
+    connection = None
     try:
-        ftp.retrbinary(f"RETR {path}", chunks.append)
+        _prepare_ftp(ftp, deadline, monotonic, operation)
+        connection = ftp.transfercmd(f"RETR {path}")
+        while True:
+            remaining = _remaining(
+                deadline, monotonic, operation
+            )
+            connection.settimeout(remaining)
+            block = connection.recv(8192)
+            _remaining(deadline, monotonic, operation)
+            if not block:
+                break
+            chunks.append(block)
+        connection.close()
+        connection = None
+        _prepare_ftp(
+            ftp, deadline, monotonic,
+            f"{operation} final response",
+        )
+        ftp.voidresp()
     except ftplib.error_perm as exc:
-        if str(exc).startswith("550"):
+        if str(exc).startswith("550") and not chunks:
             return None
         raise
+    finally:
+        if connection is not None:
+            connection.close()
     return b"".join(chunks)
 
 
@@ -67,6 +121,14 @@ def run_kill_gate(
     monotonic: Callable[[], float] = time.monotonic,
     sleep: Callable[[float], None] = time.sleep,
 ) -> dict[str, object]:
+    if timeout <= 0:
+        raise ValueError("timeout must be positive")
+    if not 0 < poll_interval <= 1:
+        raise ValueError("poll_interval must be in (0, 1]")
+    if not 0 < max_kill_delay <= MAX_KILL_DELAY_SECONDS:
+        raise ValueError(
+            "max_kill_delay must be in (0, 2]"
+        )
     if evidence_path.exists() or armed_copy.exists():
         raise FileExistsError(
             "evidence and armed-copy paths must both be new"
@@ -80,38 +142,73 @@ def run_kill_gate(
         "started_utc": _utc_now(),
         "state": "checking_absence",
     }
+    operation_deadline = monotonic() + timeout
+    _remaining(
+        operation_deadline, monotonic, "initial evidence write"
+    )
     _write_json_atomic(evidence_path, evidence)
     ftp = ftp_factory()
     try:
-        ftp.connect(vita, 1337, timeout=min(timeout, 5.0))
+        ftp.connect(
+            vita,
+            1337,
+            timeout=_prepare_ftp(
+                ftp, operation_deadline, monotonic, "FTP connect"
+            ),
+        )
+        _prepare_ftp(
+            ftp, operation_deadline, monotonic, "FTP login"
+        )
         ftp.login()
+        _prepare_ftp(
+            ftp, operation_deadline, monotonic, "FTP binary mode"
+        )
         ftp.voidcmd("TYPE I")
-        if _read_optional(ftp, ARMED_PATH) is not None:
+        if _read_optional_before(
+            ftp, ARMED_PATH, operation_deadline, monotonic,
+            "initial armed-slot check",
+        ) is not None:
             raise RuntimeError(
                 "armed journal already exists; refusing to kill"
             )
-        if _read_optional(ftp, FAILED_PATH) is not None:
+        if _read_optional_before(
+            ftp, FAILED_PATH, operation_deadline, monotonic,
+            "initial failed-slot check",
+        ) is not None:
             raise RuntimeError(
                 "failed journal already exists; refusing to kill"
             )
         evidence["absence_confirmed_utc"] = _utc_now()
         evidence["state"] = "waiting_for_armed"
+        _remaining(
+            operation_deadline, monotonic,
+            "waiting evidence write",
+        )
         _write_json_atomic(evidence_path, evidence)
-        deadline = monotonic() + timeout
         data = None
-        while monotonic() < deadline:
-            sleep(poll_interval)
-            if _read_optional(ftp, FAILED_PATH) is not None:
+        while True:
+            remaining = _remaining(
+                operation_deadline, monotonic, "armed-record poll"
+            )
+            sleep(min(poll_interval, remaining))
+            if _read_optional_before(
+                ftp, FAILED_PATH, operation_deadline, monotonic,
+                "failed-slot poll",
+            ) is not None:
                 raise RuntimeError(
                     "device failed before a fresh armed record was observed"
                 )
-            candidate = _read_optional(ftp, ARMED_PATH)
+            candidate = _read_optional_before(
+                ftp, ARMED_PATH, operation_deadline, monotonic,
+                "armed-slot poll",
+            )
             if candidate is None or len(candidate) != SIZE:
                 continue
             data = candidate
             break
-        if data is None:
-            raise TimeoutError("new armed journal did not appear")
+        _remaining(
+            operation_deadline, monotonic, "armed-record decode"
+        )
         decoded = decode_record(data)
         if (
             not decoded["valid"]
@@ -123,6 +220,12 @@ def run_kill_gate(
                 "new journal is not a valid stage-5 armed record"
             )
         armed_observed = monotonic()
+        kill_deadline = min(
+            operation_deadline, armed_observed + max_kill_delay
+        )
+        _remaining(
+            kill_deadline, monotonic, "armed evidence archive"
+        )
         _write_bytes_atomic(armed_copy, data)
         evidence.update(
             {
@@ -132,14 +235,32 @@ def run_kill_gate(
                 "state": "armed_verified",
             }
         )
+        _remaining(
+            kill_deadline, monotonic, "armed evidence write"
+        )
         _write_json_atomic(evidence_path, evidence)
-        if _read_optional(ftp, FAILED_PATH) is not None:
-            raise RuntimeError(
-                "device active window expired before kill"
-            )
+
+        def verify_active_at_send() -> None:
+            if _read_optional_before(
+                ftp, FAILED_PATH, kill_deadline, monotonic,
+                "final failed-slot check",
+            ) is not None:
+                raise RuntimeError(
+                    "device active window expired before kill"
+                )
+
+        companion_timeout = _remaining(
+            kill_deadline, monotonic, "Vita Companion connect"
+        )
         response = companion_factory(
-            vita, timeout=min(timeout, 5.0)
-        ).kill(TITLE_ID, require_success=True)
+            vita, timeout=companion_timeout
+        ).kill(
+            TITLE_ID,
+            require_success=True,
+            deadline=kill_deadline,
+            monotonic=monotonic,
+            before_send=verify_active_at_send,
+        )
         kill_delay = monotonic() - armed_observed
         evidence.update(
             {
@@ -171,12 +292,17 @@ def run_kill_gate(
         raise
     finally:
         try:
+            _prepare_ftp(
+                ftp, operation_deadline, monotonic, "FTP quit"
+            )
             ftp.quit()
         except (OSError, ftplib.Error):
             try:
                 ftp.close()
             except OSError:
                 pass
+        except TimeoutError:
+            ftp.close()
 
 
 def main() -> int:
@@ -192,8 +318,8 @@ def main() -> int:
         parser.error("--timeout must be positive")
     if not 0 < args.poll_interval <= 1:
         parser.error("--poll-interval must be in (0, 1]")
-    if not 0 < args.max_kill_delay < 4:
-        parser.error("--max-kill-delay must be in (0, 4)")
+    if not 0 < args.max_kill_delay <= MAX_KILL_DELAY_SECONDS:
+        parser.error("--max-kill-delay must be in (0, 2]")
     run_kill_gate(
         args.vita, args.evidence, args.armed_copy,
         args.timeout, args.poll_interval, args.max_kill_delay

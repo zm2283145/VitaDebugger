@@ -94,6 +94,11 @@ int main(void)
     make_complete(&disconnect);
     disconnect.results[
         VD_PMU_CLEANUP_RESULT_POST_DISCONNECT_READ] = 0;
+    disconnect.results[VD_PMU_CLEANUP_RESULT_NET_FAILURE] =
+        VD_PMU_CLEANUP_EXPECTED_NET_FAILURE;
+    disconnect.results[VD_PMU_CLEANUP_RESULT_CLOSE] = 0;
+    disconnect.results[VD_PMU_CLEANUP_RESULT_NET_CLOSE] = 0;
+    disconnect.results[VD_PMU_CLEANUP_RESULT_NET_STOP] = 0;
     disconnect.handles[0].owner_token = 3;
     disconnect.handles[0].generation = 4;
     disconnect.samples[2].struct_size =
@@ -115,6 +120,34 @@ int main(void)
     seal(&disconnect);
     CHECK(!vdPmuCleanupRecordValid(&disconnect),
           "disconnect completion rejects an unauthenticated post-error sample");
+    disconnect.samples[2].generation = 4;
+    disconnect.handles[0].owner_token = 0;
+    disconnect.samples[2].owner_token = 0;
+    seal(&disconnect);
+    CHECK(!vdPmuCleanupRecordValid(&disconnect),
+          "disconnect completion rejects zero sample identity");
+    disconnect.handles[0].owner_token = 3;
+    disconnect.samples[2].owner_token = 3;
+    disconnect.results[VD_PMU_CLEANUP_RESULT_NET_FAILURE] = 0;
+    seal(&disconnect);
+    CHECK(!vdPmuCleanupRecordValid(&disconnect),
+          "disconnect completion requires the exact socket I/O error");
+    disconnect.results[VD_PMU_CLEANUP_RESULT_NET_FAILURE] =
+        VD_PMU_CLEANUP_EXPECTED_NET_FAILURE;
+    disconnect.results[VD_PMU_CLEANUP_RESULT_CLOSE] = -1;
+    seal(&disconnect);
+    CHECK(!vdPmuCleanupRecordValid(&disconnect),
+          "disconnect completion requires authenticated PMU close");
+    disconnect.results[VD_PMU_CLEANUP_RESULT_CLOSE] = 0;
+    disconnect.results[VD_PMU_CLEANUP_RESULT_NET_CLOSE] = -1;
+    seal(&disconnect);
+    CHECK(!vdPmuCleanupRecordValid(&disconnect),
+          "disconnect completion requires socket close");
+    disconnect.results[VD_PMU_CLEANUP_RESULT_NET_CLOSE] = 0;
+    disconnect.results[VD_PMU_CLEANUP_RESULT_NET_STOP] = -1;
+    seal(&disconnect);
+    CHECK(!vdPmuCleanupRecordValid(&disconnect),
+          "disconnect completion requires network cleanup");
 
     records[2] = attempted(VD_PMU_CLEANUP_STAGE_ABRUPT_EXIT);
     records[2].revision = 2;

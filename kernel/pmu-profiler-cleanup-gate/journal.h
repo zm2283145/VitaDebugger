@@ -10,7 +10,12 @@
 #define VD_PMU_CLEANUP_RECORD_SIZE 1024u
 #define VD_PMU_CLEANUP_RESULT_NOT_RUN ((int32_t)-799)
 #define VD_PMU_CLEANUP_SLOT_COUNT 3u
+#define VD_PMU_CLEANUP_RESULT_CLOSE 2u
+#define VD_PMU_CLEANUP_RESULT_NET_FAILURE 17u
+#define VD_PMU_CLEANUP_RESULT_NET_CLOSE 18u
+#define VD_PMU_CLEANUP_RESULT_NET_STOP 19u
 #define VD_PMU_CLEANUP_RESULT_POST_DISCONNECT_READ 21u
+#define VD_PMU_CLEANUP_EXPECTED_NET_FAILURE ((int32_t)-13)
 
 enum vd_pmu_cleanup_stage {
     VD_PMU_CLEANUP_STAGE_CONFLICT = 1,
@@ -145,6 +150,8 @@ static inline int vdPmuCleanupSampleMatchesHandle(
     uint32_t event_code)
 {
     return sample && handle &&
+        handle->owner_token != 0 &&
+        handle->generation != 0 &&
         sample->struct_size == sizeof(*sample) &&
         sample->abi_version == VD_KERNEL_PMU_PROFILER_ABI_VERSION &&
         sample->owner_token == handle->owner_token &&
@@ -212,6 +219,12 @@ static inline int vdPmuCleanupRecordValid(
             record->final.rearm_count > record->baseline.rearm_count &&
             (record->stage != VD_PMU_CLEANUP_STAGE_DISCONNECT ||
              (record->results[
+                  VD_PMU_CLEANUP_RESULT_NET_FAILURE] ==
+                      VD_PMU_CLEANUP_EXPECTED_NET_FAILURE &&
+              record->results[VD_PMU_CLEANUP_RESULT_CLOSE] == 0 &&
+              record->results[VD_PMU_CLEANUP_RESULT_NET_CLOSE] == 0 &&
+              record->results[VD_PMU_CLEANUP_RESULT_NET_STOP] == 0 &&
+              record->results[
                   VD_PMU_CLEANUP_RESULT_POST_DISCONNECT_READ] == 0 &&
               vdPmuCleanupSampleMatchesHandle(
                   &record->samples[2], &record->handles[0],

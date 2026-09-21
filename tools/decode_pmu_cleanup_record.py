@@ -13,6 +13,7 @@ MAGIC = 0x56504347
 VERSION = 2
 SIZE = 1024
 NOT_RUN = -799
+VP_ERROR_IO = -13
 STATE_ATTEMPTED = 1
 STATE_ARMED = 2
 STATE_COMPLETE = 3
@@ -238,7 +239,13 @@ def decode_record(data: bytes) -> dict[str, object]:
             or (
                 header[6] == 3
                 and (
-                    results[21] != 0
+                    results[17] != VP_ERROR_IO
+                    or results[2] != 0
+                    or results[18] != 0
+                    or results[19] != 0
+                    or results[21] != 0
+                    or handles[0]["owner_token"] == 0
+                    or handles[0]["generation"] == 0
                     or samples[2]["struct_size"] != 48
                     or samples[2]["abi_version"] != 1
                     or samples[2]["owner_token"]

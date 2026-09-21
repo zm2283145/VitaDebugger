@@ -75,6 +75,9 @@ enum gate_result_index {
     GATE_RESULT_POST_DISCONNECT_READ,
 };
 
+typedef char cleanup_net_failure_must_match_profiler_error[
+    VD_PMU_CLEANUP_EXPECTED_NET_FAILURE == VP_ERROR_IO ? 1 : -1];
+
 static volatile uint32_t gate_work[GATE_WORK_WORDS];
 static volatile uint32_t gate_sink_value;
 static volatile int32_t contender_result;
@@ -258,6 +261,8 @@ static int sample_valid(
     uint32_t event)
 {
     return handle && sample &&
+        handle->owner_token != 0 &&
+        handle->generation != 0 &&
         sample->struct_size == sizeof(*sample) &&
         sample->abi_version == VD_KERNEL_PMU_PROFILER_ABI_VERSION &&
         sample->owner_token == handle->owner_token &&

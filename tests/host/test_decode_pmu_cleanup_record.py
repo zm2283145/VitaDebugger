@@ -130,6 +130,10 @@ class CleanupRecordTests(unittest.TestCase):
     ) -> None:
         data = complete_record()
         struct.pack_into("<I", data, 24, 3)
+        struct.pack_into("<i", data, 68 + 2 * 4, 0)
+        struct.pack_into("<i", data, 68 + 17 * 4, -13)
+        struct.pack_into("<i", data, 68 + 18 * 4, 0)
+        struct.pack_into("<i", data, 68 + 19 * 4, 0)
         struct.pack_into("<i", data, 68 + 21 * 4, 0)
         struct.pack_into("<II", data, 164 + 8, 7, 9)
         struct.pack_into(
@@ -156,6 +160,113 @@ class CleanupRecordTests(unittest.TestCase):
             "completion_contract",
             decode_record(bytes(data))["validation_errors"],
         )
+        for offset in (164 + 8, 164 + 12):
+            data = complete_record()
+            struct.pack_into("<I", data, 24, 3)
+            for index, result in (
+                (2, 0),
+                (17, -13),
+                (18, 0),
+                (19, 0),
+                (21, 0),
+            ):
+                struct.pack_into("<i", data, 68 + index * 4, result)
+            struct.pack_into("<II", data, 164 + 8, 7, 9)
+            struct.pack_into(
+                "<8IQ2I",
+                data,
+                284 + 2 * 48,
+                48,
+                1,
+                7,
+                9,
+                0x10,
+                0,
+                5,
+                0,
+                123,
+                0,
+                0,
+            )
+            struct.pack_into("<I", data, offset, 0)
+            struct.pack_into("<I", data, 12, _fnv1a(data))
+            self.assertIn(
+                "completion_contract",
+                decode_record(bytes(data))["validation_errors"],
+            )
+
+        for bad_error in (NOT_RUN, 0, -12):
+            data = complete_record()
+            struct.pack_into("<I", data, 24, 3)
+            for index, result in (
+                (2, 0),
+                (17, bad_error),
+                (18, 0),
+                (19, 0),
+                (21, 0),
+            ):
+                struct.pack_into("<i", data, 68 + index * 4, result)
+            struct.pack_into("<II", data, 164 + 8, 7, 9)
+            struct.pack_into(
+                "<8IQ2I",
+                data,
+                284 + 2 * 48,
+                48,
+                1,
+                7,
+                9,
+                0x10,
+                0,
+                5,
+                0,
+                123,
+                0,
+                0,
+            )
+            struct.pack_into("<I", data, 12, _fnv1a(data))
+            self.assertIn(
+                "completion_contract",
+                decode_record(bytes(data))["validation_errors"],
+            )
+
+        for failed_result in (2, 18, 19):
+            data = complete_record()
+            struct.pack_into("<I", data, 24, 3)
+            for index, result in (
+                (2, 0),
+                (17, -13),
+                (18, 0),
+                (19, 0),
+                (21, 0),
+            ):
+                struct.pack_into("<i", data, 68 + index * 4, result)
+            struct.pack_into(
+                "<II", data, 164 + 8, 7, 9
+            )
+            struct.pack_into(
+                "<8IQ2I",
+                data,
+                284 + 2 * 48,
+                48,
+                1,
+                7,
+                9,
+                0x10,
+                0,
+                5,
+                0,
+                123,
+                0,
+                0,
+            )
+            struct.pack_into(
+                "<i", data, 68 + failed_result * 4, -1
+            )
+            struct.pack_into("<I", data, 12, _fnv1a(data))
+            self.assertIn(
+                "completion_contract",
+                decode_record(bytes(data))["validation_errors"],
+            )
 
     def test_armed_record_requires_nonzero_handle_identity(self) -> None:
         self.assertTrue(decode_record(bytes(armed_record()))["valid"])

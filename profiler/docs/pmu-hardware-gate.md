@@ -217,8 +217,11 @@ exit cleanup count with no kill-count change; stage 5 requires an increased
 active-SceShell-kill cleanup count with no normal-exit-count change across the
 same boot. Those counters advance only if the callback observed an `ACTIVE`
 and unexpired lease. The stage-5 helper must archive a nonzero owner token and generation,
-receive the successful kill reply within two seconds of that observation, and
-beat the device's independent four-second safe-close deadline.
+carry one absolute deadline through its evidence, FTP, connect, send, and
+reply operations, recheck failed slot `c` at the true pre-send boundary, and
+receive the successful kill reply within two seconds of armed observation.
+The device independently safe-closes after four seconds; an expired deadline
+or observed slot `c` prohibits command transmission.
 
 Stop the whole matrix on a device/identity mismatch, missing or conflicting
 journal, checksum/schema failure, cleanup failure, PMU snapshot mismatch,

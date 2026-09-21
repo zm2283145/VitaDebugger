@@ -223,9 +223,19 @@ JSON state `kill_confirmed`, reply `Killed.`, the expected title ID, and an
 `armed_to_kill_seconds` value no greater than two seconds, plus an armed
 SHA-256 matching the separately retrieved slot `b`. The device independently
 closes the lease and writes failed slot `c` if no kill arrives within four
-seconds. Any pre-existing armed slot, invalid or identity-free armed handle,
-timeout, FTP error, late or non-success kill reply fails without issuing or
-repeating a kill.
+seconds. The helper carries one absolute monotonic deadline through archive,
+FTP, companion connect, send, and reply; the companion invokes the final
+slot-`c` absence check after connecting and immediately before its deadline
+recheck and command send. No command is transmitted if that check races with
+slot `c` or the deadline has expired. Any pre-existing armed slot, invalid or
+identity-free armed handle, timeout, FTP error, late or non-success kill reply
+fails without issuing or repeating a kill.
+
+The VPK is the hardware artifact, not merely a reproducible-build claim.
+`vita-pack-vpk` embeds ZIP timestamps, so separate clean builds can produce
+different VPK SHA-256 values while verified title, entries, payload sizes, and
+the candidate SKPRX hash remain identical. Hash the exact post-review VPKs and
+deploy those same files without rebuilding or substituting another package.
 
 ## Hard stops and exclusions
 

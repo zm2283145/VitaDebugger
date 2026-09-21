@@ -16,6 +16,7 @@ from tools.pmu_kill_gate import (
     ARMED_PATH,
     FAILED_PATH,
     TITLE_ID,
+    _read_optional_before,
     run_kill_gate,
 )
 
@@ -45,10 +46,31 @@ def armed_record() -> bytes:
     return bytes(data)
 
 
+class FakeDataSocket:
+    def __init__(self, blocks: list[bytes]) -> None:
+        self.blocks = blocks
+        self.timeout = 0.0
+
+    def settimeout(self, timeout: float) -> None:
+        self.timeout = timeout
+
+    def recv(self, _size: int) -> bytes:
+        return self.blocks.pop(0) if self.blocks else b""
+
+    def close(self) -> None:
+        pass
+
+
 class FakeFtp:
-    def __init__(self, responses: list[bytes | None]) -> None:
+    def __init__(
+        self,
+        responses: list[bytes | None | tuple[bytes, str]],
+    ) -> None:
         self.responses = responses
         self.commands: list[str] = []
+        self.timeout = 0.0
+        self.sock = None
+        self.final_error: str | None = None
 
     def connect(self, host: str, port: int, timeout: float) -> None:
         self.commands.append(f"connect {host} {port}")
@@ -59,12 +81,25 @@ class FakeFtp:
     def voidcmd(self, command: str) -> None:
         self.commands.append(command)
 
-    def retrbinary(self, command: str, callback) -> None:
+    def transfercmd(self, command: str) -> FakeDataSocket:
         self.commands.append(command)
         response = self.responses.pop(0)
         if response is None:
             raise ftplib.error_perm("550 missing")
-        callback(response)
+        if isinstance(response, tuple):
+            data, self.final_error = response
+        else:
+            data = response
+            self.final_error = None
+        return FakeDataSocket([data])
+
+    def voidresp(self) -> str:
+        self.commands.append("voidresp")
+        if self.final_error is not None:
+            error = self.final_error
+            self.final_error = None
+            raise ftplib.error_perm(error)
+        return "226 complete"
 
     def quit(self) -> None:
         self.commands.append("quit")
@@ -79,7 +114,23 @@ class FakeCompanion:
     def __init__(self, host: str, timeout: float) -> None:
         self.host = host
 
-    def kill(self, title_id: str, *, require_success: bool = False) -> str:
+    def kill(
+        self,
+        title_id: str,
+        *,
+        require_success: bool = False,
+        deadline: float | None = None,
+        monotonic=None,
+        before_send=None,
+    ) -> str:
+        if before_send is not None:
+            before_send()
+        if (
+            deadline is not None
+            and monotonic is not None
+            and monotonic() >= deadline
+        ):
+            raise TimeoutError("deadline expired before command transmission")
         self.calls.append((self.host, title_id, require_success))
         return "Killed."
 
@@ -177,25 +228,27 @@ class PmuKillGateTests(unittest.TestCase):
             self.assertFalse(ftp.commands)
             self.assertFalse(FakeCompanion.calls)
 
-    def test_late_kill_reply_fails_active_lease_bound(self) -> None:
-        ftp = FakeFtp([None, None, None, armed_record(), None])
+    def test_expired_pre_send_deadline_issues_no_kill(self) -> None:
         clock = FakeClock()
 
-        class SlowCompanion(FakeCompanion):
-            def kill(
-                self, title_id: str, *, require_success: bool = False
-            ) -> str:
-                reply = super().kill(
-                    title_id, require_success=require_success
-                )
-                clock.now += 2.1
-                return reply
+        class ExpiringFtp(FakeFtp):
+            def transfercmd(self, command: str) -> FakeDataSocket:
+                if (
+                    command == f"RETR {FAILED_PATH}"
+                    and self.commands.count(command) == 2
+                ):
+                    clock.now += 2.0
+                return super().transfercmd(command)
+
+        ftp = ExpiringFtp(
+            [None, None, None, armed_record(), None]
+        )
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             evidence = root / "kill.json"
             with self.assertRaisesRegex(
-                RuntimeError, "active-lease delay bound"
+                TimeoutError, "deadline expired"
             ):
                 run_kill_gate(
                     "192.0.2.17",
@@ -205,20 +258,14 @@ class PmuKillGateTests(unittest.TestCase):
                     0.1,
                     2.0,
                     ftp_factory=lambda: ftp,
-                    companion_factory=SlowCompanion,
+                    companion_factory=FakeCompanion,
                     monotonic=clock.monotonic,
                     sleep=clock.sleep,
                 )
-            self.assertEqual(FakeCompanion.calls[-1][1], TITLE_ID)
+            self.assertFalse(FakeCompanion.calls)
             self.assertEqual(
                 json.loads(evidence.read_text(encoding="utf-8"))["state"],
                 "failed",
-            )
-            self.assertGreater(
-                json.loads(
-                    evidence.read_text(encoding="utf-8")
-                )["armed_to_kill_seconds"],
-                2.0,
             )
 
     def test_device_timeout_before_kill_refuses_command(self) -> None:
@@ -240,6 +287,73 @@ class PmuKillGateTests(unittest.TestCase):
                     ftp_factory=lambda: ftp,
                     companion_factory=FakeCompanion,
                 )
+            self.assertFalse(FakeCompanion.calls)
+
+    def test_slot_c_payload_then_550_refuses_command(self) -> None:
+        ftp = FakeFtp(
+            [
+                None,
+                None,
+                None,
+                armed_record(),
+                (b"failed-record", "550 transfer failed"),
+            ]
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with self.assertRaises(ftplib.error_perm):
+                run_kill_gate(
+                    "192.0.2.17",
+                    root / "kill.json",
+                    root / "armed.bin",
+                    10.0,
+                    0.1,
+                    ftp_factory=lambda: ftp,
+                    companion_factory=FakeCompanion,
+                )
+            self.assertFalse(FakeCompanion.calls)
+
+    def test_ftp_transfer_rechecks_deadline_between_blocks(self) -> None:
+        clock = FakeClock()
+
+        class TricklingSocket(FakeDataSocket):
+            def recv(self, size: int) -> bytes:
+                clock.now += 1.1
+                return super().recv(size)
+
+        class TricklingFtp(FakeFtp):
+            def transfercmd(self, command: str) -> FakeDataSocket:
+                self.commands.append(command)
+                return TricklingSocket([b"first", b"second"])
+
+        ftp = TricklingFtp([])
+        with self.assertRaisesRegex(
+            TimeoutError, "deadline expired"
+        ):
+            _read_optional_before(
+                ftp,
+                ARMED_PATH,
+                2.0,
+                clock.monotonic,
+                "trickling transfer",
+            )
+
+    def test_max_kill_delay_cannot_exceed_documented_bound(self) -> None:
+        ftp = FakeFtp([])
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with self.assertRaisesRegex(ValueError, r"\(0, 2\]"):
+                run_kill_gate(
+                    "192.0.2.17",
+                    root / "kill.json",
+                    root / "armed.bin",
+                    10.0,
+                    0.1,
+                    2.01,
+                    ftp_factory=lambda: ftp,
+                    companion_factory=FakeCompanion,
+                )
+            self.assertFalse(ftp.commands)
             self.assertFalse(FakeCompanion.calls)
 
 

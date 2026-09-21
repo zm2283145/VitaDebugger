@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import socket
+import time
 from dataclasses import dataclass
+from typing import Callable
 
 from .errors import DeploymentError
 from .paths import validate_title_id
@@ -15,7 +17,28 @@ class VitaCompanionClient:
     port: int = 1338
     timeout: float = 5.0
 
-    def command(self, command: str) -> str:
+    def _remaining_timeout(
+        self,
+        deadline: float | None,
+        monotonic: Callable[[], float],
+    ) -> float:
+        if deadline is None:
+            return self.timeout
+        remaining = deadline - monotonic()
+        if remaining <= 0:
+            raise DeploymentError(
+                "Vita Companion command deadline expired before transmission"
+            )
+        return min(self.timeout, remaining)
+
+    def command(
+        self,
+        command: str,
+        *,
+        deadline: float | None = None,
+        monotonic: Callable[[], float] = time.monotonic,
+        before_send: Callable[[], None] | None = None,
+    ) -> str:
         if (
             not command
             or len(command) > 128
@@ -24,12 +47,22 @@ class VitaCompanionClient:
         ):
             raise DeploymentError("refusing unsafe Vita Companion command text")
         try:
-            with socket.create_connection((self.host, self.port), timeout=self.timeout) as connection:
-                connection.settimeout(self.timeout)
+            connect_timeout = self._remaining_timeout(deadline, monotonic)
+            with socket.create_connection(
+                (self.host, self.port), timeout=connect_timeout
+            ) as connection:
+                if before_send is not None:
+                    before_send()
+                connection.settimeout(
+                    self._remaining_timeout(deadline, monotonic)
+                )
                 connection.sendall(command.encode("ascii") + b"\n")
                 chunks: list[bytes] = []
                 size = 0
                 while True:
+                    connection.settimeout(
+                        self._remaining_timeout(deadline, monotonic)
+                    )
                     block = connection.recv(2048)
                     if not block:
                         break
@@ -50,8 +83,21 @@ class VitaCompanionClient:
             raise DeploymentError(f"Vita Companion version check failed: {response or 'empty response'}")
         return response
 
-    def kill(self, title_id: str, *, require_success: bool = False) -> str:
-        response = self.command(f"kill {validate_title_id(title_id)}")
+    def kill(
+        self,
+        title_id: str,
+        *,
+        require_success: bool = False,
+        deadline: float | None = None,
+        monotonic: Callable[[], float] = time.monotonic,
+        before_send: Callable[[], None] | None = None,
+    ) -> str:
+        response = self.command(
+            f"kill {validate_title_id(title_id)}",
+            deadline=deadline,
+            monotonic=monotonic,
+            before_send=before_send,
+        )
         if require_success and response != "Killed.":
             raise DeploymentError(f"Vita Companion could not kill {title_id}: {response}")
         return response
