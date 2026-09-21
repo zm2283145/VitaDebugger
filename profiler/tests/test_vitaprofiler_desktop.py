@@ -1,3 +1,4 @@
+import concurrent.futures
 import queue
 import dataclasses
 import socket
@@ -7,6 +8,7 @@ import threading
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 PROFILER = Path(__file__).resolve().parents[1]
@@ -112,6 +114,28 @@ class ViewModelTests(unittest.TestCase):
         gui._put_latest(updates, "stale")
         gui._discard_pending(updates)
         self.assertTrue(updates.empty())
+
+    def test_completed_task_discards_provisional_update_before_drain(self):
+        app = gui.ProfilerApp.__new__(gui.ProfilerApp)
+        app.live_updates = queue.Queue(maxsize=1)
+        gui._put_latest(app.live_updates, "provisional")
+        app.busy = True
+        app.cancellable = True
+        app.status = mock.Mock()
+        app._drain_status = mock.Mock()
+        app._drain_live_updates = mock.Mock()
+        app._set_action_state = mock.Mock()
+        on_success = mock.Mock()
+        future: concurrent.futures.Future[object] = (
+            concurrent.futures.Future())
+        future.set_exception(trace.TraceReceiveCancelled())
+
+        app._poll_task(future, on_success)
+
+        self.assertTrue(app.live_updates.empty())
+        app._drain_live_updates.assert_not_called()
+        on_success.assert_not_called()
+        app.status.set.assert_called_once_with("Receiver cancelled.")
 
 
 class ControllerTests(unittest.TestCase):

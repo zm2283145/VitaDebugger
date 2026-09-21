@@ -314,11 +314,12 @@ class ProfilerApp:
     def _poll_task(self, future: concurrent.futures.Future[object],
                    on_success: Callable[[object], None]) -> None:
         self._drain_status()
-        self._drain_live_updates()
-        if not future.done():
+        if future.done():
+            _discard_pending(self.live_updates)
+        else:
+            self._drain_live_updates()
             self.root.after(50, self._poll_task, future, on_success)
             return
-        _discard_pending(self.live_updates)
         self.busy = False
         self.cancellable = False
         self._set_action_state()
