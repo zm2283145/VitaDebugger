@@ -709,12 +709,18 @@ comparator. The detailed record is
   datagram to `10.1.1.217:1235` timed out. Review found that self-probe
   inconclusive because its unconnected sender could report a wildcard source
   that rejects the delivered packet during peer validation. The follow-up
-  connects the sender before capturing its source and preserves the bind
-  baseline; no production RSP fix is yet supported. See
+  connected the sender before capturing its source: the on-device datagram
+  passed on the same `0.0.0.0:1235` socket while 40 host UDP queries still
+  failed to arrive during 100 live polls. Host-to-Vita UDP telemetry is
+  therefore unavailable on this retail path. The freshly cleared, run-ID-
+  checked Companion FTP journal is the independent explicit-ready signal for
+  the remaining TCP gate; no production RSP fix is supported by this result.
+  See
   [the confirmation record](docs/hardware/rsp-second-admission-confirmation-3.65.json)
   [the startup diagnostic record](docs/hardware/rsp-startup-diagnostic-3.65.json),
   [the poll diagnostic record](docs/hardware/rsp-poll-diagnostic-3.65.json),
-  and [the endpoint diagnostic record](docs/hardware/rsp-endpoint-diagnostic-3.65.json).
+  [the endpoint diagnostic record](docs/hardware/rsp-endpoint-diagnostic-3.65.json),
+  and [the corrected self-probe record](docs/hardware/rsp-self-probe-confirmation-3.65.json).
 
 ## Documentation map
 

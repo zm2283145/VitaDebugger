@@ -1,0 +1,59 @@
+{
+  "schema": 1,
+  "tested_at": "2026-09-21T00:34:09.6796596Z",
+  "firmware": "3.65",
+  "device_class": "retail-handheld",
+  "title_id": "SLRS00001",
+  "source_commit": "a5165a95d39464624c89b876173d4b75ff896a4d",
+  "artifacts": {
+    "vpk_sha256": "1c903521da5a6c38c2ac87e9d13ad40515c4b5563f969b8bd0b438a85bc1084b",
+    "elf_sha256": "3a35cb32e47a5269107a77d18593a499e1c9b443a13eeca62cb03a3a5ce53563",
+    "eboot_sha256": "afdc4ef43f7277778e00d4c0946b63fc174db84309ed11fe5e8b1f8788152b39",
+    "freeze_manifest_sha256": "2d2f9ee76d06a766282939382c657750cac3b1e3693a3af51dd0e0d42c1a5311",
+    "startup_runner_sha256": "930fd9b65357d978ec40d18cb0bd26dccaeabc838b7d6f552a6b2af48d5bd9f2",
+    "kubridge_source_commit": "417ddde9a744eba98d769382c1c1372b8e119139",
+    "kubridge_stub_sha256": "fe05a117421b375d77bdc5102d5753f5dcf300e33176222688e490f2d03f5796"
+  },
+  "deployment": {
+    "job": "7a96d6783c32aa3dfa208f80a49af2af",
+    "signed_manifest_sha256": "5b27f9d8deb00e98cda302f5904501e4057f2f3238adf8d6844fa8110a718783",
+    "result": "success",
+    "installed_identity": "pass"
+  },
+  "startup_and_endpoint": {
+    "run_id": 72919692949,
+    "route_address": "10.1.1.217",
+    "effective_bound_address": "0.0.0.0",
+    "effective_bound_port": 1235,
+    "getsockname_result": 0,
+    "connected_self_probe_result": 0,
+    "connected_self_probe_received": true,
+    "poll_count": 100,
+    "raw_receive_result": -1,
+    "errno": 11,
+    "socket_descriptor": 4,
+    "host_request_received": false,
+    "failed_stage_mask": 0
+  },
+  "udp_ready": {
+    "status": "fail",
+    "host_queries": 40,
+    "timeouts": 40,
+    "deadline_seconds": 20,
+    "tcp_1234_contacted": false
+  },
+  "outcome": "host-to-vita-udp-telemetry-unavailable",
+  "rsp_cases_run": [],
+  "interpretation": "The same socket received a peer-verified datagram sent on-device to 10.1.1.217:1235, proving bind and local receive delivery. During the following bounded host probe window the main loop remained live, but none of 40 host-originated UDP datagrams reached parsing. The startup journal over Companion FTP is therefore the usable independent readiness path for this retail network; another identical UDP-ready attempt is not justified.",
+  "sealed_evidence_manifest_sha256": "b7d7ed8e16f77b91ae43ebd70a0f23a8358bd99bef0efed037f7f7607ed8d55b",
+  "final_state": {
+    "livearea_wait_seconds": 3,
+    "rsp_port_1234_open": false,
+    "diagnostic_port_1235_responding": false,
+    "test_title_running": false,
+    "kernel_configuration_changed": false,
+    "rebooted": false,
+    "device_ownership_released": true
+  },
+  "remaining_gate": "Use a freshly cleared ABI-v5 Companion FTP journal with successful connected self-probe and live poll heartbeat as explicit readiness, then run the authorized TCP RSP matrix without retrying the unavailable UDP gate."
+}

@@ -349,6 +349,17 @@ capturing its source endpoint, preserves the admission bind as the control, and
 waits for poll telemetry before a self-probe failure determines the host
 verdict. No production RSP or bind fix is yet supported.
 
+The corrected connected self-probe then passed on the same effective
+`0.0.0.0:1235` socket and route-selected `10.1.1.217` address. The main loop
+remained live through at least 100 polls, but none of 40 subsequent
+host-originated UDP queries reached the request parser. This proves the title's
+UDP bind and local receive path are healthy while host-to-Vita UDP telemetry is
+unavailable on the current retail network path. Repeating that UDP gate is not
+informative. A freshly cleared ABI-v5 journal retrieved through Companion FTP,
+with matching run ID, clean startup stages, successful self-probe, and live
+poll heartbeat, is the independent explicit-ready signal for the remaining
+TCP RSP gate.
+
 The corrected diagnostic passed this boundary on retail 3.65. The out-of-band
 ready snapshot showed listener 88, no candidate or connected socket, the test
 title ready, and no closing/stopped/owner state. The first request then produced
