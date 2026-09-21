@@ -662,6 +662,35 @@ class DecodeTests(unittest.TestCase):
         self.assertEqual(samples[2]["identity_source"],
                          "wire_v2_metadata")
 
+    def test_perfetto_separates_reused_thread_generations(self):
+        capture = trace.decode_capture(make_capture())
+        capture = dataclasses.replace(
+            capture,
+            thread_identities=(
+                trace.ThreadIdentity(7, 1, 0x101, 0, 0),
+                trace.ThreadIdentity(7, 2, 0x202, 0, 3),
+            ))
+        events = trace.capture_to_chrome_trace(capture)["traceEvents"]
+        thread_names = [
+            event for event in events
+            if event.get("name") == "thread_name"
+        ]
+        self.assertEqual(len(thread_names), 2)
+        self.assertNotEqual(thread_names[0]["tid"], thread_names[1]["tid"])
+        self.assertEqual(
+            {event["args"]["thread_id"] for event in thread_names}, {7})
+        generated = [
+            event for event in events
+            if event.get("ts") is not None and
+            event.get("args", {}).get("thread_generation") is not None
+        ]
+        self.assertEqual(
+            {event["args"]["thread_generation"] for event in generated},
+            {1, 2})
+        self.assertEqual(
+            {event["tid"] for event in generated},
+            {event["tid"] for event in thread_names})
+
     def test_json_and_perfetto_keep_run_clocks_raw(self):
         capture = trace.decode_capture(make_run_clocks_capture([
             (1000, 100, 0x40010003),

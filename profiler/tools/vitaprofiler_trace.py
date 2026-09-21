@@ -851,6 +851,14 @@ def _wire_thread_generations(
     return tuple(generations)
 
 
+def _perfetto_thread_id(
+        thread_id: int, generation: int | None,
+        track_ids: dict[tuple[int, int], int]) -> int:
+    if generation is None:
+        return thread_id
+    return track_ids.get((thread_id, generation), thread_id)
+
+
 def analyze_run_clocks(
         capture: TraceCapture,
         experiment: RunClocksExperiment | None = None,
@@ -1254,12 +1262,20 @@ def capture_to_chrome_trace(capture: TraceCapture) -> dict[str, object]:
         "name": "process_name", "ph": "M", "pid": process_id, "tid": 0,
         "args": {"name": "PS Vita application"},
     }]
+    thread_generations = _wire_thread_generations(capture)
+    track_ids = {
+        (identity.thread_id, identity.generation): (1 << 32) + index
+        for index, identity in enumerate(capture.thread_identities)
+    }
     for identity in capture.thread_identities:
         trace_events.append({
             "name": "thread_name", "ph": "M", "pid": process_id,
-            "tid": identity.thread_id,
+            "tid": _perfetto_thread_id(
+                identity.thread_id, identity.generation, track_ids),
             "args": {
-                "name": capture.resolve_name(identity.name_id),
+                "name": (f"{capture.resolve_name(identity.name_id)} "
+                         f"[generation {identity.generation}]"),
+                "thread_id": identity.thread_id,
                 "generation": identity.generation,
                 "identity": identity.identity,
                 "first_event_index": identity.first_event_index,
@@ -1267,16 +1283,25 @@ def capture_to_chrome_trace(capture: TraceCapture) -> dict[str, object]:
         })
     zones = analyze_zones(capture)
     for span in zones.spans:
+        begin_event = capture.events[span.begin_event_index]
+        declared = _thread_generation_for_event(
+            begin_event, thread_generations)
         trace_events.append({
             "name": span.name,
             "cat": "cpu.zone",
             "ph": "X",
             "pid": process_id,
-            "tid": span.thread_id,
+            "tid": _perfetto_thread_id(
+                span.thread_id,
+                declared.generation if declared is not None else None,
+                track_ids),
             "ts": span.begin_us,
             "dur": span.duration_us,
             "args": {
                 "correlation_id": span.correlation_id,
+                "thread_id": span.thread_id,
+                "thread_generation": (
+                    declared.generation if declared is not None else None),
                 "end_timestamp_us": span.end_us,
                 "flags": [name for bit, name in EVENT_FLAG_NAMES.items()
                           if span.flags & bit],
@@ -1287,31 +1312,41 @@ def capture_to_chrome_trace(capture: TraceCapture) -> dict[str, object]:
     unmatched.update(event.index for event in zones.unmatched_ends)
     for event in capture.events:
         name = capture.resolve_name(event.name_id)
-        base = {"name": name, "pid": process_id, "tid": event.thread_id,
+        declared = _thread_generation_for_event(event, thread_generations)
+        generation = declared.generation if declared is not None else None
+        identity_args = {
+            "thread_id": event.thread_id,
+            "thread_generation": generation,
+        }
+        base = {"name": name, "pid": process_id,
+                "tid": _perfetto_thread_id(
+                    event.thread_id, generation, track_ids),
                 "ts": event.timestamp_us}
         if event.event_type in (EVENT_ZONE_BEGIN, EVENT_ZONE_END):
             if event.index not in unmatched:
                 continue
             trace_events.append({
                 **base, "cat": "diagnostic.unmatched_zone", "ph": "i",
-                "s": "t", "args": {"record": event.type_name,
+                "s": "t", "args": {**identity_args,
+                                      "record": event.type_name,
                                       "correlation_id": event.correlation_id},
             })
         elif event.event_type == EVENT_COUNTER:
             trace_events.append({
                 **base, "cat": "counter", "ph": "C",
-                "args": {"value": event.value},
+                "args": {**identity_args, "value": event.value},
             })
         elif event.event_type == EVENT_FRAME:
             trace_events.append({
                 **base, "cat": "frame", "ph": "i", "s": "g",
-                "args": {"duration_us": event.value,
+                "args": {**identity_args, "duration_us": event.value,
                           "frame_sequence": event.correlation_id,
                           "first": bool(event.flags & EVENT_FLAG_FIRST)},
             })
         elif event.event_type in (EVENT_MEMORY_SAMPLE, EVENT_THREAD_SAMPLE,
                                   EVENT_PROCESS_SAMPLE):
             args: dict[str, object] = {
+                **identity_args,
                 "value": event.value,
                 "raw": bool(event.flags & EVENT_FLAG_RAW_VALUE),
             }
@@ -1319,6 +1354,7 @@ def capture_to_chrome_trace(capture: TraceCapture) -> dict[str, object]:
             if event.name_id == RUN_CLOCKS_METRIC_ID:
                 category = "thread_sample.raw_unknown_unit"
                 args = {
+                    **identity_args,
                     "raw_value_u64": _run_clocks_raw_value(event),
                     "raw_value_u64_decimal": str(
                         _run_clocks_raw_value(event)),
@@ -1334,7 +1370,7 @@ def capture_to_chrome_trace(capture: TraceCapture) -> dict[str, object]:
         else:
             trace_events.append({
                 **base, "cat": event.type_name, "ph": "i", "s": "t",
-                "args": {"value": event.value,
+                "args": {**identity_args, "value": event.value,
                           "correlation_id": event.correlation_id,
                           "flags": list(event.flag_names)},
             })
@@ -1347,7 +1383,9 @@ def capture_to_chrome_trace(capture: TraceCapture) -> dict[str, object]:
                 "cat": "thread_sample.raw_unknown_unit",
                 "ph": "C",
                 "pid": process_id,
-                "tid": sample["thread_id"],
+                "tid": _perfetto_thread_id(
+                    sample["thread_id"], sample["thread_generation"],
+                    track_ids),
                 "ts": sample["timestamp_us"],
                 "args": {
                     "delta_raw": sample["delta_raw"],
@@ -1357,6 +1395,7 @@ def capture_to_chrome_trace(capture: TraceCapture) -> dict[str, object]:
                     "source": RUN_CLOCKS_SOURCE,
                     "delta_status": sample["delta_status"],
                     "thread_generation": sample["thread_generation"],
+                    "thread_id": sample["thread_id"],
                     "counter_epoch": sample["counter_epoch"],
                     "cpu_utilization": False,
                 },
@@ -1368,12 +1407,15 @@ def capture_to_chrome_trace(capture: TraceCapture) -> dict[str, object]:
                 "ph": "i",
                 "s": "t",
                 "pid": process_id,
-                "tid": sample["thread_id"],
+                "tid": _perfetto_thread_id(
+                    sample["thread_id"], sample["thread_generation"],
+                    track_ids),
                 "ts": sample["timestamp_us"],
                 "args": {
                     "status": sample["delta_status"],
                     "unit": RUN_CLOCKS_UNIT,
                     "thread_generation": sample["thread_generation"],
+                    "thread_id": sample["thread_id"],
                     "counter_epoch": sample["counter_epoch"],
                 },
             })

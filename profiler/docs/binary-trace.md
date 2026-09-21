@@ -36,7 +36,13 @@ timer unit whose presence bits the producer sets. `THREAD` carries a numeric
 thread ID, generation, optional exact identity, and optional dictionary name
 ID. `MODULE` carries an ID/generation, half-open 32-bit address range, optional
 name ID, and explicitly supplied executable/ARM/Thumb bits. No missing value is
-inferred. A session permits at most 64 thread declarations and 64 module
+inferred.
+
+A `THREAD` declaration becomes effective at the next decoded event index.
+Producers that observe a new generation must flush preceding events and emit
+the declaration before emitting events from that generation. This positional
+boundary keeps unchanged v1 event records usable without inventing identity for
+events that preceded the declaration. A session permits at most 64 thread declarations and 64 module
 declarations, and each `(ID, generation)` pair must be unique. Writers reject
 duplicates or excess metadata before emission; receivers enforce the same
 limits.
