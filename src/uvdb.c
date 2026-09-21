@@ -4735,7 +4735,7 @@ static enum uvdb_console_write_result uvdb_console_raw_socket_write(
     int result = sceNetSyscallSendto((void*)send_args);
     *bytes_sent = 0;
     *native_error = result < 0 ? result : 0;
-    if((uint32_t)result == (uint32_t)SCE_NET_ERROR_EAGAIN)
+    if(uvdb_raw_io_would_block(result))
         return UVDB_CONSOLE_WRITE_WOULD_BLOCK;
     if(result < 0)
         return UVDB_CONSOLE_WRITE_ERROR;

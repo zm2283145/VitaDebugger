@@ -62,6 +62,7 @@ static int fake_release_send;
 static int fake_require_nonblocking_send;
 static int fake_nonblocking_send_violation;
 static int fake_send_would_block_count;
+static ssize_t fake_send_would_block_result;
 static int fake_epoll_block;
 static int fake_epoll_wait_blocked;
 static int fake_epoll_release;
@@ -143,6 +144,7 @@ static void reset_core(void)
     fake_require_nonblocking_send = 0;
     fake_nonblocking_send_violation = 0;
     fake_send_would_block_count = 0;
+    fake_send_would_block_result = SCE_NET_ERROR_EAGAIN;
     fake_epoll_block = 0;
     fake_epoll_wait_blocked = 0;
     fake_epoll_release = 0;
@@ -947,6 +949,32 @@ static void test_connected_io_cancellation_and_exclusion(void)
           "send cancellation drains I/O and protocol ownership");
 }
 
+static void test_raw_console_eagain_is_retryable(void)
+{
+    reset_core();
+    uvdb_console_reset();
+    check(uvdb_console_transport_enable_no_ack(
+              &uvdb_console_transport) == UVDB_CONSOLE_READY &&
+              uvdb_console_capture("console", 7u) == 7u,
+          "prepare no-ack console record");
+    fake_require_nonblocking_send = 1;
+    fake_send_would_block_result = -(ssize_t)SCE_NET_EAGAIN;
+
+    check(uvdb_pump_console_before_stop() == 0 &&
+              uvdb_socket == FAKE_SOCKET &&
+              !fake_connected_socket_closed &&
+              fake_send_would_block_count == 1 &&
+              !uvdb_console_transport.failed,
+          "raw console EAGAIN preserves the stopped session");
+    struct uvdb_console_transport_stats stats;
+    check(uvdb_console_transport_get_stats(
+              &uvdb_console_transport, &stats) == 0 &&
+              stats.would_block == 1u &&
+              stats.hard_errors == 0u,
+          "raw console EAGAIN is counted as backpressure");
+    uvdb_console_transport_end_connection(&uvdb_console_transport);
+}
+
 static void* run_fake_server_main(void* unused)
 {
     (void)unused;
@@ -1133,6 +1161,7 @@ int main(void)
     test_raw_would_block_classification();
     test_stopped_rst_reopens_listener();
     test_connected_io_cancellation_and_exclusion();
+    test_raw_console_eagain_is_retryable();
     test_connected_hup_during_shutdown();
     test_deterministic_multithread_lifecycle_stress();
     if(failures)
@@ -1332,7 +1361,7 @@ ssize_t sceNetSyscallSendto(void* arguments)
             __atomic_add_fetch(
                 &fake_send_would_block_count, 1,
                 __ATOMIC_RELAXED);
-            return SCE_NET_ERROR_EAGAIN;
+            return fake_send_would_block_result;
         }
         return -1;
     }
