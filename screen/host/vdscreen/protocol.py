@@ -54,8 +54,8 @@ class StreamIdentity:
 
 
 def decode_auth(data: bytes, expected_token: bytes) -> StreamIdentity:
-    if len(expected_token) != AUTH_TOKEN_SIZE:
-        raise ValueError("expected token must be exactly 32 bytes")
+    if len(expected_token) != AUTH_TOKEN_SIZE or not any(expected_token):
+        raise ValueError("expected token must be exactly 32 nonzero bytes")
     if len(data) != AUTH_SIZE:
         raise ProtocolError("truncated authentication preface")
     (magic, version, size, token, title_id_raw, process_id,
@@ -64,6 +64,8 @@ def decode_auth(data: bytes, expected_token: bytes) -> StreamIdentity:
         raise ProtocolError("unsupported authentication preface")
     if data[49:52] != bytes(3):
         raise ProtocolError("nonzero reserved authentication bytes")
+    if not any(token):
+        raise ProtocolError("zero authentication token")
     import hmac
 
     if not hmac.compare_digest(token, expected_token):

@@ -14,6 +14,7 @@ from typing import Callable
 
 from .protocol import (
     AUTH_SIZE,
+    AUTH_TOKEN_SIZE,
     FRAME_HEADER_SIZE,
     PIXEL_BGRA8888,
     PIXEL_RGB565_LE,
@@ -210,6 +211,9 @@ def receive_connection(
     store.cleanup_temps()
     connection.settimeout(limits.idle_timeout_seconds)
     try:
+        if len(token) != AUTH_TOKEN_SIZE or not any(token):
+            raise ValueError(
+                "receiver token must be exactly 32 nonzero bytes")
         auth = _read_exact(
             connection, AUTH_SIZE,
             min(deadline, now_fn() + limits.idle_timeout_seconds), now_fn)

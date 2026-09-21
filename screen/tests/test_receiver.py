@@ -51,7 +51,8 @@ def frame(sequence: int, timestamp_us: int = 1000,
 
 
 def run_connection(data: bytes, output: Path,
-                   limits: ReceiverLimits = ReceiverLimits()):
+                   limits: ReceiverLimits = ReceiverLimits(),
+                   expected_token: bytes = TOKEN):
     receiver, producer = socket.socketpair()
     result: dict[str, object] = {}
 
@@ -59,7 +60,7 @@ def run_connection(data: bytes, output: Path,
         try:
             result["stats"] = receive_connection(
                 receiver,
-                token=TOKEN,
+                token=expected_token,
                 store=LatestFrameStore(output),
                 limits=limits,
                 peer=("127.0.0.1", 12345),
@@ -128,6 +129,23 @@ class ReceiverTests(unittest.TestCase):
                 output = Path(directory)
                 result = run_connection(data, output)
                 self.assertIsInstance(result.get("error"), ProtocolError)
+                self.assertFalse((output / "latest.json").exists())
+                self.assertEqual(list(output.glob("*.tmp")), [])
+
+    def test_zero_configured_and_wire_tokens_fail_closed(self) -> None:
+        zero_wire_auth = bytearray(encode_auth(TOKEN))
+        zero_wire_auth[8:40] = bytes(32)
+        cases = (
+            (encode_auth(TOKEN) + frame(1), bytes(32), ValueError),
+            (bytes(zero_wire_auth) + frame(1), TOKEN, ProtocolError),
+        )
+        for data, expected_token, error_type in cases:
+            with self.subTest(error_type=error_type.__name__), \
+                    tempfile.TemporaryDirectory() as directory:
+                output = Path(directory)
+                result = run_connection(
+                    data, output, expected_token=expected_token)
+                self.assertIsInstance(result.get("error"), error_type)
                 self.assertFalse((output / "latest.json").exists())
                 self.assertEqual(list(output.glob("*.tmp")), [])
 
