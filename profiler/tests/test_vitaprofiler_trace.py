@@ -258,6 +258,15 @@ class DecodeTests(unittest.TestCase):
                     saw_incomplete_events = True
                     self.assertIsNotNone(snapshot.session)
                     self.assertLessEqual(len(snapshot.events), 6)
+        end_snapshot = decoder.snapshot()
+        self.assertTrue(decoder.end_seen)
+        self.assertFalse(end_snapshot.complete)
+        with self.assertRaisesRegex(
+                trace.TraceFormatError, "incomplete capture"):
+            trace.capture_to_json(end_snapshot)
+        with self.assertRaisesRegex(
+                trace.TraceFormatError, "incomplete capture"):
+            trace.capture_to_chrome_trace(end_snapshot)
         capture = decoder.finish()
         self.assertTrue(saw_incomplete_events)
         self.assertTrue(capture.complete)

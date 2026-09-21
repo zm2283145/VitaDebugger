@@ -405,6 +405,8 @@ class ProfilerViewModel:
 class ProfilerController:
     """File, receiver, and export operations shared by GUI and tests."""
 
+    decoder_type = trace.IncrementalTraceDecoder
+
     def open_capture(self, path: Path,
                      max_bytes: int = trace.DEFAULT_MAX_BYTES) -> LoadedCapture:
         capture = trace.read_capture(path, max_bytes)
@@ -422,7 +424,7 @@ class ProfilerController:
         if config.output.exists() and not config.force:
             raise FileExistsError(
                 f"refusing to overwrite {config.output}")
-        decoder = trace.IncrementalTraceDecoder(config.max_bytes)
+        decoder = self.decoder_type(config.max_bytes)
         analysis_queue: queue.Queue[trace.TraceCapture | None] | None = None
         analysis_thread: threading.Thread | None = None
         analysis_errors: list[BaseException] = []
@@ -459,16 +461,16 @@ class ProfilerController:
             changed = decoder.feed(chunk)
             if not changed or not decoder.is_v2 or on_live_update is None:
                 return
-            try:
-                capture = decoder.snapshot()
-            except trace.TraceFormatError:
+            if decoder.end_seen:
                 return
-            if capture.complete:
-                return
-            event_count = len(capture.events)
+            event_count = decoder.event_count
             now = time.monotonic()
             if (event_count < next_event_update and
                     now - last_live_update < 2.0):
+                return
+            try:
+                capture = decoder.snapshot()
+            except trace.TraceFormatError:
                 return
             last_live_update = now
             next_event_update = max(event_count + 64, event_count * 2)

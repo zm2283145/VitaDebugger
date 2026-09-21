@@ -492,6 +492,7 @@ class IncrementalTraceDecoder:
         self._thread_keys: set[tuple[int, int]] = set()
         self._module_keys: set[tuple[int, int]] = set()
         self._loss: LossCounters | None = None
+        self._end_seen = False
         self._complete = False
         self._finished = False
 
@@ -502,6 +503,14 @@ class IncrementalTraceDecoder:
     @property
     def complete(self) -> bool:
         return self._complete
+
+    @property
+    def end_seen(self) -> bool:
+        return self._end_seen
+
+    @property
+    def event_count(self) -> int:
+        return len(self._events)
 
     def feed(self, data: bytes) -> bool:
         if self._finished:
@@ -561,7 +570,7 @@ class IncrementalTraceDecoder:
                 raise TraceFormatError(
                     f"v2 chunk sequence {sequence} does not match "
                     f"{self._next_sequence}")
-            if self._complete:
+            if self._end_seen:
                 raise TraceFormatError("v2 data follows the END chunk")
             self._current_chunk_end = self._processed_size + total_size
             self._decode_v2_chunk(chunk_type, payload)
@@ -614,7 +623,7 @@ class IncrementalTraceDecoder:
                 if loss.bytes_written != self._current_chunk_end:
                     raise TraceFormatError(
                         "v2 END byte count does not match the stream")
-                self._complete = True
+                self._end_seen = True
 
     def _decode_v2_session(self, payload: bytes) -> None:
         if len(payload) != STREAM_V2_SESSION_PAYLOAD_SIZE:
@@ -736,6 +745,9 @@ class IncrementalTraceDecoder:
             raise TraceFormatError("capture is too short to contain a magic")
         if self._buffer:
             raise TraceFormatError("v2 stream ends with a truncated chunk")
+        if not self._end_seen:
+            raise TraceFormatError("v2 session ended without an END chunk")
+        self._complete = True
         return self.snapshot(allow_incomplete=False)
 
 
@@ -1129,6 +1141,8 @@ def render_events(capture: TraceCapture, limit: int | None = None) -> str:
 
 
 def capture_to_json(capture: TraceCapture) -> dict[str, object]:
+    if not capture.complete:
+        raise TraceFormatError("cannot export an incomplete capture")
     thread_metadata = [
         {
             **dataclasses.asdict(item),
@@ -1204,6 +1218,8 @@ def capture_to_json(capture: TraceCapture) -> dict[str, object]:
 
 def capture_to_chrome_trace(capture: TraceCapture) -> dict[str, object]:
     """Return Chrome Trace Event JSON, also loadable by Perfetto."""
+    if not capture.complete:
+        raise TraceFormatError("cannot export an incomplete capture")
     process_id = (capture.session.process_id
                   if capture.session is not None and
                   capture.session.process_id is not None else 1)

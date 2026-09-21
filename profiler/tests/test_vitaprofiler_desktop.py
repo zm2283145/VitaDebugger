@@ -14,6 +14,7 @@ TOOLS = PROFILER / "tools"
 sys.path.insert(0, str(TOOLS))
 
 import vitaprofiler_desktop as desktop  # noqa: E402
+import vitaprofiler_gui as gui  # noqa: E402
 import vitaprofiler_trace as trace  # noqa: E402
 from test_vitaprofiler_trace import make_capture, make_v2_capture  # noqa: E402
 
@@ -102,6 +103,13 @@ class ViewModelTests(unittest.TestCase):
         self.assertTrue(all(frame.thread_generation == 2
                             for frame in model.frames))
 
+    def test_latest_queue_coalesces_without_growth(self):
+        updates: queue.Queue[object] = queue.Queue(maxsize=1)
+        for value in range(1000):
+            gui._put_latest(updates, value)
+        self.assertEqual(updates.qsize(), 1)
+        self.assertEqual(updates.get_nowait(), 999)
+
 
 class ControllerTests(unittest.TestCase):
     def test_open_and_both_exports_use_trace_pipeline(self):
@@ -183,6 +191,13 @@ class ControllerTests(unittest.TestCase):
 
     def test_v2_receiver_publishes_incomplete_live_models(self):
         raw = make_v2_capture()
+        class CountingDecoder(trace.IncrementalTraceDecoder):
+            snapshot_calls = 0
+
+            def snapshot(self, allow_incomplete: bool = True):
+                type(self).snapshot_calls += 1
+                return super().snapshot(allow_incomplete)
+
         chunks: list[bytes] = []
         offset = 0
         while offset < len(raw):
@@ -206,7 +221,9 @@ class ControllerTests(unittest.TestCase):
 
             def receive() -> None:
                 try:
-                    outcome.put(desktop.ProfilerController().receive_capture(
+                    controller = desktop.ProfilerController()
+                    controller.decoder_type = CountingDecoder
+                    outcome.put(controller.receive_capture(
                         config, on_listening=listening.put,
                         on_live_update=updates.append))
                 except BaseException as error:
@@ -234,6 +251,7 @@ class ControllerTests(unittest.TestCase):
             self.assertEqual(
                 updates[-1].capture.events,
                 result.capture.events[:len(updates[-1].capture.events)])
+            self.assertLessEqual(CountingDecoder.snapshot_calls, 3)
 
     def test_v2_receiver_never_publishes_complete_before_eof(self):
         raw = make_v2_capture()

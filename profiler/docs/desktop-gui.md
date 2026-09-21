@@ -59,8 +59,10 @@ one background operation runs at a time, and closing the window requests
 receiver cancellation.
 
 For wire v2, the receiver worker feeds the shared incremental decoder and
-builds the same analyzer/view model after complete chunks. A size-one GUI
-update queue replaces stale snapshots instead of blocking the receiver. The
+builds the same analyzer/view model after bounded event/time thresholds,
+checking the decoder's constant-time event count before copying a snapshot.
+Size-one GUI snapshot and status queues replace stale updates instead of
+blocking the receiver or growing with socket fragmentation. The
 Timeline tab combines complete CPU zones and frame intervals, ordered by start
 time with thread-generation labels when supplied. Frames, counters, and the
 overview update before EOF. Parsing, CRC work, zone pairing, and bounded table

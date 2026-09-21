@@ -18,6 +18,17 @@ import vitaprofiler_trace as trace
 DISPLAY_ROW_LIMIT = 3000
 
 
+def _put_latest(target: queue.Queue[object], value: object) -> None:
+    try:
+        target.put_nowait(value)
+    except queue.Full:
+        try:
+            target.get_nowait()
+        except queue.Empty:
+            pass
+        target.put_nowait(value)
+
+
 class ProfilerApp:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
@@ -27,7 +38,7 @@ class ProfilerApp:
         self.executor = concurrent.futures.ThreadPoolExecutor(
             max_workers=1, thread_name_prefix="vitaprofiler")
         self.cancel_event = threading.Event()
-        self.status_messages: queue.SimpleQueue[str] = queue.SimpleQueue()
+        self.status_messages: queue.Queue[str] = queue.Queue(maxsize=1)
         self.live_updates: queue.Queue[
             tuple[desktop.LoadedCapture, desktop.TableRows]
         ] = queue.Queue(maxsize=1)
@@ -232,20 +243,15 @@ class ProfilerApp:
                     loaded.view_model.filter_tables(
                         "", None, DISPLAY_ROW_LIMIT),
                 )
-                try:
-                    self.live_updates.put_nowait(update)
-                except queue.Full:
-                    try:
-                        self.live_updates.get_nowait()
-                    except queue.Empty:
-                        pass
-                    self.live_updates.put_nowait(update)
+                _put_latest(self.live_updates, update)
 
             return self.controller.receive_capture(
                 config, self.cancel_event.is_set,
-                lambda address: self.status_messages.put(
+                lambda address: _put_latest(
+                    self.status_messages,
                     f"Listening on {address[0]}:{address[1]}..."),
-                lambda count: self.status_messages.put(
+                lambda count: _put_latest(
+                    self.status_messages,
                     f"Receiving capture: {count:,} bytes..."),
                 publish_live)
 
