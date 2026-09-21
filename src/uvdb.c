@@ -27,6 +27,7 @@
 #include "uvdb_exception_handlers.h"
 #include "uvdb_exclusive_step.h"
 #include "uvdb_fileio_flow.h"
+#include "uvdb_memory_transaction.h"
 #include "uvdb_monitor.h"
 #include "uvdb_protocol_gate.h"
 #include "uvdb_registers.h"
@@ -272,6 +273,7 @@ static volatile int uvdb_async_stop_pending;
 static volatile int uvdb_async_stop_cancelled;
 static volatile int uvdb_server_stop;
 static volatile int uvdb_shutdown_pending;
+static volatile int uvdb_terminal_shutdown_complete;
 static volatile int uvdb_accept_active;
 static volatile int uvdb_packet_io_active;
 static volatile int uvdb_network_closing;
@@ -299,6 +301,20 @@ static struct uvdb_fault_info uvdb_last_fault = {
     .exception_type = UVDB_EXCEPTION_NONE,
 };
 
+#define UVDB_REMOTE_SYSCALL_MAX_ARGS 64
+
+struct uvdb_remote_syscall_request {
+    const char* name;
+    uintptr_t arguments[UVDB_REMOTE_SYSCALL_MAX_ARGS];
+    int argument_count;
+    SceUID owner;
+    volatile int completed;
+    int result;
+};
+
+static struct uvdb_remote_syscall_request* volatile
+    uvdb_remote_syscall_pending;
+
 #define UVDB_MONITOR_OUTPUT_CAPACITY (16u * 1024u)
 static char uvdb_monitor_output[UVDB_MONITOR_OUTPUT_CAPACITY];
 static struct uvdb_monitor_thread
@@ -313,8 +329,12 @@ static struct uvdb_monitor_display_stop uvdb_monitor_display_stop;
 
 static int breakpoint_remove_all(void);
 static size_t breakpoint_active_count(void);
+static int uvdb_memory_write_restore_pending(void);
+static int uvdb_memory_write_has_pending(void);
+static void uvdb_memory_write_storage_release(void);
 static int uvdb_kernel_end_stop(void);
 static int uvdb_refresh_stopped_inventory(void);
+static void uvdb_note_target_running(void);
 #ifdef UVDB_KERNEL_THREAD_CONTROL
 static int breakpoint_any_active(void);
 static void uvdb_claim_stop_controller(void);
@@ -1228,7 +1248,8 @@ static int uvdb_stop_lease_keeper_locked(void)
  * safe even if EndStop failed: the kernel watchdog can resume original code. */
 static void uvdb_fail_shutdown_locked(int owns_stop)
 {
-    int restore_required = breakpoint_any_active();
+    int restore_required = breakpoint_any_active() ||
+                           uvdb_memory_write_has_pending();
     uvdb_state = UVDB_STATE_ERROR;
     if(owns_stop)
         uvdb_release_stop_controller();
@@ -1250,11 +1271,35 @@ int uvdb_stop_server(void)
          * executable patch. The kernel build additionally retains its keeper
          * so a subsequent retry still owns a coherent all-stop. */
         uvdb_lock();
-        int restore_required = breakpoint_active_count() != 0;
-        if(restore_required)
+        int cleanup_required = uvdb_memory_write_has_pending() ||
+                               breakpoint_active_count() != 0;
+        int cleanup_result = 0;
+        if(cleanup_required)
+        {
+#ifdef UVDB_KERNEL_THREAD_CONTROL
+            uvdb_claim_stop_controller();
+            int coherent_stop = uvdb_kernel_recover_stop() >= 0;
+            if(!coherent_stop ||
+               uvdb_memory_write_restore_pending() < 0 ||
+               breakpoint_remove_all() < 0 ||
+               uvdb_kernel_end_stop() < 0)
+                cleanup_result = -1;
+            uvdb_release_stop_controller();
+#else
+            if(uvdb_memory_write_restore_pending() < 0 ||
+               breakpoint_remove_all() < 0 ||
+               uvdb_kernel_end_stop() < 0)
+                cleanup_result = -1;
+#endif
+            if(cleanup_result == 0)
+                uvdb_note_target_running();
+        }
+        int restore_required = breakpoint_active_count() != 0 ||
+                               uvdb_memory_write_has_pending();
+        if(cleanup_result < 0 || restore_required)
             uvdb_state = UVDB_STATE_ERROR;
         uvdb_unlock();
-        if(restore_required)
+        if(cleanup_result < 0 || restore_required)
             result = -1;
 #ifdef UVDB_KERNEL_THREAD_CONTROL
         else
@@ -1295,9 +1340,10 @@ void uvdb_shutdown(void)
     uvdb_lock();
 #ifdef UVDB_KERNEL_THREAD_CONTROL
     int breakpoints_active = breakpoint_any_active();
+    int memory_restore_pending = uvdb_memory_write_has_pending();
     int coherent_stop = 0;
     int owns_stop = 0;
-    if(breakpoints_active ||
+    if(breakpoints_active || memory_restore_pending ||
        __atomic_load_n(&uvdb_stop_token, __ATOMIC_SEQ_CST))
     {
         uvdb_claim_stop_controller();
@@ -1305,7 +1351,7 @@ void uvdb_shutdown(void)
         coherent_stop = uvdb_kernel_recover_stop() >= 0;
     }
 
-    if((breakpoints_active ||
+    if((breakpoints_active || memory_restore_pending ||
         __atomic_load_n(&uvdb_stop_token, __ATOMIC_SEQ_CST)) &&
        !coherent_stop)
     {
@@ -1317,6 +1363,13 @@ void uvdb_shutdown(void)
         return;
     }
 
+    if(((!breakpoints_active && !memory_restore_pending) || coherent_stop) &&
+       uvdb_memory_write_restore_pending() < 0)
+    {
+        uvdb_fail_shutdown_locked(owns_stop);
+        uvdb_lifecycle_unlock();
+        return;
+    }
     if((!breakpoints_active || coherent_stop) &&
        breakpoint_remove_all() < 0)
     {
@@ -1344,7 +1397,8 @@ void uvdb_shutdown(void)
     if(owns_stop)
         uvdb_release_stop_controller();
 #else
-    if(breakpoint_remove_all() < 0)
+    if(uvdb_memory_write_restore_pending() < 0 ||
+       breakpoint_remove_all() < 0)
     {
         uvdb_state = UVDB_STATE_ERROR;
         uvdb_unlock();
@@ -1408,6 +1462,7 @@ void uvdb_shutdown(void)
     }
     buffer_release(&in_buf);
     buffer_release(&out_buf);
+    uvdb_memory_write_storage_release();
     uvdb_rsp_request_lifetime_init(&uvdb_request_lifetime);
     uvdb_thread_inventory_reset(&uvdb_inventory);
     uvdb_thread_selection_reset(&uvdb_selection);
@@ -1432,8 +1487,40 @@ void uvdb_shutdown(void)
      * safe while this linked image remains loaded. stop_server/start_server is
      * the supported nonterminal reconnect lifecycle. */
     uvdb_state = UVDB_STATE_IDLE;
+    __atomic_store_n(&uvdb_terminal_shutdown_complete, 1,
+                     __ATOMIC_RELEASE);
     uvdb_unlock();
     uvdb_lifecycle_unlock();
+}
+
+int uvdb_prepare_unload(void)
+{
+    uvdb_lifecycle_lock();
+    if(!__atomic_load_n(&uvdb_terminal_shutdown_complete,
+                        __ATOMIC_ACQUIRE) ||
+       !__atomic_load_n(&uvdb_shutdown_pending, __ATOMIC_ACQUIRE))
+    {
+        uvdb_lifecycle_unlock();
+        return -1;
+    }
+
+    /* The production backend intentionally has no fence callback until
+     * KuBridge exposes a kernel primitive with the contract documented in
+     * uvdb_exception_handlers.h. Handler restoration plus this process-local
+     * active count cannot prove that a copied callback has not yet entered. */
+    int result = uvdb_exception_handlers_fence(
+        &uvdb_handlers, &uvdb_handler_backend, NULL);
+    if(result == 0)
+        result = uvdb_wait_for_exception_quiescence();
+    uvdb_lock();
+    if(result == 0)
+        result = uvdb_exception_handlers_reset_after_fence(
+            &uvdb_handlers);
+    if(result == 0)
+        uvdb_exception_guard_init(&uvdb_exception_guard);
+    uvdb_unlock();
+    uvdb_lifecycle_unlock();
+    return result;
 }
 
 static size_t recv_packet(char** data)
@@ -1975,6 +2062,38 @@ struct uvdb_breakpoint {
 
 static struct uvdb_breakpoint uvdb_breakpoints[UVDB_MAX_BREAKPOINTS];
 
+struct uvdb_memory_breakpoint_rearm {
+    uintptr_t address;
+    size_t size;
+    int temporary;
+};
+
+struct uvdb_memory_write_state {
+    SceUID storage_uid;
+    unsigned char* storage;
+    size_t capacity;
+    struct uvdb_memory_transaction transaction;
+    struct uvdb_memory_breakpoint_rearm rearm[UVDB_MAX_BREAKPOINTS];
+    size_t rearm_count;
+};
+
+static struct uvdb_memory_write_state uvdb_memory_write_state = {
+    .storage_uid = -1,
+};
+
+static int uvdb_ranges_overlap(
+    uintptr_t first,
+    size_t first_size,
+    uintptr_t second,
+    size_t second_size)
+{
+    if(!first_size || !second_size)
+        return 0;
+    if(first <= second)
+        return second - first < first_size;
+    return first - second < second_size;
+}
+
 static struct uvdb_breakpoint* breakpoint_find(uintptr_t address)
 {
     address &= ~(uintptr_t)1;
@@ -2003,10 +2122,19 @@ static size_t breakpoint_patch_write(
     size_t size)
 {
     (void)user;
-    kuKernelCpuUnrestrictedMemcpy((void*)address, input, size);
-    /* The unrestricted copy has no result code. Exact safe readback in the
-     * transaction helper is therefore the authoritative success check. */
-    return size;
+    const unsigned char* source = input;
+    size_t copied = 0;
+    while(copied < size)
+    {
+        size_t chunk = size - copied;
+        if(chunk > 64u)
+            chunk = 64u;
+        if(kuKernelCpuUnrestrictedMemcpy(
+               (void*)(address + copied), source + copied, chunk) < 0)
+            break;
+        copied += chunk;
+    }
+    return copied;
 }
 
 static int breakpoint_patch_sync(
@@ -2123,6 +2251,213 @@ static size_t breakpoint_active_count(void)
                &uvdb_breakpoints[i].patch))
             count++;
     return count;
+}
+
+static int uvdb_memory_write_has_pending(void)
+{
+    return uvdb_memory_write_state.rearm_count != 0 ||
+           uvdb_memory_transaction_is_pending(
+               &uvdb_memory_write_state.transaction);
+}
+
+static int uvdb_memory_write_storage_reserve(size_t capacity)
+{
+    if(!capacity)
+        return 0;
+    if(uvdb_memory_write_has_pending())
+        return -1;
+    if(uvdb_memory_write_state.storage &&
+       uvdb_memory_write_state.capacity >= capacity)
+        return 0;
+    if(capacity > (SIZE_MAX - 4095u) / 2u)
+        return -1;
+    size_t allocation_size =
+        (capacity * 2u + 4095u) & ~(size_t)4095u;
+
+    SceUID storage_uid = sceKernelAllocMemBlock(
+        "gdb memory transaction",
+        SCE_KERNEL_MEMBLOCK_TYPE_USER_RW,
+        allocation_size,
+        NULL);
+    if(storage_uid < 0)
+        return -1;
+    void* storage = NULL;
+    if(sceKernelGetMemBlockBase(storage_uid, &storage) < 0 || !storage)
+    {
+        sceKernelFreeMemBlock(storage_uid);
+        return -1;
+    }
+    if(uvdb_memory_write_state.storage_uid >= 0 &&
+       sceKernelFreeMemBlock(uvdb_memory_write_state.storage_uid) < 0)
+    {
+        sceKernelFreeMemBlock(storage_uid);
+        return -1;
+    }
+    uvdb_memory_write_state.storage_uid = storage_uid;
+    uvdb_memory_write_state.storage = storage;
+    uvdb_memory_write_state.capacity = capacity;
+    uvdb_memory_transaction_init(
+        &uvdb_memory_write_state.transaction, storage, capacity);
+    return 0;
+}
+
+static void uvdb_memory_write_storage_release(void)
+{
+    if(uvdb_memory_write_has_pending())
+        return;
+    if(uvdb_memory_write_state.storage_uid >= 0 &&
+       sceKernelFreeMemBlock(uvdb_memory_write_state.storage_uid) < 0)
+        return;
+    memset(&uvdb_memory_write_state, 0,
+           sizeof(uvdb_memory_write_state));
+    uvdb_memory_write_state.storage_uid = -1;
+}
+
+static int uvdb_memory_write_remove_rearm_breakpoints(void)
+{
+    int result = 0;
+    for(size_t i = 0; i < uvdb_memory_write_state.rearm_count; ++i)
+    {
+        struct uvdb_breakpoint* breakpoint = breakpoint_find(
+            uvdb_memory_write_state.rearm[i].address);
+        if(breakpoint &&
+           breakpoint_remove(breakpoint->patch.address) < 0)
+            result = -1;
+    }
+    return result;
+}
+
+static int uvdb_memory_write_rearm_breakpoints(void)
+{
+    for(size_t i = 0; i < uvdb_memory_write_state.rearm_count; ++i)
+    {
+        const struct uvdb_memory_breakpoint_rearm* rearm =
+            &uvdb_memory_write_state.rearm[i];
+        struct uvdb_breakpoint* breakpoint =
+            breakpoint_find(rearm->address);
+        if(breakpoint)
+        {
+            if(breakpoint->patch.state !=
+               UVDB_BREAKPOINT_PATCH_INSTALLED)
+                return -1;
+            breakpoint->temporary = rearm->temporary != 0;
+            continue;
+        }
+        if(breakpoint_insert_internal(
+               rearm->address, rearm->size, rearm->temporary) < 0)
+            return -1;
+    }
+    return 0;
+}
+
+static int uvdb_memory_write_restore_pending(void)
+{
+    if(!uvdb_memory_write_has_pending())
+        return 0;
+    if(uvdb_memory_write_remove_rearm_breakpoints() < 0)
+        return -1;
+    if(uvdb_memory_transaction_is_pending(
+           &uvdb_memory_write_state.transaction) &&
+       uvdb_memory_transaction_restore(
+           &uvdb_memory_write_state.transaction,
+           &(const struct uvdb_memory_transaction_io){
+               .read = breakpoint_patch_read,
+               .write = breakpoint_patch_write,
+               .sync = breakpoint_patch_sync,
+           },
+           NULL) != UVDB_MEMORY_TRANSACTION_WRITE_FAILED_RESTORED)
+        return -1;
+    if(uvdb_memory_write_rearm_breakpoints() < 0)
+        return -1;
+    uvdb_memory_write_state.rearm_count = 0;
+    return 0;
+}
+
+static int uvdb_memory_write_capture_breakpoints(
+    uintptr_t address,
+    size_t size)
+{
+    uvdb_memory_write_state.rearm_count = 0;
+    for(size_t i = 0; i < UVDB_MAX_BREAKPOINTS; ++i)
+    {
+        const struct uvdb_breakpoint_patch_slot* patch =
+            &uvdb_breakpoints[i].patch;
+        if(patch->state == UVDB_BREAKPOINT_PATCH_EMPTY ||
+           !uvdb_ranges_overlap(address, size, patch->address,
+                                patch->size))
+            continue;
+        struct uvdb_memory_breakpoint_rearm* rearm =
+            &uvdb_memory_write_state.rearm[
+                uvdb_memory_write_state.rearm_count++];
+        rearm->address = patch->address;
+        rearm->size = patch->size;
+        rearm->temporary = uvdb_breakpoints[i].temporary != 0;
+    }
+    if(uvdb_memory_write_remove_rearm_breakpoints() < 0)
+    {
+        (void)uvdb_memory_write_restore_pending();
+        return -1;
+    }
+    return 0;
+}
+
+static int uvdb_memory_write_live(
+    uintptr_t address,
+    const char* data,
+    size_t size)
+{
+    if((size && !data) || uvdb_memory_write_has_pending() ||
+       uvdb_memory_write_storage_reserve(size) < 0)
+        return -1;
+    if(!size)
+        return 0;
+    if(uvdb_memory_write_capture_breakpoints(address, size) < 0)
+        return -2;
+
+    static const struct uvdb_memory_transaction_io io = {
+        .read = breakpoint_patch_read,
+        .write = breakpoint_patch_write,
+        .sync = breakpoint_patch_sync,
+    };
+    int result = uvdb_memory_transaction_prepare(
+        &uvdb_memory_write_state.transaction, &io, NULL,
+        address, size);
+    if(result != UVDB_MEMORY_TRANSACTION_OK)
+    {
+        if(uvdb_memory_write_rearm_breakpoints() == 0)
+            uvdb_memory_write_state.rearm_count = 0;
+        return uvdb_memory_write_has_pending() ? -2 : -1;
+    }
+
+    unsigned char* decoded =
+        uvdb_memory_write_state.storage +
+        uvdb_memory_write_state.capacity;
+    if(uvdb_rsp_decode_hex_bytes(
+           decoded, size, data, size * 2u) < 0)
+    {
+        return uvdb_memory_write_restore_pending() < 0 ? -2 : -1;
+    }
+    result = uvdb_memory_transaction_apply(
+        &uvdb_memory_write_state.transaction, &io, NULL,
+        decoded, size);
+    if(result != UVDB_MEMORY_TRANSACTION_OK)
+    {
+        if(uvdb_memory_transaction_is_pending(
+               &uvdb_memory_write_state.transaction))
+            return -2;
+        if(uvdb_memory_write_rearm_breakpoints() < 0)
+            return -2;
+        uvdb_memory_write_state.rearm_count = 0;
+        return -1;
+    }
+
+    if(uvdb_memory_write_rearm_breakpoints() < 0)
+        return uvdb_memory_write_restore_pending() < 0 ? -2 : -1;
+    if(uvdb_memory_transaction_commit(
+           &uvdb_memory_write_state.transaction) < 0)
+        return uvdb_memory_write_restore_pending() < 0 ? -2 : -1;
+    uvdb_memory_write_state.rearm_count = 0;
+    return 0;
 }
 
 static int breakpoint_restore_pending(void)
@@ -2762,12 +3097,15 @@ static void uvdb_fail_stopped_client_owned(void)
     /* Restore patched instructions while the all-stop lease is still held. */
 #ifdef UVDB_KERNEL_THREAD_CONTROL
     int breakpoints_active = breakpoint_any_active();
+    int memory_restore_pending = uvdb_memory_write_has_pending();
     int coherent_stop = 1;
     if(!__atomic_load_n(&uvdb_stop_token, __ATOMIC_SEQ_CST) ||
        __atomic_load_n(&uvdb_stop_failed, __ATOMIC_SEQ_CST))
         coherent_stop = uvdb_kernel_recover_stop() >= 0;
 
-    if(!uvdb_stop_cleanup_can_release(coherent_stop, breakpoints_active))
+    if(!uvdb_stop_cleanup_can_release(
+           coherent_stop,
+           breakpoints_active || memory_restore_pending))
     {
         /* Never deliberately resume an uncertain session while UDF patches
          * remain. Preserve the token, handlers, breakpoint table, and stopped
@@ -2780,7 +3118,9 @@ static void uvdb_fail_stopped_client_owned(void)
         return;
     }
 
-    if(coherent_stop && breakpoint_remove_all() < 0)
+    if(coherent_stop &&
+       (uvdb_memory_write_restore_pending() < 0 ||
+        breakpoint_remove_all() < 0))
     {
         /* Restoration is still uncertain. Keep the coherent stop session and
          * recovery metadata alive; releasing here could execute a partial UDF
@@ -2812,7 +3152,8 @@ static void uvdb_fail_stopped_client_owned(void)
         uvdb_kernel_abandon_stop();
     uvdb_release_stop_controller();
 #else
-    if(breakpoint_remove_all() < 0)
+    if(uvdb_memory_write_restore_pending() < 0 ||
+       breakpoint_remove_all() < 0)
     {
         uvdb_close_socket(&uvdb_socket);
         uvdb_state = UVDB_STATE_ERROR;
@@ -3742,65 +4083,21 @@ static void uvdb_main_loop(
             {
                 if(uvdb_begin_stopped_operation() < 0)
                     return;
-                uintptr_t address = (uintptr_t)request.address;
-                size_t remaining = request.size;
-                char test[64];
-                /* Validate the complete destination span before changing a
-                 * byte. With all application peers stopped, its mappings
-                 * cannot disappear between this pass and the copy pass. */
-                while(remaining)
+                int write_result = uvdb_memory_write_live(
+                    (uintptr_t)request.address,
+                    request.data,
+                    request.size);
+                if(write_result == -2)
                 {
-                    size_t chunk = remaining > sizeof(test)
-                        ? sizeof(test) : remaining;
-                    if(safe_memcpy(test, (const void*)address, chunk) !=
-                       chunk)
-                        break;
-                    address += chunk;
-                    remaining -= chunk;
+                    /* Rollback or breakpoint re-arming is still uncertain.
+                     * Keep the coherent stop and durable storage alive; the
+                     * disconnect/shutdown path will retry the obligation. */
+                    uvdb_fail_stopped_client_owned();
+                    return;
                 }
-
-                if(remaining)
-                    buffer_write(&out_buf, STRING("E0e"));
-                else
-                {
-                    address = (uintptr_t)request.address;
-                    remaining = request.size;
-                    size_t data_offset = 0;
-                    while(remaining)
-                    {
-                        size_t chunk = remaining > 64u ? 64u : remaining;
-                        char decoded[64];
-                        if(uvdb_rsp_decode_hex_bytes(
-                               decoded, chunk,
-                               request.data + data_offset * 2u,
-                               chunk * 2u) < 0)
-                        {
-                            remaining = SIZE_MAX;
-                            break;
-                        }
-                        if(kuKernelCpuUnrestrictedMemcpy(
-                               (void*)address, decoded, chunk) < 0)
-                        {
-                            remaining = SIZE_MAX;
-                            break;
-                        }
-                        kuKernelFlushCaches((void*)address, chunk);
-                        char verified[64];
-                        if(safe_memcpy(verified, (const void*)address,
-                                       chunk) != chunk ||
-                           memcmp(verified, decoded, chunk) != 0)
-                        {
-                            remaining = SIZE_MAX;
-                            break;
-                        }
-                        address += chunk;
-                        data_offset += chunk;
-                        remaining -= chunk;
-                    }
-                    buffer_write(&out_buf,
-                                 remaining ? "E0e" : "OK",
-                                 remaining ? 3u : 2u);
-                }
+                buffer_write(&out_buf,
+                             write_result < 0 ? "E0e" : "OK",
+                             write_result < 0 ? 3u : 2u);
                 uvdb_end_stopped_operation();
             }
         }
@@ -3836,8 +4133,10 @@ static void uvdb_main_loop(
         {
             if(uvdb_begin_stopped_operation() < 0)
                 return;
-            /* Code must be restored before releasing the all-stop boundary. */
-            if(breakpoint_remove_all() < 0)
+            /* All mutation obligations must be restored before releasing the
+             * all-stop boundary. */
+            if(uvdb_memory_write_restore_pending() < 0 ||
+               breakpoint_remove_all() < 0)
             {
                 uvdb_fail_stopped_client_owned();
                 return;
@@ -3931,11 +4230,10 @@ static void uvdb_main_loop(
             }
             if(transition.action == UVDB_FILEIO_ACTION_FAIL_CLOSED)
             {
-                /* uvdb_remote_syscall has only a zero-initialized synthetic
-                 * register context and has not published an all-stop. A fake
-                 * T02 would let GDB inspect or mutate running peers through
-                 * invalid registers. Consume the reply, sever this protocol
-                 * generation, and return failure without claiming a stop. */
+                /* The library-only path now has a real saved context, but no
+                 * kernel stop token coherently holds peer threads. A T02 would
+                 * still expose a false all-stop. Consume the reply, sever this
+                 * protocol generation, and return failure instead. */
                 if(out_buf.size)
                     out_buf.size--;
                 discard_packet(pkt, sz);
@@ -4052,6 +4350,48 @@ packet_complete:
 #undef STARTSWITH
 #undef IS
 
+static void uvdb_remote_syscall_stopped(
+    KuKernelExceptionContext* ctx,
+    struct uvdb_remote_syscall_request* request)
+{
+    request->result = -1;
+    char* packet = NULL;
+    size_t packet_size = recv_packet(&packet);
+    if(uvdb_has_io_failure() || packet_size != 1u || !packet ||
+       packet[0] != '?')
+        goto done;
+    discard_packet(packet, packet_size);
+    buffer_start_packet(&out_buf);
+    buffer_write(&out_buf, "F", 1);
+    buffer_write(&out_buf, request->name, strlen(request->name));
+    for(int argument = 0;
+        argument < request->argument_count;
+        ++argument)
+    {
+        uintptr_t value = request->arguments[argument];
+        char encoded[9] = ",";
+        for(int nibble = 0; nibble < 8; ++nibble)
+            encoded[8 - nibble] =
+                int2hex((value >> (4 * nibble)) & 15);
+        buffer_write(&out_buf, encoded, sizeof(encoded));
+    }
+    if(send_packet() < 0)
+        goto done;
+    uvdb_main_loop(
+        ctx, SIGTRAP,
+#if defined(UVDB_KERNEL_THREAD_CONTROL) || \
+    defined(UVDB_HOST_COHERENT_ALL_STOP_TEST)
+        UVDB_FILEIO_CONTEXT_REAL_STOP
+#else
+        UVDB_FILEIO_CONTEXT_UNSTOPPED
+#endif
+    );
+    if(!uvdb_has_io_failure())
+        request->result = (int)ctx->r0;
+done:
+    __atomic_store_n(&request->completed, 1, __ATOMIC_RELEASE);
+}
+
 #ifndef UVDB_HOST_INTEGRATION_TEST
 static __attribute__((naked)) void uvdb_trap_pc(void)
 {
@@ -4106,14 +4446,17 @@ static int uvdb_chain_previous_exception_handler(
 {
     if(!ctx || ctx->exceptionType >= UVDB_EXCEPTION_GUARD_TYPE_COUNT)
         return 0;
+    const uint32_t exception_type = ctx->exceptionType;
     KuKernelExceptionHandler previous = (KuKernelExceptionHandler)
         uvdb_exception_handlers_previous(&uvdb_handlers,
-                                          ctx->exceptionType);
+                                          exception_type);
     if(!previous || previous == exception_handler ||
-       uvdb_exception_guard_begin_chain(&uvdb_exception_guard) != 1)
+       uvdb_exception_guard_begin_chain(
+           &uvdb_exception_guard, exception_type) != 1)
         return 0;
     previous(ctx);
-    uvdb_exception_guard_end_chain(&uvdb_exception_guard);
+    uvdb_exception_guard_end_chain(
+        &uvdb_exception_guard, exception_type);
     return 1;
 }
 
@@ -4364,8 +4707,15 @@ static void exception_handler(KuKernelExceptionContext* ctx)
      * buffer. Let the common query path emit the sole stop reply, including
      * for an asynchronous Ctrl-C. Sending here as well would produce two T02
      * packets and leave a stale stop notification in a no-ack GDB session. */
-    uvdb_main_loop(ctx, reported_signal,
-                   UVDB_FILEIO_CONTEXT_REAL_STOP);
+    struct uvdb_remote_syscall_request* syscall_request =
+        __atomic_load_n(&uvdb_remote_syscall_pending, __ATOMIC_ACQUIRE);
+    if(syscall_request &&
+       syscall_request->owner == exception_thread &&
+       synthetic_trap)
+        uvdb_remote_syscall_stopped(ctx, syscall_request);
+    else
+        uvdb_main_loop(ctx, reported_signal,
+                       UVDB_FILEIO_CONTEXT_REAL_STOP);
     uvdb_unlock();
 exception_done:
     (void)uvdb_protocol_gate_release(
@@ -4376,57 +4726,56 @@ exception_done:
 
 int uvdb_remote_syscall(const char* name, int nargs, ...)
 {
-    KuKernelExceptionContext ctx = {};
-    if(!name || nargs < 0)
+    if(!name || !name[0] || nargs < 0 ||
+       nargs > UVDB_REMOTE_SYSCALL_MAX_ARGS)
         return -1;
+
+    struct uvdb_remote_syscall_request request = {
+        .name = name,
+        .argument_count = nargs,
+        .owner = sceKernelGetThreadId(),
+        .result = -1,
+    };
+    va_list va;
+    va_start(va, nargs);
+    for(int argument = 0; argument < nargs; ++argument)
+        request.arguments[argument] = va_arg(va, uintptr_t);
+    va_end(va);
+
     uvdb_lock();
     if(uvdb_socket < 0)
     {
-        //someone attempted to do a remote syscall before the first uvdb_enter
-        //do a uvdb_enter now to avoid confusing the code
         uvdb_unlock();
         uvdb_enter();
         uvdb_lock();
     }
-    const uint32_t protocol_owner = uvdb_protocol_owner_for_thread(
-        sceKernelGetThreadId());
-    if(uvdb_protocol_gate_try_acquire(
-           &uvdb_protocol_gate, protocol_owner) !=
-       UVDB_PROTOCOL_GATE_ACQUIRED)
+    if(uvdb_socket < 0 || uvdb_has_io_failure() ||
+       __atomic_load_n(&uvdb_target_stopped, __ATOMIC_ACQUIRE))
     {
         uvdb_unlock();
         return -1;
     }
-    int syscall_result = -1;
-    char* pkt;
-    size_t sz = recv_packet(&pkt);
-    if(uvdb_has_io_failure())
-        goto syscall_done;
-    discard_packet(pkt, sz);
-    buffer_start_packet(&out_buf);
-    buffer_write(&out_buf, "F", 1);
-    buffer_write(&out_buf, name, strlen(name));
-    va_list va;
-    va_start(va, nargs);
-    for(int i = 0; i < nargs; i++)
+    struct uvdb_remote_syscall_request* expected = NULL;
+    if(!__atomic_compare_exchange_n(
+           &uvdb_remote_syscall_pending, &expected, &request, 0,
+           __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
     {
-        uintptr_t value = va_arg(va, uintptr_t);
-        char packet[9] = ",";
-        for(int i = 0; i < 8; i++)
-            packet[8-i] = int2hex((value >> (4*i)) & 15);
-        buffer_write(&out_buf, packet, 9);
+        uvdb_unlock();
+        return -1;
     }
-    va_end(va);
-    if(send_packet() < 0)
-        goto syscall_done;
-    uvdb_main_loop(&ctx, 0, UVDB_FILEIO_CONTEXT_UNSTOPPED);
-    if(!uvdb_has_io_failure())
-        syscall_result = (int)ctx.r0;
-syscall_done:
-    (void)uvdb_protocol_gate_release(
-        &uvdb_protocol_gate, protocol_owner);
     uvdb_unlock();
-    return syscall_result;
+
+    /* Enter through the ordinary synthetic trap. The exception handler owns
+     * the real saved context and establishes the same coherent all-stop as any
+     * other debugger stop before it sends the File-I/O request. */
+    uvdb_enter();
+
+    expected = &request;
+    (void)__atomic_compare_exchange_n(
+        &uvdb_remote_syscall_pending, &expected, NULL, 0,
+        __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
+    return __atomic_load_n(&request.completed, __ATOMIC_ACQUIRE)
+        ? request.result : -1;
 }
 
 static __attribute__((used)) uint64_t real_uvdb_enter(uintptr_t lr)

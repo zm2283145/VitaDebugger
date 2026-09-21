@@ -26,7 +26,7 @@ struct uvdb_exception_guard {
      * admitted handler, including nested handlers while in a predecessor. */
     volatile uint32_t lifecycle;
     volatile uint32_t owner;
-    volatile uint32_t chaining;
+    volatile uint32_t chaining_mask;
     volatile uint32_t primary_entries;
     volatile uint32_t nested_entries;
     volatile uint32_t chained_entries;
@@ -44,10 +44,15 @@ int uvdb_exception_guard_enter(
     struct uvdb_exception_guard* guard,
     uint32_t exception_type);
 
-/* Serialize prior-handler invocation. This prevents a fault raised by the
- * chained handler from recursively chaining it forever. */
-int uvdb_exception_guard_begin_chain(struct uvdb_exception_guard* guard);
-void uvdb_exception_guard_end_chain(struct uvdb_exception_guard* guard);
+/* Claim the exact predecessor type once. Different predecessor types can run
+ * concurrently, while a recursive cycle is bounded when it reaches a type
+ * already present in the chain. */
+int uvdb_exception_guard_begin_chain(
+    struct uvdb_exception_guard* guard,
+    uint32_t exception_type);
+void uvdb_exception_guard_end_chain(
+    struct uvdb_exception_guard* guard,
+    uint32_t exception_type);
 void uvdb_exception_guard_note_unhandled(
     struct uvdb_exception_guard* guard);
 

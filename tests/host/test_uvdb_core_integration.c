@@ -6,6 +6,7 @@
 #include <unistd.h>
 
 #define UVDB_HOST_INTEGRATION_TEST 1
+#define UVDB_HOST_COHERENT_ALL_STOP_TEST 1
 #include "../../src/uvdb.c"
 
 enum {
@@ -23,7 +24,7 @@ static size_t fake_transmit_size;
 static int fake_framed_send_while_borrowed;
 static _Thread_local SceUID fake_thread = FAKE_THREAD;
 static unsigned char fake_target_memory[256];
-static unsigned char fake_pipe_data[64];
+static unsigned char fake_pipe_data[4096];
 static size_t fake_pipe_size;
 static unsigned int fake_delay_calls;
 static int fake_release_guard_on_delay;
@@ -73,6 +74,9 @@ static int fake_stress_gate_violation;
 static int fake_stress_protocol_entries;
 static int fake_stress_fault_entries;
 static int fake_stress_console_attempts;
+static int fake_ku_copy_calls;
+static int fake_ku_copy_fail_call;
+static int fake_ku_copy_fail_from;
 
 char __executable_start[1];
 
@@ -90,6 +94,13 @@ static void fake_predecessor(KuKernelExceptionContext* context)
     ++fake_predecessor_calls;
     if(context)
         fake_predecessor_context = *context;
+}
+
+static void fake_mutating_predecessor(KuKernelExceptionContext* context)
+{
+    fake_predecessor(context);
+    if(context)
+        context->exceptionType = KU_KERNEL_EXCEPTION_TYPE_DATA_ABORT;
 }
 
 static void reset_core(void)
@@ -155,7 +166,13 @@ static void reset_core(void)
     fake_stress_protocol_entries = 0;
     fake_stress_fault_entries = 0;
     fake_stress_console_attempts = 0;
+    fake_ku_copy_calls = 0;
+    fake_ku_copy_fail_call = 0;
+    fake_ku_copy_fail_from = 0;
     memset(&fake_predecessor_context, 0, sizeof(fake_predecessor_context));
+    __atomic_store_n(&uvdb_remote_syscall_pending, NULL, __ATOMIC_RELEASE);
+    if(!uvdb_memory_write_has_pending())
+        uvdb_memory_write_storage_release();
 
     in_buf = (struct buffer){
         .memblock_uid = -1,
@@ -183,6 +200,8 @@ static void reset_core(void)
     __atomic_store_n(&uvdb_network_closing, 0, __ATOMIC_RELEASE);
     __atomic_store_n(&uvdb_server_stop, 0, __ATOMIC_RELEASE);
     __atomic_store_n(&uvdb_shutdown_pending, 0, __ATOMIC_RELEASE);
+    __atomic_store_n(&uvdb_terminal_shutdown_complete, 0,
+                     __ATOMIC_RELEASE);
     __atomic_store_n(&uvdb_target_stopped, 1, __ATOMIC_RELEASE);
     uvdb_state = UVDB_STATE_CONNECTED;
     uvdb_rsp_request_lifetime_init(&uvdb_request_lifetime);
@@ -412,6 +431,256 @@ static void test_exception_lock_contention_handoff(void)
     check(uvdb_protocol_gate_release(
               &uvdb_protocol_gate, other_owner) == 0,
           "contended protocol owner remains intact for its real owner");
+}
+
+static void test_nested_exception_exact_predecessor(void)
+{
+    reset_core();
+    uvdb_handlers.self = (uvdb_exception_handler_token)(uintptr_t)
+        exception_handler;
+    uvdb_handlers.previous[KU_KERNEL_EXCEPTION_TYPE_PREFETCH_ABORT] =
+        (uvdb_exception_handler_token)(uintptr_t)fake_predecessor;
+    int primary = uvdb_exception_guard_enter(
+        &uvdb_exception_guard, KU_KERNEL_EXCEPTION_TYPE_DATA_ABORT);
+    KuKernelExceptionContext context = {
+        .pc = UINT32_C(0x81002000),
+        .exceptionType = KU_KERNEL_EXCEPTION_TYPE_PREFETCH_ABORT,
+    };
+    exception_handler(&context);
+    check(fake_predecessor_calls == 1 &&
+              fake_predecessor_context.exceptionType ==
+                  KU_KERNEL_EXCEPTION_TYPE_PREFETCH_ABORT,
+          "nested fault chains the exact per-type predecessor once");
+    check(uvdb_exception_guard_leave(
+              &uvdb_exception_guard,
+              KU_KERNEL_EXCEPTION_TYPE_DATA_ABORT, primary) == 0 &&
+          uvdb_exception_guard_is_idle(&uvdb_exception_guard),
+          "nested predecessor and primary lifetimes both retire");
+
+    reset_core();
+    uvdb_handlers.self = (uvdb_exception_handler_token)(uintptr_t)
+        exception_handler;
+    uvdb_handlers.previous[KU_KERNEL_EXCEPTION_TYPE_PREFETCH_ABORT] =
+        (uvdb_exception_handler_token)(uintptr_t)fake_mutating_predecessor;
+    primary = uvdb_exception_guard_enter(
+        &uvdb_exception_guard, KU_KERNEL_EXCEPTION_TYPE_DATA_ABORT);
+    context.exceptionType = KU_KERNEL_EXCEPTION_TYPE_PREFETCH_ABORT;
+    exception_handler(&context);
+    check(uvdb_exception_guard_leave(
+              &uvdb_exception_guard,
+              KU_KERNEL_EXCEPTION_TYPE_DATA_ABORT, primary) == 0 &&
+          uvdb_exception_guard_is_idle(&uvdb_exception_guard),
+          "predecessor context mutation cannot release a different chain bit");
+
+    reset_core();
+    primary = uvdb_exception_guard_enter(
+        &uvdb_exception_guard, KU_KERNEL_EXCEPTION_TYPE_DATA_ABORT);
+    context.exceptionType = KU_KERNEL_EXCEPTION_TYPE_PREFETCH_ABORT;
+    exception_handler(&context);
+    struct uvdb_exception_guard_stats stats;
+    check(uvdb_exception_guard_get_stats(
+              &uvdb_exception_guard, &stats) == 0 &&
+          stats.unhandled_nested_entries == 1 &&
+          fake_predecessor_calls == 0,
+          "NULL predecessor is surfaced as unhandled, not false containment");
+    check(uvdb_exception_guard_leave(
+              &uvdb_exception_guard,
+              KU_KERNEL_EXCEPTION_TYPE_DATA_ABORT, primary) == 0,
+          "NULL-predecessor fixture retires without hiding fatal limitation");
+}
+
+static void test_live_memory_transaction(void)
+{
+    unsigned char target[192];
+    unsigned char original[128];
+    char encoded[128 * 2];
+    for(size_t i = 0; i < sizeof(target); ++i)
+        target[i] = (unsigned char)i;
+    memcpy(original, target + 32, sizeof(original));
+    for(size_t i = 0; i < sizeof(original); ++i)
+    {
+        encoded[i * 2u] = int2hex(0xa);
+        encoded[i * 2u + 1u] = int2hex(0x5);
+    }
+
+    reset_core();
+    check(breakpoint_insert_internal(
+              (uintptr_t)(target + 80), 2u, 0) == 0,
+          "install breakpoint overlapping live M write");
+    check(uvdb_memory_write_live(
+              (uintptr_t)(target + 32), encoded,
+              sizeof(original)) == 0 &&
+          !uvdb_memory_write_has_pending(),
+          "multi-chunk live M commits after breakpoint rearm");
+    struct uvdb_breakpoint* breakpoint =
+        breakpoint_find((uintptr_t)(target + 80));
+    check(breakpoint &&
+              breakpoint->patch.state == UVDB_BREAKPOINT_PATCH_INSTALLED &&
+              breakpoint->patch.original[0] == 0xa5 &&
+              breakpoint->patch.original[1] == 0xa5,
+          "overlapping breakpoint records newly written original bytes");
+    check(target[32] == 0xa5 && target[159] == 0xa5,
+          "live M changes the complete requested span");
+    check(breakpoint_remove((uintptr_t)(target + 80)) == 0 &&
+              target[80] == 0xa5 && target[81] == 0xa5,
+          "later breakpoint removal preserves committed M bytes");
+
+    for(size_t i = 0; i < sizeof(target); ++i)
+        target[i] = (unsigned char)i;
+    memcpy(original, target + 32, sizeof(original));
+    reset_core();
+    check(breakpoint_insert_internal(
+              (uintptr_t)(target + 80), 2u, 0) == 0,
+          "install transient-failure overlap fixture");
+    fake_ku_copy_calls = 0;
+    fake_ku_copy_fail_call = 4;
+    check(uvdb_memory_write_live(
+              (uintptr_t)(target + 32), encoded,
+              sizeof(original)) < 0 &&
+          !uvdb_memory_write_has_pending() &&
+          breakpoint_find((uintptr_t)(target + 80)) != NULL &&
+          breakpoint_remove((uintptr_t)(target + 80)) == 0 &&
+          memcmp(target + 32, original, sizeof(original)) == 0,
+          "partial live M failure rolls back and re-arms breakpoint");
+
+    for(size_t i = 0; i < sizeof(target); ++i)
+        target[i] = (unsigned char)i;
+    memcpy(original, target + 32, sizeof(original));
+    reset_core();
+    fake_ku_copy_fail_from = 2;
+    check(uvdb_memory_write_live(
+              (uintptr_t)(target + 32), encoded,
+              sizeof(original)) == -2 &&
+          uvdb_memory_write_has_pending(),
+          "persistent copy failure retains live rollback obligation");
+    fake_ku_copy_fail_from = 0;
+    check(uvdb_memory_write_restore_pending() == 0 &&
+              !uvdb_memory_write_has_pending() &&
+              memcmp(target + 32, original, sizeof(original)) == 0,
+          "disconnect or shutdown retry restores durable live M bytes");
+}
+
+static void test_remote_fileio_interrupt_uses_real_stop(void)
+{
+    reset_core();
+    __atomic_store_n(&uvdb_target_stopped, 0, __ATOMIC_RELEASE);
+    queue_receive("$?#3f+$F-1,4,C#73+$c#63");
+    struct uvdb_remote_syscall_request request = {
+        .name = "write",
+        .argument_count = 1,
+        .arguments = {1},
+        .owner = FAKE_THREAD,
+        .result = -1,
+    };
+    __atomic_store_n(&uvdb_remote_syscall_pending, &request,
+                     __ATOMIC_RELEASE);
+    KuKernelExceptionContext context = {
+        .r0 = UINT32_C(0x81001234),
+        .pc = UINT32_C(0x7f00d00d),
+        .exceptionType = KU_KERNEL_EXCEPTION_TYPE_UNDEFINED_INSTRUCTION,
+    };
+    exception_handler(&context);
+    check(__atomic_load_n(&request.completed, __ATOMIC_ACQUIRE) &&
+              request.result == -1 &&
+              !__atomic_load_n(&uvdb_target_stopped, __ATOMIC_ACQUIRE),
+          "remote File-I/O Ctrl-C resumes only after real stopped loop");
+
+    int saw_fileio = 0;
+    int saw_sigint = 0;
+    size_t offset = 0;
+    while(offset < fake_transmit_size)
+    {
+        if(fake_transmit[offset] == '+')
+        {
+            ++offset;
+            continue;
+        }
+
+        struct uvdb_rsp_frame frame = {0};
+        int scan = uvdb_rsp_scan_frame(
+            fake_transmit + offset, fake_transmit_size - offset,
+            sizeof(fake_transmit), &frame);
+        if(scan != UVDB_RSP_FRAME_COMPLETE)
+            break;
+        const unsigned char* payload =
+            fake_transmit + offset + frame.payload_offset;
+        if(frame.payload_size >= 6u &&
+           !memcmp(payload, "Fwrite", 6u))
+            saw_fileio++;
+        if(frame.payload_size >= 3u &&
+           !memcmp(payload, "T02", 3u))
+            saw_sigint++;
+        offset += frame.consumed_size;
+    }
+    check(saw_fileio == 1 && saw_sigint == 1,
+          "real saved context emits one File-I/O request and one T02");
+    __atomic_store_n(&uvdb_remote_syscall_pending, NULL,
+                     __ATOMIC_RELEASE);
+}
+
+static void test_stop_retries_memory_and_breakpoint_cleanup(void)
+{
+    unsigned char target[192];
+    unsigned char original[128];
+    char encoded[128 * 2];
+    for(size_t i = 0; i < sizeof(target); ++i)
+        target[i] = (unsigned char)i;
+    memcpy(original, target + 32, sizeof(original));
+    memset(encoded, 'a', sizeof(encoded));
+
+    reset_core();
+    uvdb_server_thread = -1;
+    check(breakpoint_insert_internal(
+              (uintptr_t)(target + 80), 2u, 0) == 0,
+          "install stop-retry overlap fixture");
+    fake_ku_copy_fail_from = 3;
+    check(uvdb_memory_write_live(
+              (uintptr_t)(target + 32), encoded,
+              sizeof(original)) == -2 &&
+          uvdb_memory_write_has_pending(),
+          "stop-retry fixture retains memory obligation");
+    check(uvdb_stop_server() < 0 &&
+              uvdb_memory_write_has_pending() &&
+              uvdb_state == UVDB_STATE_ERROR,
+          "failed stop retry retains transaction and stopped state");
+    fake_ku_copy_fail_from = 0;
+    check(uvdb_stop_server() == 0 &&
+              !uvdb_memory_write_has_pending() &&
+              breakpoint_active_count() == 0 &&
+              !__atomic_load_n(&uvdb_target_stopped, __ATOMIC_ACQUIRE) &&
+              memcmp(target + 32, original, sizeof(original)) == 0,
+          "later stop retry restores memory, removes rearmed breakpoint, and resumes");
+}
+
+static void test_shutdown_retries_memory_cleanup(void)
+{
+    unsigned char target[128];
+    unsigned char original[96];
+    char encoded[96 * 2];
+    for(size_t i = 0; i < sizeof(target); ++i)
+        target[i] = (unsigned char)(0x80u + i);
+    memcpy(original, target + 16, sizeof(original));
+    memset(encoded, '5', sizeof(encoded));
+
+    reset_core();
+    uvdb_server_thread = -1;
+    fake_ku_copy_fail_from = 2;
+    check(uvdb_memory_write_live(
+              (uintptr_t)(target + 16), encoded,
+              sizeof(original)) == -2,
+          "shutdown-retry fixture retains partial write");
+    uvdb_shutdown();
+    check(uvdb_memory_write_has_pending() &&
+              !__atomic_load_n(&uvdb_terminal_shutdown_complete,
+                               __ATOMIC_ACQUIRE),
+          "failed terminal shutdown preserves rollback storage");
+    fake_ku_copy_fail_from = 0;
+    uvdb_shutdown();
+    check(!uvdb_memory_write_has_pending() &&
+              __atomic_load_n(&uvdb_terminal_shutdown_complete,
+                              __ATOMIC_ACQUIRE) &&
+              memcmp(target + 16, original, sizeof(original)) == 0,
+          "later terminal shutdown restores bytes before releasing storage");
 }
 
 static void test_stop_start_exception_quiescence(void)
@@ -1145,11 +1414,32 @@ static void test_deterministic_multithread_lifecycle_stress(void)
           "stress preserves exclusive ownership and drains fault/console work");
 }
 
+static void test_unload_fails_without_kernel_callback_fence(void)
+{
+    reset_core();
+    uvdb_handlers.self = (uvdb_exception_handler_token)(uintptr_t)
+        exception_handler;
+    uvdb_handlers.ever_published_mask =
+        (UINT32_C(1) << UVDB_EXCEPTION_HANDLER_TYPE_COUNT) - 1u;
+    __atomic_store_n(&uvdb_shutdown_pending, 1, __ATOMIC_RELEASE);
+    __atomic_store_n(&uvdb_terminal_shutdown_complete, 1,
+                     __ATOMIC_RELEASE);
+    check(uvdb_prepare_unload() < 0 &&
+              uvdb_handlers.ever_published_mask != 0 &&
+              uvdb_handlers.self != 0,
+          "production unload fails closed without KuBridge callback fence");
+}
+
 int main(void)
 {
     test_real_status_query_ordering();
     test_real_corrupt_frame_recovery();
     test_exception_lock_contention_handoff();
+    test_nested_exception_exact_predecessor();
+    test_live_memory_transaction();
+    test_remote_fileio_interrupt_uses_real_stop();
+    test_stop_retries_memory_and_breakpoint_cleanup();
+    test_shutdown_retries_memory_cleanup();
     test_stop_start_exception_quiescence();
     test_shutdown_does_not_synthesize_trap();
     test_server_join_timeout_is_bounded_and_retryable();
@@ -1164,6 +1454,7 @@ int main(void)
     test_raw_console_eagain_is_retryable();
     test_connected_hup_during_shutdown();
     test_deterministic_multithread_lifecycle_stress();
+    test_unload_fails_without_kernel_callback_fence();
     if(failures)
         return 1;
     puts("PASS: integrated uvdb.c protocol, exception, and lifecycle ordering");
@@ -1466,6 +1757,11 @@ int sceNetEpollDestroy(int epoll) { (void)epoll; return 0; }
 int kuKernelCpuUnrestrictedMemcpy(
     void* destination, const void* source, size_t size)
 {
+    ++fake_ku_copy_calls;
+    if(fake_ku_copy_calls == fake_ku_copy_fail_call ||
+       (fake_ku_copy_fail_from &&
+        fake_ku_copy_calls >= fake_ku_copy_fail_from))
+        return -1;
     uintptr_t address = (uintptr_t)destination;
     if(size <= sizeof(fake_target_memory) &&
        address >= UINT32_C(0x1000) &&
@@ -1500,15 +1796,16 @@ int _sceKernelSendMsgPipeVector(
        pairs[0].length > sizeof(fake_pipe_data))
         return -1;
     uintptr_t address = (uintptr_t)pairs[0].addr;
-    if(pairs[0].length > sizeof(fake_target_memory) ||
-       address < UINT32_C(0x1000) ||
-       address - UINT32_C(0x1000) >
-           sizeof(fake_target_memory) - pairs[0].length)
-        return -1;
     fake_pipe_size = pairs[0].length;
-    memcpy(fake_pipe_data,
-           fake_target_memory + address - UINT32_C(0x1000),
-           fake_pipe_size);
+    if(pairs[0].length <= sizeof(fake_target_memory) &&
+       address >= UINT32_C(0x1000) &&
+       address - UINT32_C(0x1000) <=
+           sizeof(fake_target_memory) - pairs[0].length)
+        memcpy(fake_pipe_data,
+               fake_target_memory + address - UINT32_C(0x1000),
+               fake_pipe_size);
+    else
+        memcpy(fake_pipe_data, (const void*)address, fake_pipe_size);
     *(size_t*)(uintptr_t)rest[1] = fake_pipe_size;
     return 0;
 }
@@ -1519,8 +1816,15 @@ int _sceKernelReceiveMsgPipeVector(
     if(uid < 0 || !pairs || count != 1u || !rest ||
        pairs[0].length > fake_pipe_size)
         return -1;
-    memcpy((void*)(uintptr_t)pairs[0].addr,
-           fake_pipe_data, pairs[0].length);
+    uintptr_t address = (uintptr_t)pairs[0].addr;
+    if(pairs[0].length <= sizeof(fake_target_memory) &&
+       address >= UINT32_C(0x1000) &&
+       address - UINT32_C(0x1000) <=
+           sizeof(fake_target_memory) - pairs[0].length)
+        memcpy(fake_target_memory + address - UINT32_C(0x1000),
+               fake_pipe_data, pairs[0].length);
+    else
+        memcpy((void*)address, fake_pipe_data, pairs[0].length);
     memmove(fake_pipe_data, fake_pipe_data + pairs[0].length,
             fake_pipe_size - pairs[0].length);
     fake_pipe_size -= pairs[0].length;

@@ -39,11 +39,14 @@ static void test_basic_policy(void)
     check(nested == UVDB_EXCEPTION_GUARD_NESTED,
           "nested fault does not spin on debugger ownership");
 
-    check(uvdb_exception_guard_begin_chain(&guard) == 1,
+    check(uvdb_exception_guard_begin_chain(&guard, 0) == 1,
           "first predecessor invocation owns chain gate");
-    check(uvdb_exception_guard_begin_chain(&guard) == 0,
-          "fault in predecessor cannot recursively chain");
-    uvdb_exception_guard_end_chain(&guard);
+    check(uvdb_exception_guard_begin_chain(&guard, 1) == 1,
+          "distinct predecessor type can chain concurrently");
+    check(uvdb_exception_guard_begin_chain(&guard, 0) == 0,
+          "fault cycle cannot recursively chain the same predecessor");
+    uvdb_exception_guard_end_chain(&guard, 1);
+    uvdb_exception_guard_end_chain(&guard, 0);
     uvdb_exception_guard_note_unhandled(&guard);
 
     check(uvdb_exception_guard_leave(&guard, 0, nested) == 0,
@@ -66,7 +69,7 @@ static void test_basic_policy(void)
     struct uvdb_exception_guard_stats stats;
     check(uvdb_exception_guard_get_stats(&guard, &stats) == 0 &&
           stats.primary_entries == 2 && stats.nested_entries == 1 &&
-          stats.chained_entries == 1 &&
+          stats.chained_entries == 2 &&
           stats.unhandled_nested_entries == 1 &&
           stats.closed_entries == 0 && stats.active_handlers == 0 &&
           stats.closing == 0,
@@ -108,12 +111,12 @@ static void* nested_predecessor_main(void* opaque)
     fixture->nested_enter =
         uvdb_exception_guard_enter(&fixture->guard, 1);
     fixture->nested_chain =
-        uvdb_exception_guard_begin_chain(&fixture->guard);
+        uvdb_exception_guard_begin_chain(&fixture->guard, 1);
     __atomic_store_n(&fixture->predecessor_active, 1u,
                      __ATOMIC_RELEASE);
     (void)wait_flag(&fixture->release_predecessor);
     if(fixture->nested_chain == 1)
-        uvdb_exception_guard_end_chain(&fixture->guard);
+        uvdb_exception_guard_end_chain(&fixture->guard, 1);
     fixture->nested_leave = uvdb_exception_guard_leave(
         &fixture->guard, 1, fixture->nested_enter);
     __atomic_store_n(&fixture->nested_done, 1u, __ATOMIC_RELEASE);
@@ -158,7 +161,8 @@ static void test_shutdown_interleaving(void)
               stats.active_handlers == 1,
           "nested predecessor lifetime remains after primary return");
     check(!uvdb_exception_guard_is_idle(&fixture.guard) &&
-              uvdb_exception_guard_begin_chain(&fixture.guard) == 0,
+              uvdb_exception_guard_begin_chain(
+                  &fixture.guard, 1) == 0,
           "primary leave neither reports idle nor clears peer chain owner");
     check(uvdb_exception_guard_reopen(&fixture.guard) < 0,
           "closed guard cannot reopen around active predecessor");

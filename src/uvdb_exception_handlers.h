@@ -16,6 +16,10 @@ struct uvdb_exception_handler_backend {
                    uvdb_exception_handler_token replacement,
                    uvdb_exception_handler_token* previous);
     int (*release)(void* context, uint32_t exception_type);
+    /* Optional ABI fence. Success must guarantee that no callback which
+     * observed any pre-fence slot value can enter after this call returns.
+     * Slot replacement and a user-space active count are not such a fence. */
+    int (*fence)(void* context);
 };
 
 struct uvdb_exception_handlers {
@@ -28,6 +32,7 @@ struct uvdb_exception_handlers {
      * current KuBridge ABI has no dispatcher fence with which to prove that a
      * copied callback cannot arrive late. */
     uint32_t ever_published_mask;
+    uint32_t fence_complete;
 };
 
 /* `handlers` must initially be zero-initialized. Reinitialization is rejected
@@ -56,6 +61,18 @@ int uvdb_exception_handlers_restore(
     struct uvdb_exception_handlers* handlers,
     const struct uvdb_exception_handler_backend* backend,
     void* context);
+
+/* Fence first, then let the caller drain callbacks which may have entered
+ * during the fence. Missing or failed support retains the generation. */
+int uvdb_exception_handlers_fence(
+    struct uvdb_exception_handlers* handlers,
+    const struct uvdb_exception_handler_backend* backend,
+    void* context);
+
+/* Call only after a successful fence and a subsequent user-side active
+ * callback drain. */
+int uvdb_exception_handlers_reset_after_fence(
+    struct uvdb_exception_handlers* handlers);
 
 uvdb_exception_handler_token uvdb_exception_handlers_previous(
     const struct uvdb_exception_handlers* handlers,

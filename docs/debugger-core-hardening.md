@@ -25,20 +25,20 @@ exception-return, or socket-cancellation behavior.
   File-I/O recognizes
   the standard literal `C` interrupt field and exposes an optional semicolon
   attachment only as a bounded view of the packet.
-- `m` preflights the complete source span before emitting data. `M` preflights
-  the complete destination, validates all source hex, checks every KuBridge
-  copy result, flushes caches, and verifies each written chunk. It never
-  reports `OK` after a failed or short copy.
-
-An arbitrary multi-chunk live `M` write is **not yet rollback-atomic**. A late
-KuBridge copy or read-back failure can occur after an earlier chunk changed
-memory. `uvdb_memory_write_transaction` demonstrates the required full-span
-snapshot, write, verify, rollback, and retained-restoration result contract
-with a fake kernel; it is foundation-only and is not called by `uvdb.c` yet.
-Wiring that helper into live RSP requires durable caller-owned storage
-for the entire original span and a shutdown/reconnect path that retains and
-retries any failed restoration. Until then, callers must treat an `E0e` from
-`M` as a potentially partial target mutation.
+- `m` preflights the complete source span before emitting data. Live `M`
+  validates all source hex, snapshots the complete destination into a
+  debugger-owned memblock, publishes the rollback obligation, copies in
+  bounded chunks, flushes caches, and verifies the complete result. A failed
+  chunk or readback immediately attempts exact rollback. If that rollback
+  cannot be verified, the transaction metadata and original bytes remain
+  allocated across disconnect, server stop, terminal shutdown, and retry;
+  the stopped cleanup path cannot report success while they remain pending.
+- An `M` range overlapping an installed software breakpoint first records and
+  removes that breakpoint under the same stopped-operation ownership. Commit
+  re-arms it over the new bytes so its later removal exposes the write. Failure
+  removes any partially re-armed patch, restores the full memory snapshot, and
+  re-arms the old breakpoint. Either restoration obligation remains durable
+  and prevents resume/clean shutdown when verification is uncertain.
 
 Response retransmission after a peer NACK is intentionally unsupported at
 present. Such a NACK closes the operation rather than accepting an ambiguous
@@ -177,11 +177,14 @@ restoring a captured NULL/default slot cannot be independently verified by the
 current ABI. Both limitations require hardware/ABI validation.
 
 The exception guard prevents a nested or simultaneous exception from spinning
-on the global debugger lock. One distinct captured predecessor can be chained
-at most once at a time, and a predecessor equal to VitaDebugger's own handler
-is never recursively invoked. Every entered callback owns an active lifetime,
-including a nested callback blocked inside its predecessor and a callback that
-arrives after close. Primary return no longer clears a chain owned by a peer.
+on the global debugger lock. Chaining is keyed by exception type: independent
+data, prefetch, and undefined-instruction predecessors may run concurrently,
+while revisiting a type already in the chain bounds recursive cycles. Each
+callback looks up only the predecessor captured for its exact type, and a
+predecessor equal to VitaDebugger's own handler is never invoked. Every
+entered callback owns an active lifetime, including a nested callback blocked
+inside its predecessor and a callback that arrives after close. Primary return
+does not clear any chain owned by a peer.
 
 The global state lock now publishes the normalized owning thread ID rather than
 a Boolean. After claiming the protocol gate, a primary exception makes exactly
@@ -205,10 +208,18 @@ must use `uvdb_stop_server()`/`uvdb_start_server()` for nonterminal reconnects.
 This still does **not** prove dispatcher quiescence. KuBridge copies the current
 handler pointer under its kernel spin lock and invokes it later in user mode,
 but exposes no fence for a pointer copied before slot restoration and not yet
-entered. For that reason, terminal shutdown does not authorize unloading an
-injected debugger `.suprx`, resetting the handler gate, or discarding captured
-predecessors. Safe dynamic unload remains blocked on a KuBridge/kernel callback
-lifetime ABI (or a process-terminal policy).
+entered. VitaDebugger defines the missing side of that contract:
+`uvdb_exception_handlers_fence()` requires all slots to be restored, then
+requires a backend guarantee that no callback observing a pre-fence slot value
+can enter after the fence returns. The caller must subsequently drain callbacks
+which entered during the fence before
+`uvdb_exception_handlers_reset_after_fence()` may erase predecessor tokens and
+create a new generation. Public `uvdb_prepare_unload()` additionally requires
+completed terminal shutdown. The production backend deliberately supplies no
+fence callback, so current KuBridge releases return `-1` and preserve all
+lifetime state. Slot replacement, the active callback count, and a delay are
+explicitly not accepted as substitutes. Safe dynamic unload remains blocked
+on KuBridge ABI work (or a process-terminal policy).
 
 The NULL-predecessor nested-fault case is **not contained on hardware yet**.
 With the default build, returning from such a nested exception can re-enter at
@@ -229,15 +240,16 @@ gate and must not be described as proven containment.
 
 ## File-I/O interrupt state
 
-The portable transition model distinguishes a real exception context with a
-coherent all-stop from the legacy `uvdb_remote_syscall()` context. A literal
-File-I/O `C` can produce exactly one `T02` and no resume only in the former.
-The legacy API currently constructs a zeroed synthetic register context and
-does not publish an all-stop before entering its packet loop; reporting T02
-there would let GDB inspect or mutate invalid registers while peer threads run.
-That path therefore consumes the reply, closes the protocol generation, and
-returns failure instead. A truthful remote-syscall Ctrl-C requires first
-transitioning through a real exception/all-stop and remains future work.
+`uvdb_remote_syscall()` now records its bounded request and enters through the
+ordinary synthetic exception. The exception handler owns the real saved
+register context, acquires the protocol gate, and establishes the normal
+stopped inventory before sending `F`. In kernel-integrated builds the stop
+token coherently suspends peers; a literal File-I/O `C` consumes the reply,
+emits exactly one `T02`, and stays in the stopped packet loop until GDB sends an
+explicit resume. Ordinary replies update `r0` in that saved context before
+resume. Library-only builds still lack a coherent peer stop, so they pass the
+fail-closed context and sever the protocol instead of emitting a misleading
+T02.
 
 ## Host evidence
 
@@ -253,8 +265,8 @@ The focused host suite covers:
 - zero-length and exact maximum-size memory packets;
 - malformed/truncated registers and no-partial-output parsing;
 - fake-kernel short reads, persistent and transient short writes, sync
-  failures, verification corruption, successful rollback, and retained
-  restoration obligations;
+  failures, verification corruption, explicit prepare/apply/commit, successful
+  rollback, and retained restoration obligations;
 - fake register/VFP setter snapshot, verification, rollback, and retry paths;
 - nested-guard serialization and fake predecessor chaining policy; and
 - a controlled two-thread primary/nested predecessor race proving that primary
@@ -268,6 +280,9 @@ The focused host suite covers:
 - production-loop disconnect injection after `m`, `M`, `g`, `p`, `G`, and `P`
   processing, proving each path closes the generation, releases the request
   borrow, reports transport failure, and returns the target-running state;
+- production live `M` multi-chunk commit, overlap with a software breakpoint,
+  partial-copy rollback, retained failure, and later disconnect/shutdown-style
+  retry;
 - same-thread global-lock interruption and protocol-gate contention proving
   the real exception handler returns without spinning, leaves the context and
   stopped state untouched, releases only ownership it acquired, and chains
@@ -285,11 +300,15 @@ The focused host suite covers:
   protocol/fault workers plus console pressure, checking exclusive ownership,
   guard quiescence, reconnect publication, and bounded shutdown drain;
 - File-I/O literal-C/attachment fuzzing and a transition gate proving one T02
-  only for real all-stop while the synthetic context fails closed; and
+  only for real all-stop while the synthetic context fails closed;
+- a production saved-context File-I/O path
+  proving one `F`, one `T02`, and no resume before an explicit continue under a
+  fake coherent all-stop; and
 - per-slot fake exception-handler install, partial rollback, exact restore,
   restore failure, retry, publication-before-return callback interleaving,
-  terminal generation-reuse rejection, zero-initialized teardown, and
-  immutable late-dispatch predecessor tokens.
+  terminal generation-reuse rejection, zero-initialized teardown, immutable
+  late-dispatch predecessor tokens, missing/failed fence rejection, and reset
+  only after a successful fake kernel fence.
 
 ## Remaining hardware gates
 
@@ -312,9 +331,9 @@ The focused host suite covers:
    once without deadlock.
 6. Treat NULL-predecessor nested behavior as blocked until the opt-in fatal
    trampoline has its dedicated destructive hardware test.
-7. Add durable live `M` rollback storage before claiming arbitrary memory
-   writes are transactionally recoverable.
-8. Add a KuBridge/kernel dispatcher-lifetime fence before supporting safe
-   runtime reset or unload of an injected debugger module.
-9. Route remote File-I/O Ctrl-C through a real saved exception context and
-   coherent all-stop before enabling T02 for `uvdb_remote_syscall()`.
+7. Validate live `M` commit, partial-copy rollback, disconnect retry, and
+   breakpoint-overlap re-arming on hardware.
+8. Add the documented KuBridge/kernel dispatcher-lifetime fence before
+   supporting safe runtime reset or unload of an injected debugger module.
+9. Validate remote File-I/O Ctrl-C, the single `T02`, register inspection, and
+   explicit resume on a kernel-integrated hardware session.

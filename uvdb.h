@@ -132,6 +132,13 @@ int uvdb_stop_server(void);
 // Call only from normal application code, never from an exception handler.
 void uvdb_shutdown(void);
 
+// Complete the callback-lifetime fence required before unloading a dynamically
+// injected debugger image. This succeeds only after terminal shutdown and only
+// when the KuBridge backend provides a kernel guarantee that every callback
+// copied before handler restoration has retired. Current KuBridge releases do
+// not provide that ABI, so the production backend fails closed with -1.
+int uvdb_prepare_unload(void);
+
 // uvdb_enter acts as a software breakpoint. On first hit, the program waits for
 // GDB to connect; subsequent hits act as software breakpoints. A kernel-enabled
 // build fails closed with UVDB_STATE_ERROR before opening a socket when the
@@ -141,9 +148,11 @@ void uvdb_enter(void);
 //gdb exposes a remote syscall api to call some (whitelisted) syscalls on the host
 //example:
 //  uvdb_remote_syscall("write", 3, 1, "Hello, world!\n", 14); //prints hello world in the debugger prompt
-// This legacy path does not own a real saved all-stop context. A File-I/O
-// Ctrl-C reply therefore closes the protocol and returns -1 instead of
-// reporting a false T02 stop with synthetic zero registers.
+// The call enters through a synthetic debugger exception before sending the
+// request, so File-I/O uses a real saved context. Kernel-integrated builds
+// establish a coherent all-stop; a Ctrl-C reply then emits one T02 and remains
+// stopped until GDB explicitly resumes. Library-only builds cannot stop peer
+// threads coherently and therefore fail closed on that reply instead.
 int uvdb_remote_syscall(const char* name, int nargs, ... /* int arg1, int arg2, ... */);
 
 // Redirect newlib stdout/stderr into a bounded, nonblocking capture path. Once
