@@ -114,9 +114,10 @@ struct vd_pmu_profiler_transport {
      * temporary liveness-query reference whose release was uncertain. */
     uint32_t owner_identity_release_uncertain;
     uint32_t rearm_count;
-    uint32_t process_normal_exit_cleanup_count;
-    uint32_t process_kill_cleanup_count;
+    uint32_t active_process_normal_exit_cleanup_count;
+    uint32_t active_process_kill_cleanup_count;
     uint32_t owner_process_terminal_kind;
+    uint32_t owner_process_terminal_was_active;
     uint32_t owner_terminal_reference_released;
     int32_t last_result;
     struct vd_pmu_profiler_owner_identity owner_identity;

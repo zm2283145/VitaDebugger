@@ -62,13 +62,13 @@ static void make_complete(struct vd_pmu_cleanup_record* record)
     record->final = record->baseline;
     if(record->stage == VD_PMU_CLEANUP_STAGE_NORMAL_EXIT)
     {
-        ++record->restored.process_normal_exit_cleanup_count;
-        ++record->final.process_normal_exit_cleanup_count;
+        ++record->restored.active_process_normal_exit_cleanup_count;
+        ++record->final.active_process_normal_exit_cleanup_count;
     }
     else if(record->stage == VD_PMU_CLEANUP_STAGE_ABRUPT_EXIT)
     {
-        ++record->restored.process_kill_cleanup_count;
-        ++record->final.process_kill_cleanup_count;
+        ++record->restored.active_process_kill_cleanup_count;
+        ++record->final.active_process_kill_cleanup_count;
     }
     record->final.rearm_count = record->baseline.rearm_count + 1;
     seal(record);
@@ -89,6 +89,33 @@ int main(void)
     CHECK(vdPmuCleanupRecordValid(&records[1]),
           "exact-restoration completion validates");
 
+    struct vd_pmu_cleanup_record disconnect =
+        attempted(VD_PMU_CLEANUP_STAGE_DISCONNECT);
+    make_complete(&disconnect);
+    disconnect.results[
+        VD_PMU_CLEANUP_RESULT_POST_DISCONNECT_READ] = 0;
+    disconnect.handles[0].owner_token = 3;
+    disconnect.handles[0].generation = 4;
+    disconnect.samples[2].struct_size =
+        sizeof(disconnect.samples[2]);
+    disconnect.samples[2].abi_version =
+        VD_KERNEL_PMU_PROFILER_ABI_VERSION;
+    disconnect.samples[2].owner_token = 3;
+    disconnect.samples[2].generation = 4;
+    disconnect.samples[2].event_code =
+        VD_KERNEL_PMU_PROFILER_EVENT_BRANCH_MISPREDICT;
+    disconnect.samples[2].core_id =
+        VD_KERNEL_PMU_PROFILER_FIXED_CORE;
+    disconnect.samples[2].physical_counter =
+        VD_KERNEL_PMU_PROFILER_FIXED_COUNTER;
+    seal(&disconnect);
+    CHECK(vdPmuCleanupRecordValid(&disconnect),
+          "disconnect completion preserves its post-error PMU sample");
+    disconnect.samples[2].generation = 5;
+    seal(&disconnect);
+    CHECK(!vdPmuCleanupRecordValid(&disconnect),
+          "disconnect completion rejects an unauthenticated post-error sample");
+
     records[2] = attempted(VD_PMU_CLEANUP_STAGE_ABRUPT_EXIT);
     records[2].revision = 2;
     records[2].state = VD_PMU_CLEANUP_ARMED;
@@ -104,8 +131,8 @@ int main(void)
     CHECK(vdPmuCleanupRecordValid(&records[2]),
           "post-kill same-boot completion validates");
     struct vd_pmu_cleanup_record corrupt = records[2];
-    --corrupt.restored.process_kill_cleanup_count;
-    ++corrupt.restored.process_normal_exit_cleanup_count;
+    --corrupt.restored.active_process_kill_cleanup_count;
+    ++corrupt.restored.active_process_normal_exit_cleanup_count;
     seal(&corrupt);
     CHECK(!vdPmuCleanupRecordValid(&corrupt),
           "stage 5 cannot substitute normal-exit cleanup for kill cleanup");

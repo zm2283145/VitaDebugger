@@ -42,6 +42,7 @@
 #define GATE_WAIT_US 2000000u
 #define GATE_TIMEOUT_WAIT_US 600000u
 #define GATE_REARM_DEADLINE_US UINT64_C(2000000)
+#define GATE_KILL_ARM_WINDOW_US UINT64_C(4000000)
 #define GATE_REARM_POLL_US 20000u
 #define GATE_WORK_WORDS 4096u
 #define GATE_WORK_ROUNDS 24u
@@ -71,6 +72,7 @@ enum gate_result_index {
     GATE_RESULT_NET_CLOSE,
     GATE_RESULT_NET_STOP,
     GATE_RESULT_EXIT_RETURN,
+    GATE_RESULT_POST_DISCONNECT_READ,
 };
 
 static volatile uint32_t gate_work[GATE_WORK_WORDS];
@@ -89,29 +91,29 @@ static int gate_tcp_initialized;
 
 static const char* const record_paths[5][VD_PMU_CLEANUP_SLOT_COUNT] = {
     {
-        "ux0:data/VitaDebugger/pmu-cleanup-v1-conflict-a.bin",
-        "ux0:data/VitaDebugger/pmu-cleanup-v1-conflict-b.bin",
-        "ux0:data/VitaDebugger/pmu-cleanup-v1-conflict-c.bin",
+        "ux0:data/VitaDebugger/pmu-cleanup-v2-conflict-a.bin",
+        "ux0:data/VitaDebugger/pmu-cleanup-v2-conflict-b.bin",
+        "ux0:data/VitaDebugger/pmu-cleanup-v2-conflict-c.bin",
     },
     {
-        "ux0:data/VitaDebugger/pmu-cleanup-v1-timeout-a.bin",
-        "ux0:data/VitaDebugger/pmu-cleanup-v1-timeout-b.bin",
-        "ux0:data/VitaDebugger/pmu-cleanup-v1-timeout-c.bin",
+        "ux0:data/VitaDebugger/pmu-cleanup-v2-timeout-a.bin",
+        "ux0:data/VitaDebugger/pmu-cleanup-v2-timeout-b.bin",
+        "ux0:data/VitaDebugger/pmu-cleanup-v2-timeout-c.bin",
     },
     {
-        "ux0:data/VitaDebugger/pmu-cleanup-v1-disconnect-a.bin",
-        "ux0:data/VitaDebugger/pmu-cleanup-v1-disconnect-b.bin",
-        "ux0:data/VitaDebugger/pmu-cleanup-v1-disconnect-c.bin",
+        "ux0:data/VitaDebugger/pmu-cleanup-v2-disconnect-a.bin",
+        "ux0:data/VitaDebugger/pmu-cleanup-v2-disconnect-b.bin",
+        "ux0:data/VitaDebugger/pmu-cleanup-v2-disconnect-c.bin",
     },
     {
-        "ux0:data/VitaDebugger/pmu-cleanup-v1-normal-exit-a.bin",
-        "ux0:data/VitaDebugger/pmu-cleanup-v1-normal-exit-b.bin",
-        "ux0:data/VitaDebugger/pmu-cleanup-v1-normal-exit-c.bin",
+        "ux0:data/VitaDebugger/pmu-cleanup-v2-normal-exit-a.bin",
+        "ux0:data/VitaDebugger/pmu-cleanup-v2-normal-exit-b.bin",
+        "ux0:data/VitaDebugger/pmu-cleanup-v2-normal-exit-c.bin",
     },
     {
-        "ux0:data/VitaDebugger/pmu-cleanup-v1-abrupt-exit-a.bin",
-        "ux0:data/VitaDebugger/pmu-cleanup-v1-abrupt-exit-b.bin",
-        "ux0:data/VitaDebugger/pmu-cleanup-v1-abrupt-exit-c.bin",
+        "ux0:data/VitaDebugger/pmu-cleanup-v2-abrupt-exit-a.bin",
+        "ux0:data/VitaDebugger/pmu-cleanup-v2-abrupt-exit-b.bin",
+        "ux0:data/VitaDebugger/pmu-cleanup-v2-abrupt-exit-c.bin",
     },
 };
 
@@ -310,7 +312,7 @@ static int contender_main(SceSize args, void* argp)
     (void)argp;
     struct vd_kernel_pmu_profiler_open_request request =
         request_for(VD_KERNEL_PMU_PROFILER_EVENT_BRANCH_MISPREDICT,
-                    VD_KERNEL_PMU_PROFILER_MIN_LEASE_MS);
+                    VD_KERNEL_PMU_PROFILER_MAX_LEASE_MS);
     struct vd_kernel_pmu_profiler_handle handle = {0};
     contender_cleanup_result = VD_PMU_CLEANUP_RESULT_NOT_RUN;
     contender_result = vdKernelPmuProfilerOpen(&request, &handle);
@@ -510,7 +512,7 @@ static int run_disconnect(struct vd_pmu_cleanup_record* record)
     }
     struct vd_kernel_pmu_profiler_open_request request =
         request_for(VD_KERNEL_PMU_PROFILER_EVENT_BRANCH_MISPREDICT,
-                    VD_KERNEL_PMU_PROFILER_MIN_LEASE_MS);
+                    VD_KERNEL_PMU_PROFILER_MAX_LEASE_MS);
     record->results[GATE_RESULT_OPEN] = vdKernelPmuProfilerOpen(
         &request, &record->handles[0]);
     if(record->results[GATE_RESULT_OPEN] == 0)
@@ -518,7 +520,7 @@ static int run_disconnect(struct vd_pmu_cleanup_record* record)
         run_workload();
         record->results[GATE_RESULT_READ] = vdKernelPmuProfilerRead(
             &record->handles[0], &record->samples[0]);
-        sceKernelDelayThread(500000);
+        sceKernelDelayThread(100000);
         static const uint8_t payload[4096] = {0xa5};
         record->results[GATE_RESULT_NET_FAILURE] = VP_RESULT_OK;
         for(uint32_t attempt = 0;
@@ -528,6 +530,9 @@ static int run_disconnect(struct vd_pmu_cleanup_record* record)
             record->results[GATE_RESULT_NET_FAILURE] =
                 vp_vita_tcp_sink_write(
                     &gate_tcp_sink, payload, sizeof(payload));
+        record->results[GATE_RESULT_POST_DISCONNECT_READ] =
+            vdKernelPmuProfilerRead(
+                &record->handles[0], &record->samples[2]);
         record->results[GATE_RESULT_CLOSE] =
             vdKernelPmuProfilerClose(&record->handles[0]);
     }
@@ -541,6 +546,9 @@ static int run_disconnect(struct vd_pmu_cleanup_record* record)
         sample_valid(&record->handles[0], &record->samples[0],
                      VD_KERNEL_PMU_PROFILER_EVENT_BRANCH_MISPREDICT) &&
         record->results[GATE_RESULT_NET_FAILURE] == VP_ERROR_IO &&
+        record->results[GATE_RESULT_POST_DISCONNECT_READ] == 0 &&
+        sample_valid(&record->handles[0], &record->samples[2],
+                     VD_KERNEL_PMU_PROFILER_EVENT_BRANCH_MISPREDICT) &&
         record->results[GATE_RESULT_CLOSE] == 0 &&
         record->results[GATE_RESULT_NET_CLOSE] == VP_RESULT_OK &&
         record->results[GATE_RESULT_NET_STOP] == 0;
@@ -568,16 +576,16 @@ static int finish_stage(
         vdPmuCleanupSnapshotEqual(
             &record->baseline.snapshot, &record->restored.snapshot);
     if(record->stage == VD_PMU_CLEANUP_STAGE_NORMAL_EXIT &&
-       (record->restored.process_normal_exit_cleanup_count <=
-            record->baseline.process_normal_exit_cleanup_count ||
-        record->restored.process_kill_cleanup_count !=
-            record->baseline.process_kill_cleanup_count))
+       (record->restored.active_process_normal_exit_cleanup_count <=
+            record->baseline.active_process_normal_exit_cleanup_count ||
+        record->restored.active_process_kill_cleanup_count !=
+            record->baseline.active_process_kill_cleanup_count))
         action_passed = 0;
     if(record->stage == VD_PMU_CLEANUP_STAGE_ABRUPT_EXIT &&
-       (record->restored.process_kill_cleanup_count <=
-            record->baseline.process_kill_cleanup_count ||
-        record->restored.process_normal_exit_cleanup_count !=
-            record->baseline.process_normal_exit_cleanup_count))
+       (record->restored.active_process_kill_cleanup_count <=
+            record->baseline.active_process_kill_cleanup_count ||
+        record->restored.active_process_normal_exit_cleanup_count !=
+            record->baseline.active_process_normal_exit_cleanup_count))
         action_passed = 0;
     int rearmed = action_passed && restored &&
         run_rearm(record);
@@ -706,8 +714,21 @@ static int run_initial(
         {
             psvDebugScreenPrintf(
                 "ARMED: waiting for approved host kill VDCP00013.\n");
-            for(;;)
+            const uint64_t kill_deadline =
+                sceKernelGetProcessTimeWide() +
+                GATE_KILL_ARM_WINDOW_US;
+            while(sceKernelGetProcessTimeWide() < kill_deadline)
                 sceKernelDelayThread(100000);
+            record.results[GATE_RESULT_CLOSE] =
+                vdKernelPmuProfilerClose(&record.handles[0]);
+            record.revision = 3;
+            record.state = VD_PMU_CLEANUP_FAILED;
+            record.flags &= ~VD_PMU_CLEANUP_FLAG_PASS;
+            record.finished_us = sceKernelGetProcessTimeWide();
+            (void)write_slot_verified(2, &record);
+            psvDebugScreenPrintf(
+                "FAILED: kill was not observed before active window.\n");
+            return 0;
         }
         return 1;
     }

@@ -786,6 +786,69 @@ static void test_double_gated_real_event_catalog(void)
           "real-event expiry restores exactly before outer release ack");
     vdPmuBackendHostTestReset();
 }
+
+#if VD_PMU_PROFILER_PROCESS_EVENTS_COMPILED
+static void test_timeout_before_process_event_is_not_active_cleanup(void)
+{
+    struct fake_pmu fake;
+    struct fake_owner owner;
+    struct vd_pmu_profiler_transport transport;
+    struct vd_pmu_profiler_owner_backend backend;
+    struct vd_kernel_pmu_profiler_open_request request =
+        transport_request(VD_KERNEL_PMU_PROFILER_EVENT_ICACHE_MISS);
+    struct vd_kernel_pmu_profiler_handle handle;
+    const int32_t owner_pid = 419;
+    const int32_t owner_thread = 421;
+
+    fake_init(&fake, VD_KERNEL_PMU_PROFILER_FIXED_CORE);
+    fake_owner_init(&owner);
+    backend = fake_owner_backend(&owner);
+    start_backend(&fake);
+    memset(&transport, 0, sizeof(transport));
+    CHECK(vdPmuProfilerTransportInit(&transport) == 0 &&
+              vdPmuProfilerTransportSetOwnerBackend(
+                  &transport, &backend) == 0 &&
+              vdPmuProfilerTransportOpen(
+                  &transport, owner_pid, owner_thread,
+                  &request, &handle) == 0,
+          "timeout-first terminal fixture opens a real lease");
+
+    vdPmuBackendHostTestAdvanceTimeUs(
+        ((uint64_t)VD_KERNEL_PMU_PROFILER_MIN_LEASE_MS + 1u) * 1000u);
+    CHECK(vdPmuProfilerTransportWatchdog(&transport) == 1 &&
+              transport.state ==
+                  VD_PMU_PROFILER_TRANSPORT_RESTORED_AWAITING_OWNER &&
+              transport.active_process_normal_exit_cleanup_count == 0 &&
+              transport.active_process_kill_cleanup_count == 0,
+          "lease timeout restores without claiming active process cleanup");
+    CHECK(vdPmuProfilerTransportOwnerProcessExit(
+              &transport, owner_pid,
+              VD_KERNEL_PMU_PROFILER_TERMINAL_KILL) == 1 &&
+              transport.owner_process_terminal_was_active == 0 &&
+              vdPmuProfilerTransportWatchdog(&transport) == 1 &&
+              transport.state == VD_PMU_PROFILER_TRANSPORT_IDLE &&
+              transport.active_process_normal_exit_cleanup_count == 0 &&
+              transport.active_process_kill_cleanup_count == 0,
+          "a later terminal event cannot relabel timeout restoration as active cleanup");
+
+    CHECK(vdPmuProfilerTransportOpen(
+              &transport, owner_pid, owner_thread,
+              &request, &handle) == 0,
+          "callback-before-watchdog timeout fixture opens a new lease");
+    vdPmuBackendHostTestAdvanceTimeUs(
+        ((uint64_t)VD_KERNEL_PMU_PROFILER_MIN_LEASE_MS + 1u) * 1000u);
+    CHECK(vdPmuProfilerTransportOwnerProcessExit(
+              &transport, owner_pid,
+              VD_KERNEL_PMU_PROFILER_TERMINAL_EXIT) == 1 &&
+              transport.owner_process_terminal_was_active == 0 &&
+              vdPmuProfilerTransportWatchdog(&transport) == 1 &&
+              transport.state == VD_PMU_PROFILER_TRANSPORT_IDLE &&
+              transport.active_process_normal_exit_cleanup_count == 0 &&
+              transport.active_process_kill_cleanup_count == 0,
+          "an expired lease observed first by the callback is not active process cleanup");
+    vdPmuBackendHostTestReset();
+}
+#endif
 #endif
 
 static void test_watchdog_restores_and_requires_release_ack(void)
@@ -1760,8 +1823,8 @@ static void test_transport_software_process_event_cleanup(void)
           "software-event terminal callback does not invent reference uncertainty");
     CHECK(vdPmuProfilerTransportWatchdog(&transport) == 1 &&
               transport.state == VD_PMU_PROFILER_TRANSPORT_IDLE &&
-              transport.process_normal_exit_cleanup_count == 1 &&
-              transport.process_kill_cleanup_count == 0 &&
+              transport.active_process_normal_exit_cleanup_count == 1 &&
+              transport.active_process_kill_cleanup_count == 0 &&
               memcmp(&fake.state, &before, sizeof(before)) == 0,
           "watchdog clears a terminal software-event lease without quarantine");
     vdPmuBackendHostTestReset();
@@ -1804,8 +1867,8 @@ static void test_transport_process_event_cleanup(void)
               &transport, owner_pid + 1,
               VD_KERNEL_PMU_PROFILER_TERMINAL_EXIT) == 0 &&
               transport.state == VD_PMU_PROFILER_TRANSPORT_ACTIVE &&
-              transport.process_normal_exit_cleanup_count == 0 &&
-              transport.process_kill_cleanup_count == 0 &&
+              transport.active_process_normal_exit_cleanup_count == 0 &&
+              transport.active_process_kill_cleanup_count == 0 &&
               memcmp(&fake.state, &active, sizeof(active)) == 0,
           "unrelated process events cannot mutate the active owner");
     CHECK(vdPmuProfilerTransportOwnerProcessExit(
@@ -1816,16 +1879,16 @@ static void test_transport_process_event_cleanup(void)
                   VD_KERNEL_PMU_PROFILER_TERMINAL_EXIT &&
               transport.owner_identity_valid == 0 &&
               transport.owner_terminal_reference_released == 1 &&
-              transport.process_normal_exit_cleanup_count == 0 &&
-              transport.process_kill_cleanup_count == 0 &&
+              transport.active_process_normal_exit_cleanup_count == 0 &&
+              transport.active_process_kill_cleanup_count == 0 &&
               transport.rearm_count == 0 &&
               owner.release_calls == 1 &&
               memcmp(&fake.state, &active, sizeof(active)) == 0,
           "matching callback only retires the retained reference and records terminal proof");
     CHECK(vdPmuProfilerTransportWatchdog(&transport) == 1 &&
               transport.state == VD_PMU_PROFILER_TRANSPORT_IDLE &&
-              transport.process_normal_exit_cleanup_count == 1 &&
-              transport.process_kill_cleanup_count == 0 &&
+              transport.active_process_normal_exit_cleanup_count == 1 &&
+              transport.active_process_kill_cleanup_count == 0 &&
               transport.rearm_count == 1 &&
               memcmp(&fake.state, &before, sizeof(before)) == 0,
           "watchdog restores and re-arms the terminal owner exactly");
@@ -1855,8 +1918,8 @@ static void test_transport_process_event_cleanup(void)
               transport.owner_process_terminal_kind ==
                   VD_KERNEL_PMU_PROFILER_TERMINAL_KILL &&
               transport.owner_terminal_reference_released == 1 &&
-              transport.process_normal_exit_cleanup_count == 1 &&
-              transport.process_kill_cleanup_count == 0 &&
+              transport.active_process_normal_exit_cleanup_count == 1 &&
+              transport.active_process_kill_cleanup_count == 0 &&
               fake.writes[VD_PMU_BACKEND_HOST_PMSELR] ==
                   selector_writes_before_callback,
           "process callback records proof without entering the backend");
@@ -1877,8 +1940,8 @@ static void test_transport_process_event_cleanup(void)
         transport_status_query();
     CHECK(retry_result == 1 &&
               transport.state == VD_PMU_PROFILER_TRANSPORT_IDLE &&
-              transport.process_normal_exit_cleanup_count == 1 &&
-              transport.process_kill_cleanup_count == 1 &&
+              transport.active_process_normal_exit_cleanup_count == 1 &&
+              transport.active_process_kill_cleanup_count == 1 &&
               transport.rearm_count == 3 &&
               owner.query_calls == query_calls_before_retry &&
               owner.release_calls == releases_after_terminal_callback &&
@@ -1916,8 +1979,8 @@ static void test_transport_process_event_cleanup(void)
               transport.state == VD_PMU_PROFILER_TRANSPORT_ACTIVE &&
               transport.exact_restore_proven == 0 &&
               transport.owner_identity_release_uncertain == 1 &&
-              transport.process_normal_exit_cleanup_count == 1 &&
-              transport.process_kill_cleanup_count == 1 &&
+              transport.active_process_normal_exit_cleanup_count == 1 &&
+              transport.active_process_kill_cleanup_count == 1 &&
               memcmp(&fake.state, &before, sizeof(before)) != 0,
           "uncertain terminal reference release leaves PMU work to the watchdog");
     CHECK(vdPmuProfilerTransportWatchdog(&transport) ==
@@ -1940,8 +2003,8 @@ static void test_transport_process_event_cleanup(void)
           "watchdog restores exactly then quarantines uncertain terminal reference release");
     CHECK(vdPmuProfilerTransportWatchdog(&transport) ==
               VD_KERNEL_ERROR_PMU_PROFILER_RESTORE_REQUIRED &&
-              transport.process_normal_exit_cleanup_count == 1 &&
-              transport.process_kill_cleanup_count == 1,
+              transport.active_process_normal_exit_cleanup_count == 1 &&
+              transport.active_process_kill_cleanup_count == 1,
           "callback UID/object mismatch is never retried or counted as cleanup");
 
     vdPmuBackendHostTestReset();
@@ -2343,6 +2406,7 @@ int main(void)
 #if VD_PMU_PROFILER_PROCESS_EVENTS_COMPILED
     test_transport_software_process_event_cleanup();
     test_transport_process_event_cleanup();
+    test_timeout_before_process_event_is_not_active_cleanup();
 #endif
 #endif
     vdPmuBackendHostTestReset();

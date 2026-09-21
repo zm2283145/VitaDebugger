@@ -55,12 +55,29 @@ static void record_process_cleanup(
 {
     uint32_t* count =
         terminal_kind == VD_KERNEL_PMU_PROFILER_TERMINAL_KILL ?
-            &transport->process_kill_cleanup_count :
-            &transport->process_normal_exit_cleanup_count;
+            &transport->active_process_kill_cleanup_count :
+            &transport->active_process_normal_exit_cleanup_count;
     ++*count;
     if(*count == 0)
         *count = 1;
 }
+
+#if VD_PMU_PROFILER_PROCESS_EVENTS_COMPILED
+static int active_lease_unexpired(
+    const struct vd_pmu_profiler_transport* transport)
+{
+    if(!transport ||
+       transport->state != VD_PMU_PROFILER_TRANSPORT_ACTIVE ||
+       transport->bridge.session.state != VD_PMU_SESSION_ACTIVE ||
+       !transport->bridge.session.backend.now_ms)
+        return 0;
+    uint64_t now_ms = 0;
+    if(transport->bridge.session.backend.now_ms(
+           transport->bridge.session.backend.context, &now_ms) != 0)
+        return 0;
+    return now_ms < transport->bridge.session.deadline_ms;
+}
+#endif
 
 static void clear_session(struct vd_pmu_profiler_transport* transport)
 {
@@ -77,6 +94,7 @@ static void clear_session(struct vd_pmu_profiler_transport* transport)
     transport->owner_identity_release_uncertain = 0;
     transport->owner_process_terminal_kind =
         VD_KERNEL_PMU_PROFILER_TERMINAL_NONE;
+    transport->owner_process_terminal_was_active = 0;
     transport->owner_terminal_reference_released = 0;
     zero_bytes(&transport->owner_identity,
                sizeof(transport->owner_identity));
@@ -648,10 +666,10 @@ int vdPmuProfilerTransportGetStatus(
     local.owner_identity_release_uncertain =
         transport->owner_identity_release_uncertain;
     local.rearm_count = transport->rearm_count;
-    local.process_normal_exit_cleanup_count =
-        transport->process_normal_exit_cleanup_count;
-    local.process_kill_cleanup_count =
-        transport->process_kill_cleanup_count;
+    local.active_process_normal_exit_cleanup_count =
+        transport->active_process_normal_exit_cleanup_count;
+    local.active_process_kill_cleanup_count =
+        transport->active_process_kill_cleanup_count;
     local.owner_process_terminal_kind =
         transport->owner_process_terminal_kind;
     local.owner_terminal_reference_released =
@@ -1048,6 +1066,8 @@ int vdPmuProfilerTransportWatchdog(
         transport->owner_process_terminal_kind;
     const int process_terminal =
         terminal_kind != VD_KERNEL_PMU_PROFILER_TERMINAL_NONE;
+    const int process_terminal_was_active =
+        transport->owner_process_terminal_was_active != 0;
     const int owner_status = process_terminal ?
         VD_PMU_PROFILER_OWNER_GONE : query_owner_status(transport);
     if(transport->owner_identity_release_uncertain != 0)
@@ -1060,7 +1080,8 @@ int vdPmuProfilerTransportWatchdog(
         const int result = acknowledge_restored_owner(
             transport, REARM_TERMINAL_OWNER_GONE,
             transport->owner_token, transport->generation);
-        if(result > 0 && process_terminal)
+        if(result > 0 && process_terminal &&
+           process_terminal_was_active)
             record_process_cleanup(transport, terminal_kind);
         return result > 0 ? 1 : result;
     }
@@ -1082,7 +1103,8 @@ int vdPmuProfilerTransportWatchdog(
         const int result = finish_exact_restoration(
             transport, REARM_TERMINAL_OWNER_GONE,
             transport->owner_token, transport->generation);
-        if(result > 0 && process_terminal)
+        if(result > 0 && process_terminal &&
+           process_terminal_was_active)
             record_process_cleanup(transport, terminal_kind);
         return result > 0 ? 1 : result;
     }
@@ -1091,7 +1113,8 @@ int vdPmuProfilerTransportWatchdog(
         transport,
         owner_status == VD_PMU_PROFILER_OWNER_GONE ?
             REARM_TERMINAL_OWNER_GONE : REARM_TERMINAL_NONE);
-    if(result > 0 && process_terminal)
+    if(result > 0 && process_terminal &&
+       process_terminal_was_active)
         record_process_cleanup(transport, terminal_kind);
     return result;
 }
@@ -1110,6 +1133,10 @@ int vdPmuProfilerTransportOwnerProcessExit(
     if(transport->state == VD_PMU_PROFILER_TRANSPORT_IDLE ||
        transport->owner_pid != owner_pid)
         return 0;
+    if(transport->owner_process_terminal_kind ==
+           VD_KERNEL_PMU_PROFILER_TERMINAL_NONE)
+        transport->owner_process_terminal_was_active =
+            active_lease_unexpired(transport);
     if(transport->owner_process_terminal_kind !=
            VD_KERNEL_PMU_PROFILER_TERMINAL_NONE &&
        transport->owner_process_terminal_kind != terminal_kind)

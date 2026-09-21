@@ -15,7 +15,7 @@ Set `VITADEBUG_PMU_CLEANUP_GATE_STAGE` to exactly one value:
 | --- | --- | --- |
 | 1 | Competing owner | A second thread receives `BUSY`, cannot obtain a handle, the first owner closes exactly, and a new lease opens and closes. |
 | 2 | Watchdog timeout | A 250 ms lease expires, a late read reports `RESTORE_REQUIRED`, the matching handle acknowledges cleanup, and a new lease opens and closes. |
-| 3 | Receiver disconnect | The production Vita TCP sink connects and writes `VDPMU-DROP-V1\n`; the host sends an RST, a bounded later write reports `VP_ERROR_IO`, the matching PMU handle closes, and a new lease opens and closes. |
+| 3 | Receiver disconnect | A live 5 s lease outlasts the forced disconnect: the production Vita TCP sink connects and writes `VDPMU-DROP-V1\n`; the host sends an RST, a bounded later write reports `VP_ERROR_IO`, a required PMU read still succeeds before the matching handle closes, and a new lease opens and closes. |
 | 4 | Normal process exit | The application returns normally with a live 5 s lease. Relaunch in the same boot proves process-event cleanup and opens/closes a new lease. |
 | 5 | SceShell kill | After the application durably writes its armed record with a live 5 s lease, the host helper archives that exact record and sends the approved Vita Companion command `kill VDCP00013`. Relaunch in the same boot proves the `.kill` process event cleaned up and opens/closes a new lease. |
 
@@ -77,9 +77,9 @@ watchdog context still restores exactly but permanently quarantines re-arm.
 Each stage owns three exclusive 1,024-byte slots:
 
 ```text
-ux0:data/VitaDebugger/pmu-cleanup-v1-<stage>-a.bin
-ux0:data/VitaDebugger/pmu-cleanup-v1-<stage>-b.bin
-ux0:data/VitaDebugger/pmu-cleanup-v1-<stage>-c.bin
+ux0:data/VitaDebugger/pmu-cleanup-v2-<stage>-a.bin
+ux0:data/VitaDebugger/pmu-cleanup-v2-<stage>-b.bin
+ux0:data/VitaDebugger/pmu-cleanup-v2-<stage>-c.bin
 ```
 
 `<stage>` is `conflict`, `timeout`, `disconnect`, `normal-exit`, or
@@ -100,15 +100,18 @@ and final status snapshots. PASS requires:
 - an action-specific successful cleanup;
 - a later successful real-event open/read/exact close within two seconds; and
 - an increased re-arm count. Stage 4 additionally requires only the
-  normal-exit cleanup counter to increase; stage 5 requires only the SceShell
-  kill cleanup counter to increase.
+  active-normal-exit cleanup counter to increase; stage 5 requires only the
+  active-SceShell-kill cleanup counter to increase. These counters advance
+  only when the process callback observes an `ACTIVE`, unexpired lease, so
+  timeout-first restoration or a callback arriving after the deadline cannot
+  satisfy either process gate.
 
 Decode each retrieved slot offline:
 
 ```powershell
 py -3 tools/decode_pmu_cleanup_record.py `
-  .\evidence\pmu-cleanup-v1-conflict-b.bin `
-  --output .\evidence\pmu-cleanup-v1-conflict-b.json
+  .\evidence\pmu-cleanup-v2-conflict-b.bin `
+  --output .\evidence\pmu-cleanup-v2-conflict-b.json
 ```
 
 The decoder exits nonzero for a malformed header, checksum mismatch, unknown
@@ -171,7 +174,7 @@ slots read-only. Stages 1--3 have slots `a,b`; stages 4--5 have `a,b,c`.
 ```powershell
 $Suffixes = if ($Stage -le 3) { @("a", "b") } else { @("a", "b", "c") }
 foreach ($Suffix in $Suffixes) {
-  $Record = "pmu-cleanup-v1-$StageName-$Suffix.bin"
+  $Record = "pmu-cleanup-v2-$StageName-$Suffix.bin"
   $Raw = Join-Path $Archive $Record
   curl.exe --silent --show-error --fail --disable-epsv `
     "ftp://${VitaIp}:1337/ux0:/data/VitaDebugger/$Record" `
@@ -202,22 +205,27 @@ Require its durable JSON state to be `reset_sent`, its exact prelude to match,
 and its peer address to match the target before accepting the device record.
 
 For stage 5, start the kill helper **before** installing/launching the stage.
-It first requires the armed slot to be absent. It then polls that one path
-read-only, validates and durably archives a newly created stage-5 armed
-record, and only afterward sends exactly `kill VDCP00013`:
+It first requires both the armed and failed slots to be absent. It then polls
+both paths read-only, validates and durably archives a newly created stage-5
+armed record, rechecks that the device did not write its timeout failure, and
+only afterward sends exactly `kill VDCP00013`:
 
 ```powershell
 py -3 tools/pmu_kill_gate.py `
   --vita $VitaIp `
   --evidence (Join-Path $Archive "kill-gate.json") `
-  --armed-copy (Join-Path $Archive "stage-5-armed-before-kill.bin")
+  --armed-copy (Join-Path $Archive "stage-5-armed-before-kill.bin") `
+  --max-kill-delay 2
 ```
 
 Press X only after the helper reports `waiting_for_armed`. Require terminal
 JSON state `kill_confirmed`, reply `Killed.`, the expected title ID, and an
-armed SHA-256 matching the separately retrieved slot `b`. Any pre-existing
-armed slot, invalid record, timeout, FTP error, or non-success kill reply
-fails without issuing or repeating a kill.
+`armed_to_kill_seconds` value no greater than two seconds, plus an armed
+SHA-256 matching the separately retrieved slot `b`. The device independently
+closes the lease and writes failed slot `c` if no kill arrives within four
+seconds. Any pre-existing armed slot, invalid or identity-free armed handle,
+timeout, FTP error, late or non-success kill reply fails without issuing or
+repeating a kill.
 
 ## Hard stops and exclusions
 

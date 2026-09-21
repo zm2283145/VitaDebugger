@@ -6,10 +6,11 @@
 #include "vitadebug_pmu_profiler.h"
 
 #define VD_PMU_CLEANUP_RECORD_MAGIC UINT32_C(0x56504347)
-#define VD_PMU_CLEANUP_RECORD_VERSION 1u
+#define VD_PMU_CLEANUP_RECORD_VERSION 2u
 #define VD_PMU_CLEANUP_RECORD_SIZE 1024u
 #define VD_PMU_CLEANUP_RESULT_NOT_RUN ((int32_t)-799)
 #define VD_PMU_CLEANUP_SLOT_COUNT 3u
+#define VD_PMU_CLEANUP_RESULT_POST_DISCONNECT_READ 21u
 
 enum vd_pmu_cleanup_stage {
     VD_PMU_CLEANUP_STAGE_CONFLICT = 1,
@@ -138,6 +139,22 @@ static inline int vdPmuCleanupStatusIdle(
         status->snapshot.event_counter_count == 6;
 }
 
+static inline int vdPmuCleanupSampleMatchesHandle(
+    const struct vd_kernel_pmu_profiler_sample* sample,
+    const struct vd_kernel_pmu_profiler_handle* handle,
+    uint32_t event_code)
+{
+    return sample && handle &&
+        sample->struct_size == sizeof(*sample) &&
+        sample->abi_version == VD_KERNEL_PMU_PROFILER_ABI_VERSION &&
+        sample->owner_token == handle->owner_token &&
+        sample->generation == handle->generation &&
+        sample->event_code == event_code &&
+        sample->core_id == VD_KERNEL_PMU_PROFILER_FIXED_CORE &&
+        sample->physical_counter ==
+            VD_KERNEL_PMU_PROFILER_FIXED_COUNTER;
+}
+
 static inline int vdPmuCleanupStageValid(uint32_t stage)
 {
     return stage >= VD_PMU_CLEANUP_STAGE_CONFLICT &&
@@ -193,24 +210,30 @@ static inline int vdPmuCleanupRecordValid(
             vdPmuCleanupStatusIdle(&record->restored) &&
             vdPmuCleanupStatusIdle(&record->final) &&
             record->final.rearm_count > record->baseline.rearm_count &&
+            (record->stage != VD_PMU_CLEANUP_STAGE_DISCONNECT ||
+             (record->results[
+                  VD_PMU_CLEANUP_RESULT_POST_DISCONNECT_READ] == 0 &&
+              vdPmuCleanupSampleMatchesHandle(
+                  &record->samples[2], &record->handles[0],
+                  VD_KERNEL_PMU_PROFILER_EVENT_BRANCH_MISPREDICT))) &&
             (record->stage != VD_PMU_CLEANUP_STAGE_NORMAL_EXIT ||
-             (record->restored.process_normal_exit_cleanup_count >
-                  record->baseline.process_normal_exit_cleanup_count &&
-              record->restored.process_kill_cleanup_count ==
-                  record->baseline.process_kill_cleanup_count &&
-              record->final.process_normal_exit_cleanup_count ==
-                  record->restored.process_normal_exit_cleanup_count &&
-              record->final.process_kill_cleanup_count ==
-                  record->restored.process_kill_cleanup_count)) &&
+             (record->restored.active_process_normal_exit_cleanup_count >
+                  record->baseline.active_process_normal_exit_cleanup_count &&
+              record->restored.active_process_kill_cleanup_count ==
+                  record->baseline.active_process_kill_cleanup_count &&
+              record->final.active_process_normal_exit_cleanup_count ==
+                  record->restored.active_process_normal_exit_cleanup_count &&
+              record->final.active_process_kill_cleanup_count ==
+                  record->restored.active_process_kill_cleanup_count)) &&
             (record->stage != VD_PMU_CLEANUP_STAGE_ABRUPT_EXIT ||
-             (record->restored.process_kill_cleanup_count >
-                  record->baseline.process_kill_cleanup_count &&
-              record->restored.process_normal_exit_cleanup_count ==
-                  record->baseline.process_normal_exit_cleanup_count &&
-              record->final.process_normal_exit_cleanup_count ==
-                  record->restored.process_normal_exit_cleanup_count &&
-              record->final.process_kill_cleanup_count ==
-                  record->restored.process_kill_cleanup_count)) &&
+             (record->restored.active_process_kill_cleanup_count >
+                  record->baseline.active_process_kill_cleanup_count &&
+              record->restored.active_process_normal_exit_cleanup_count ==
+                  record->baseline.active_process_normal_exit_cleanup_count &&
+              record->final.active_process_normal_exit_cleanup_count ==
+                  record->restored.active_process_normal_exit_cleanup_count &&
+              record->final.active_process_kill_cleanup_count ==
+                  record->restored.active_process_kill_cleanup_count)) &&
             vdPmuCleanupSnapshotEqual(
                 &record->baseline.snapshot,
                 &record->restored.snapshot) &&

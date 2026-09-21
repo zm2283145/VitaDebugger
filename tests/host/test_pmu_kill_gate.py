@@ -10,8 +10,14 @@ from tools.decode_pmu_cleanup_record import (
     FLAG_OWNER_ARMED,
     MAGIC,
     NOT_RUN,
+    VERSION,
 )
-from tools.pmu_kill_gate import ARMED_PATH, TITLE_ID, run_kill_gate
+from tools.pmu_kill_gate import (
+    ARMED_PATH,
+    FAILED_PATH,
+    TITLE_ID,
+    run_kill_gate,
+)
 
 
 def armed_record() -> bytes:
@@ -21,7 +27,7 @@ def armed_record() -> bytes:
         data,
         0,
         MAGIC,
-        1,
+        VERSION,
         1024,
         0,
         2,
@@ -33,6 +39,7 @@ def armed_record() -> bytes:
     )
     struct.pack_into("<iIiii", data, 48, 0, 0x6B, 0, NOT_RUN, NOT_RUN)
     struct.pack_into("<24i", data, 68, 0, 0, *([NOT_RUN] * 22))
+    struct.pack_into("<II", data, 164 + 8, 1, 2)
     put_status(data, 440, 2)
     struct.pack_into("<I", data, 12, _fnv1a(data))
     return bytes(data)
@@ -77,12 +84,35 @@ class FakeCompanion:
         return "Killed."
 
 
+class FakeClock:
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.now += seconds
+
+
 class PmuKillGateTests(unittest.TestCase):
     def setUp(self) -> None:
         FakeCompanion.calls.clear()
 
     def test_archives_new_armed_record_before_exact_title_kill(self) -> None:
-        ftp = FakeFtp([None, b"", armed_record()[:400], armed_record()])
+        ftp = FakeFtp(
+            [
+                None,
+                None,
+                None,
+                b"",
+                None,
+                armed_record()[:400],
+                None,
+                armed_record(),
+                None,
+            ]
+        )
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             evidence = root / "kill.json"
@@ -107,6 +137,7 @@ class PmuKillGateTests(unittest.TestCase):
                 "kill_confirmed",
             )
             self.assertIn(f"RETR {ARMED_PATH}", ftp.commands)
+            self.assertIn(f"RETR {FAILED_PATH}", ftp.commands)
 
     def test_existing_armed_record_refuses_kill(self) -> None:
         ftp = FakeFtp([armed_record()])
@@ -144,6 +175,71 @@ class PmuKillGateTests(unittest.TestCase):
                     companion_factory=FakeCompanion,
                 )
             self.assertFalse(ftp.commands)
+            self.assertFalse(FakeCompanion.calls)
+
+    def test_late_kill_reply_fails_active_lease_bound(self) -> None:
+        ftp = FakeFtp([None, None, None, armed_record(), None])
+        clock = FakeClock()
+
+        class SlowCompanion(FakeCompanion):
+            def kill(
+                self, title_id: str, *, require_success: bool = False
+            ) -> str:
+                reply = super().kill(
+                    title_id, require_success=require_success
+                )
+                clock.now += 2.1
+                return reply
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            evidence = root / "kill.json"
+            with self.assertRaisesRegex(
+                RuntimeError, "active-lease delay bound"
+            ):
+                run_kill_gate(
+                    "192.0.2.17",
+                    evidence,
+                    root / "armed.bin",
+                    10.0,
+                    0.1,
+                    2.0,
+                    ftp_factory=lambda: ftp,
+                    companion_factory=SlowCompanion,
+                    monotonic=clock.monotonic,
+                    sleep=clock.sleep,
+                )
+            self.assertEqual(FakeCompanion.calls[-1][1], TITLE_ID)
+            self.assertEqual(
+                json.loads(evidence.read_text(encoding="utf-8"))["state"],
+                "failed",
+            )
+            self.assertGreater(
+                json.loads(
+                    evidence.read_text(encoding="utf-8")
+                )["armed_to_kill_seconds"],
+                2.0,
+            )
+
+    def test_device_timeout_before_kill_refuses_command(self) -> None:
+        ftp = FakeFtp(
+            [None, None, None, armed_record(), b"failed-record"]
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            evidence = root / "kill.json"
+            with self.assertRaisesRegex(
+                RuntimeError, "active window expired"
+            ):
+                run_kill_gate(
+                    "192.0.2.17",
+                    evidence,
+                    root / "armed.bin",
+                    10.0,
+                    0.1,
+                    ftp_factory=lambda: ftp,
+                    companion_factory=FakeCompanion,
+                )
             self.assertFalse(FakeCompanion.calls)
 
 

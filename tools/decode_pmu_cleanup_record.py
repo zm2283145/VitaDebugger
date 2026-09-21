@@ -10,7 +10,7 @@ import struct
 from pathlib import Path
 
 MAGIC = 0x56504347
-VERSION = 1
+VERSION = 2
 SIZE = 1024
 NOT_RUN = -799
 STATE_ATTEMPTED = 1
@@ -50,6 +50,35 @@ def _snapshot(data: bytes, offset: int) -> dict[str, object]:
     }
 
 
+def _handle(data: bytes, offset: int) -> dict[str, int]:
+    words = struct.unpack_from("<10I", data, offset)
+    return {
+        "struct_size": words[0],
+        "abi_version": words[1],
+        "owner_token": words[2],
+        "generation": words[3],
+        "event_code": words[4],
+        "lease_ms": words[5],
+        "lease_token_low": words[6],
+        "lease_token_high": words[7],
+    }
+
+
+def _sample(data: bytes, offset: int) -> dict[str, int]:
+    words = struct.unpack_from("<8IQ2I", data, offset)
+    return {
+        "struct_size": words[0],
+        "abi_version": words[1],
+        "owner_token": words[2],
+        "generation": words[3],
+        "event_code": words[4],
+        "core_id": words[5],
+        "physical_counter": words[6],
+        "flags": words[7],
+        "value": words[8],
+    }
+
+
 def _status(data: bytes, offset: int) -> dict[str, object]:
     words = struct.unpack_from("<21I", data, offset)
     return {
@@ -66,8 +95,8 @@ def _status(data: bytes, offset: int) -> dict[str, object]:
         "owner_identity_valid": words[10],
         "owner_identity_release_uncertain": words[11],
         "rearm_count": words[12],
-        "process_normal_exit_cleanup_count": words[13],
-        "process_kill_cleanup_count": words[14],
+        "active_process_normal_exit_cleanup_count": words[13],
+        "active_process_kill_cleanup_count": words[14],
         "owner_process_terminal_kind": words[15],
         "owner_terminal_reference_released": words[16],
         "backend_ready": words[17],
@@ -84,7 +113,7 @@ def _status_idle(status: dict[str, object]) -> bool:
     assert isinstance(snapshot, dict)
     return (
         status["struct_size"] == 184
-        and status["abi_version"] == 1
+        and status["abi_version"] == 2
         and status["transport_state"] == 0
         and status["owner_pid"] == -1
         and status["owner_thread"] == -1
@@ -128,6 +157,14 @@ def decode_record(data: bytes) -> dict[str, object]:
         "restored_status_result": restored_result,
         "final_status_result": final_result,
         "results": list(struct.unpack_from("<24i", data, 68)),
+        "handles": [
+            _handle(data, 164 + index * 40)
+            for index in range(3)
+        ],
+        "samples": [
+            _sample(data, 284 + index * 48)
+            for index in range(3)
+        ],
         "handles_hex": [
             data[164 + index * 40 : 204 + index * 40].hex()
             for index in range(3)
@@ -162,22 +199,32 @@ def decode_record(data: bytes) -> dict[str, object]:
             errors.append("attempted_contract")
     elif header[5] == STATE_ARMED:
         results = record["results"]
+        handles = record["handles"]
         assert isinstance(results, list)
+        assert isinstance(handles, list)
         if (
             header[4] != 2
             or header[6] not in (4, 5)
             or header[7] != FLAG_OWNER_ARMED
             or results[0] != 0
             or results[1] != 0
+            or handles[0]["owner_token"] == 0
+            or handles[0]["generation"] == 0
         ):
             errors.append("armed_contract")
     elif header[5] == STATE_COMPLETE:
         baseline = record["baseline"]
         restored = record["restored"]
         final = record["final"]
+        handles = record["handles"]
+        samples = record["samples"]
+        results = record["results"]
         assert isinstance(baseline, dict)
         assert isinstance(restored, dict)
         assert isinstance(final, dict)
+        assert isinstance(handles, list)
+        assert isinstance(samples, list)
+        assert isinstance(results, list)
         if (
             header[4] != (3 if header[6] >= 4 else 2)
             or header[7] != COMPLETE_FLAGS
@@ -189,29 +236,44 @@ def decode_record(data: bytes) -> dict[str, object]:
             or final["snapshot"] != baseline["snapshot"]
             or final["rearm_count"] <= baseline["rearm_count"]
             or (
+                header[6] == 3
+                and (
+                    results[21] != 0
+                    or samples[2]["struct_size"] != 48
+                    or samples[2]["abi_version"] != 1
+                    or samples[2]["owner_token"]
+                    != handles[0]["owner_token"]
+                    or samples[2]["generation"]
+                    != handles[0]["generation"]
+                    or samples[2]["event_code"] != 0x10
+                    or samples[2]["core_id"] != 0
+                    or samples[2]["physical_counter"] != 5
+                )
+            )
+            or (
                 header[6] == 4
                 and (
-                    restored["process_normal_exit_cleanup_count"]
-                    <= baseline["process_normal_exit_cleanup_count"]
-                    or restored["process_kill_cleanup_count"]
-                    != baseline["process_kill_cleanup_count"]
-                    or final["process_normal_exit_cleanup_count"]
-                    != restored["process_normal_exit_cleanup_count"]
-                    or final["process_kill_cleanup_count"]
-                    != restored["process_kill_cleanup_count"]
+                    restored["active_process_normal_exit_cleanup_count"]
+                    <= baseline["active_process_normal_exit_cleanup_count"]
+                    or restored["active_process_kill_cleanup_count"]
+                    != baseline["active_process_kill_cleanup_count"]
+                    or final["active_process_normal_exit_cleanup_count"]
+                    != restored["active_process_normal_exit_cleanup_count"]
+                    or final["active_process_kill_cleanup_count"]
+                    != restored["active_process_kill_cleanup_count"]
                 )
             )
             or (
                 header[6] == 5
                 and (
-                    restored["process_kill_cleanup_count"]
-                    <= baseline["process_kill_cleanup_count"]
-                    or restored["process_normal_exit_cleanup_count"]
-                    != baseline["process_normal_exit_cleanup_count"]
-                    or final["process_normal_exit_cleanup_count"]
-                    != restored["process_normal_exit_cleanup_count"]
-                    or final["process_kill_cleanup_count"]
-                    != restored["process_kill_cleanup_count"]
+                    restored["active_process_kill_cleanup_count"]
+                    <= baseline["active_process_kill_cleanup_count"]
+                    or restored["active_process_normal_exit_cleanup_count"]
+                    != baseline["active_process_normal_exit_cleanup_count"]
+                    or final["active_process_normal_exit_cleanup_count"]
+                    != restored["active_process_normal_exit_cleanup_count"]
+                    or final["active_process_kill_cleanup_count"]
+                    != restored["active_process_kill_cleanup_count"]
                 )
             )
         ):

@@ -154,7 +154,8 @@ stage's cleanup and its re-arm proof:
 
 1. stage `1`: competing-owner refusal and first-owner exact close;
 2. stage `2`: 250 ms timeout/watchdog restore and matching acknowledgement;
-3. stage `3`: production TCP sink receiver disconnect and authenticated close;
+3. stage `3`: production TCP sink receiver disconnect under a 5 s live lease,
+   followed by a required post-error PMU read and authenticated close;
 4. stage `4`: owning-process normal return and same-boot relaunch; and
 5. stage `5`: approved Vita Companion `kill VDCP00013`, exercising the
    SceShell `.kill` callback, and same-boot relaunch.
@@ -211,10 +212,13 @@ reused during this matrix; each later stage uses its distinct paths.
 An accepted terminal record contains idle baseline, restored, and final
 snapshots that match byte-for-byte; zero recovery/restore/reference-uncertainty
 flags; an action-specific cleanup result; a later bounded open/read/close; and
-an increased re-arm count. Stage 4 also requires an increased normal-exit
-cleanup count with no kill-count change; stage 5 requires an increased
-SceShell-kill cleanup count with no normal-exit-count change across the same
-boot.
+an increased re-arm count. Stage 4 also requires an increased active-normal-
+exit cleanup count with no kill-count change; stage 5 requires an increased
+active-SceShell-kill cleanup count with no normal-exit-count change across the
+same boot. Those counters advance only if the callback observed an `ACTIVE`
+and unexpired lease. The stage-5 helper must archive a nonzero owner token and generation,
+receive the successful kill reply within two seconds of that observation, and
+beat the device's independent four-second safe-close deadline.
 
 Stop the whole matrix on a device/identity mismatch, missing or conflicting
 journal, checksum/schema failure, cleanup failure, PMU snapshot mismatch,

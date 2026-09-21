@@ -123,7 +123,7 @@ struct vd_kernel_pmu_profiler_snapshot {
     uint32_t raw_pmxevcntr[6];
 };
 
-#define VD_KERNEL_PMU_PROFILER_STATUS_ABI_VERSION 1u
+#define VD_KERNEL_PMU_PROFILER_STATUS_ABI_VERSION 2u
 #define VD_KERNEL_PMU_PROFILER_TERMINAL_NONE 0u
 #define VD_KERNEL_PMU_PROFILER_TERMINAL_EXIT 1u
 #define VD_KERNEL_PMU_PROFILER_TERMINAL_KILL 2u
@@ -143,8 +143,8 @@ struct vd_kernel_pmu_profiler_status {
     uint32_t owner_identity_valid;
     uint32_t owner_identity_release_uncertain;
     uint32_t rearm_count;
-    uint32_t process_normal_exit_cleanup_count;
-    uint32_t process_kill_cleanup_count;
+    uint32_t active_process_normal_exit_cleanup_count;
+    uint32_t active_process_kill_cleanup_count;
     uint32_t owner_process_terminal_kind;
     uint32_t owner_terminal_reference_released;
     uint32_t backend_ready;

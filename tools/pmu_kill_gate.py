@@ -16,7 +16,8 @@ from deploy.host.vitadevdeploy.companion import VitaCompanionClient
 from tools.decode_pmu_cleanup_record import SIZE, decode_record
 
 TITLE_ID = "VDCP00013"
-ARMED_PATH = "ux0:/data/VitaDebugger/pmu-cleanup-v1-abrupt-exit-b.bin"
+ARMED_PATH = "ux0:/data/VitaDebugger/pmu-cleanup-v2-abrupt-exit-b.bin"
+FAILED_PATH = "ux0:/data/VitaDebugger/pmu-cleanup-v2-abrupt-exit-c.bin"
 
 
 def _utc_now() -> str:
@@ -59,19 +60,23 @@ def run_kill_gate(
     armed_copy: Path,
     timeout: float,
     poll_interval: float,
+    max_kill_delay: float = 2.0,
     *,
     ftp_factory: Callable[[], ftplib.FTP] = ftplib.FTP,
     companion_factory: Callable[..., VitaCompanionClient] = VitaCompanionClient,
+    monotonic: Callable[[], float] = time.monotonic,
+    sleep: Callable[[float], None] = time.sleep,
 ) -> dict[str, object]:
     if evidence_path.exists() or armed_copy.exists():
         raise FileExistsError(
             "evidence and armed-copy paths must both be new"
         )
     evidence: dict[str, object] = {
-        "schema": "vitadebug-pmu-kill-gate-v1",
+        "schema": "vitadebug-pmu-kill-gate-v2",
         "vita": vita,
         "title_id": TITLE_ID,
         "armed_path": ARMED_PATH,
+        "failed_path": FAILED_PATH,
         "started_utc": _utc_now(),
         "state": "checking_absence",
     }
@@ -85,13 +90,21 @@ def run_kill_gate(
             raise RuntimeError(
                 "armed journal already exists; refusing to kill"
             )
+        if _read_optional(ftp, FAILED_PATH) is not None:
+            raise RuntimeError(
+                "failed journal already exists; refusing to kill"
+            )
         evidence["absence_confirmed_utc"] = _utc_now()
         evidence["state"] = "waiting_for_armed"
         _write_json_atomic(evidence_path, evidence)
-        deadline = time.monotonic() + timeout
+        deadline = monotonic() + timeout
         data = None
-        while time.monotonic() < deadline:
-            time.sleep(poll_interval)
+        while monotonic() < deadline:
+            sleep(poll_interval)
+            if _read_optional(ftp, FAILED_PATH) is not None:
+                raise RuntimeError(
+                    "device failed before a fresh armed record was observed"
+                )
             candidate = _read_optional(ftp, ARMED_PATH)
             if candidate is None or len(candidate) != SIZE:
                 continue
@@ -109,6 +122,7 @@ def run_kill_gate(
             raise RuntimeError(
                 "new journal is not a valid stage-5 armed record"
             )
+        armed_observed = monotonic()
         _write_bytes_atomic(armed_copy, data)
         evidence.update(
             {
@@ -119,12 +133,26 @@ def run_kill_gate(
             }
         )
         _write_json_atomic(evidence_path, evidence)
+        if _read_optional(ftp, FAILED_PATH) is not None:
+            raise RuntimeError(
+                "device active window expired before kill"
+            )
         response = companion_factory(
             vita, timeout=min(timeout, 5.0)
         ).kill(TITLE_ID, require_success=True)
+        kill_delay = monotonic() - armed_observed
         evidence.update(
             {
                 "kill_reply": response,
+                "armed_to_kill_seconds": kill_delay,
+            }
+        )
+        if kill_delay > max_kill_delay:
+            raise RuntimeError(
+                "confirmed kill exceeded the active-lease delay bound"
+            )
+        evidence.update(
+            {
                 "finished_utc": _utc_now(),
                 "state": "kill_confirmed",
             }
@@ -158,14 +186,17 @@ def main() -> int:
     parser.add_argument("--armed-copy", type=Path, required=True)
     parser.add_argument("--timeout", type=float, default=180.0)
     parser.add_argument("--poll-interval", type=float, default=0.05)
+    parser.add_argument("--max-kill-delay", type=float, default=2.0)
     args = parser.parse_args()
     if args.timeout <= 0:
         parser.error("--timeout must be positive")
     if not 0 < args.poll_interval <= 1:
         parser.error("--poll-interval must be in (0, 1]")
+    if not 0 < args.max_kill_delay < 4:
+        parser.error("--max-kill-delay must be in (0, 4)")
     run_kill_gate(
         args.vita, args.evidence, args.armed_copy,
-        args.timeout, args.poll_interval
+        args.timeout, args.poll_interval, args.max_kill_delay
     )
     return 0
 
