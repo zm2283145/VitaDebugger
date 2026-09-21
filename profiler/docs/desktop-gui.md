@@ -67,7 +67,9 @@ overview update before EOF. Parsing, CRC work, zone pairing, and bounded table
 filtering remain off the Tk event thread. The Overview labels the prefix
 **LIVE / INCOMPLETE** until a valid `END` chunk arrives; cancellation leaves
 the latest prefix visibly incomplete and never publishes it as a completed
-capture file.
+capture file. A parsed `END` is not exposed as complete until EOF confirms
+that no trailing data exists, and export remains disabled for provisional
+snapshots.
 
 ## Loss reporting and limitations
 

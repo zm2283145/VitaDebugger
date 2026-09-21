@@ -235,6 +235,40 @@ class ControllerTests(unittest.TestCase):
                 updates[-1].capture.events,
                 result.capture.events[:len(updates[-1].capture.events)])
 
+    def test_v2_receiver_never_publishes_complete_before_eof(self):
+        raw = make_v2_capture()
+        listening: queue.Queue[tuple[str, int]] = queue.Queue()
+        outcome: queue.Queue[object] = queue.Queue()
+        updates: list[desktop.LoadedCapture] = []
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "invalid-live.vptrace"
+            config = desktop.ReceiveConfig(
+                output=output, bind="127.0.0.1", port=0,
+                source="127.0.0.1", accept_timeout=3.0,
+                idle_timeout=3.0, capture_timeout=3.0)
+
+            def receive() -> None:
+                try:
+                    outcome.put(desktop.ProfilerController().receive_capture(
+                        config, on_listening=listening.put,
+                        on_live_update=updates.append))
+                except BaseException as error:
+                    outcome.put(error)
+
+            thread = threading.Thread(target=receive)
+            thread.start()
+            with socket.create_connection(listening.get(timeout=3),
+                                          timeout=3) as sender:
+                sender.sendall(raw + b"\x00")
+                sender.shutdown(socket.SHUT_WR)
+            thread.join(timeout=3)
+            self.assertFalse(thread.is_alive())
+            self.assertIsInstance(outcome.get_nowait(),
+                                  trace.TraceFormatError)
+            self.assertTrue(all(not update.capture.complete
+                                for update in updates))
+            self.assertFalse(output.exists())
+
 
 if __name__ == "__main__":
     unittest.main()

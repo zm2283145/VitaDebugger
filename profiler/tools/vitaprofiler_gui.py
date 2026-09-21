@@ -349,8 +349,11 @@ class ProfilerApp:
         self.cancel_button.configure(
             state=(tk.NORMAL if self.busy and self.cancellable else
                    tk.DISABLED))
-        export = (tk.NORMAL if not self.busy and self.loaded is not None else
-                  tk.DISABLED)
+        export = (
+            tk.NORMAL
+            if (not self.busy and self.loaded is not None and
+                self.loaded.capture.complete)
+            else tk.DISABLED)
         self.json_button.configure(state=export)
         self.perfetto_button.configure(state=export)
 

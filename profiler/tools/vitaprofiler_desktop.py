@@ -463,6 +463,8 @@ class ProfilerController:
                 capture = decoder.snapshot()
             except trace.TraceFormatError:
                 return
+            if capture.complete:
+                return
             event_count = len(capture.events)
             now = time.monotonic()
             if (event_count < next_event_update and
