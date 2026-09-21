@@ -26,6 +26,7 @@ BUILD_PRIOR = 0x5052494F
 BUILD_NULL_BASE = 0x4E554C00
 MEMORY_SIZE = 192
 MAX_PACKET_COUNT = 256
+A32_BREAKPOINT = bytes.fromhex("f000f0e7")
 SYMBOL_NAMES = (
     "uvdb_safety_gate_abi_version",
     "uvdb_safety_gate_build_kind",
@@ -265,6 +266,11 @@ def configure_failure(client, address: dict[str, int], first: int, count: int) -
     write_u32(client, address["uvdb_safety_gate_copy_fail_first"], first)
 
 
+def require_armed_breakpoint(memory: bytes, offset: int) -> None:
+    if memory[offset : offset + len(A32_BREAKPOINT)] != A32_BREAKPOINT:
+        raise GateFailure("software breakpoint was not re-armed after live write")
+
+
 def expect_disconnect(client, timeout: float) -> str:
     try:
         packet = wait_packet(client, time.monotonic() + timeout)
@@ -301,6 +307,7 @@ def run_memory_gate(client, address: dict[str, int]) -> list[dict[str, object]]:
     armed = read_memory(client, target, MEMORY_SIZE)
     if armed[:80] != overlap[:80] or armed[84:] != overlap[84:]:
         raise GateFailure("non-breakpoint bytes differ while overlap point is armed")
+    require_armed_breakpoint(armed, 80)
     if client.request(f"z0,{breakpoint:x},4".encode("ascii")) != b"OK":
         raise GateFailure("could not remove overlap software breakpoint")
     if read_memory(client, target, MEMORY_SIZE) != overlap:

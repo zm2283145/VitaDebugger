@@ -64,6 +64,14 @@ class GateTests(unittest.TestCase):
     def test_memory_pattern_is_three_chunks(self):
         self.assertEqual(gate.MEMORY_SIZE, 3 * 64)
 
+    def test_requires_exact_rearmed_a32_breakpoint(self):
+        memory = bytearray(gate.MEMORY_SIZE)
+        memory[80:84] = gate.A32_BREAKPOINT
+        gate.require_armed_breakpoint(bytes(memory), 80)
+        memory[82] ^= 1
+        with self.assertRaises(gate.GateFailure):
+            gate.require_armed_breakpoint(bytes(memory), 80)
+
 
 if __name__ == "__main__":
     unittest.main()
