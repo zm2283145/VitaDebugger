@@ -1,0 +1,69 @@
+{
+  "schema_version": 3,
+  "host": {
+    "screen_receiver": "vdscreen-v1",
+    "screen_bind": "HOST_PRIVATE_IPV4",
+    "screen_listener_port": 18197,
+    "control_client": "vitadebug-companion-client-v1"
+  },
+  "vita": {
+    "screen_connect_port": 18197,
+    "control_listener_port": 18198,
+    "control_bind": "VITA_PRIVATE_IPV4",
+    "control_network_policy": "default-off-exact-loopback-or-explicit-rfc1918-bind",
+    "screen_host": "HOST_PRIVATE_IPV4",
+    "screen_control_secrets_distinct": true,
+    "title_id": "VDSCRN001",
+    "application_module": "vitadebug_companion_gate",
+    "archive": "libvitadebug_companion.a",
+    "artifact": "vitadebug-companion-gate.vpk",
+    "artifact_version": "01.00",
+    "config_format": "VDCG-v1-128-byte",
+    "config_path": "ux0:data/VitaDebuggerCompanion/config.bin",
+    "entrypoint_source": "screen/endpoint/src/main.c",
+    "package_source": "screen/endpoint/CMakeLists.txt",
+    "source_owned_user_mode": true,
+    "resident_suprx": null,
+    "resident_skprx": null,
+    "kernel_api": false
+  },
+  "coexistence": {
+    "fallback": "VitaCompanion",
+    "fallback_remains_installed": true,
+    "forbidden_ports": [
+      1337,
+      1338,
+      1348
+    ],
+    "mutate_fallback_configuration": false,
+    "hardware_contact_authorized": false
+  },
+  "capabilities": {
+    "input_trace_format": "VDTR-v1",
+    "recording_default": "off",
+    "playback_default": "off-per-session-consent",
+    "implemented": [
+      "paired-source-owned-status",
+      "cooperative-application-input",
+      "read-only-application-debug-files",
+      "application-owned-screen-stream",
+      "cooperative-physical-input-recording",
+      "cooperative-application-input-playback"
+    ],
+    "unsupported": [
+      "development-title-inventory",
+      "development-title-launch",
+      "process-inventory",
+      "process-kill",
+      "reboot",
+      "module-loading",
+      "injection",
+      "protected-or-system-targets",
+      "arbitrary-mount-access",
+      "file-write-delete-upload",
+      "system-input",
+      "global-hooks",
+      "mcp"
+    ]
+  }
+}
