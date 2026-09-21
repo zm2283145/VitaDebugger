@@ -311,8 +311,10 @@ compiles with `-Wall -Wextra -Werror` and links a Vita ELF.
 the package target exists.
 
 Hardware validation remains serialized and must not begin while another task
-owns the device. The full control, Wi-Fi/suspend, malformed-client,
-generation-change, watchdog, cleanup, and fallback matrix is in the
+owns the device. Vita suspend and Wi-Fi/network disruption are explicitly
+excluded because the device's independent reconnection behavior is already
+known to be unreliable. The control, malformed-client, generation-change,
+watchdog, cleanup, and fallback matrix is in the
 [future companion hardware runbook](docs/companion-hardware-runbook.md).
 The screen-specific portion remains:
 

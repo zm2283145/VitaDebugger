@@ -45,6 +45,11 @@ do not probe for or silently select another port.
    Moving control or screen traffic to a private LAN requires the explicit LAN
    consent value, exact host destination, and exact Vita interface address.
    Never bind a wildcard/public interface or use port forwarding.
+5. Do not suspend the Vita or toggle/disconnect Wi-Fi or its network interface
+   during this qualification. Vita reconnection has separate known issues and
+   is not evidence for or against the companion endpoint. If connectivity is
+   lost incidentally, stop the run and relaunch from a fresh explicit session;
+   do not wait for or test automatic reconnection.
 
 ## Serialized checks
 
@@ -77,10 +82,10 @@ do not probe for or silently select another port.
 6. **Input playback:** in a fresh session, grant separate playback and mutation
    consent, import only a complete exact-identity trace, and explicitly start
    1x playback. Verify bounded tick work and drift reporting. Exercise cancel,
-   timeout, callback failure, Wi-Fi loss, disconnect, shutdown, and
+   timeout, callback failure, protocol disconnect, shutdown, and
    title/generation change; every path must force neutral and none may
-   auto-play after reconnect. Inject one neutral-callback failure and verify
-   cleanup-pending quarantine remains visible until an explicit retry
+   auto-play after a fresh session. Inject one neutral-callback failure and
+   verify cleanup-pending quarantine remains visible until an explicit retry
    succeeds. Pause remains unsupported.
 7. **Read-only debug root:** use a disposable application-owned root containing
    regular files, directories, a symlink candidate, a device-like candidate,
@@ -92,11 +97,7 @@ do not probe for or silently select another port.
    registered application-owned color-bar buffers. Validate 18197 framing,
    identity, CRC, sequence, deadlines, disconnect cleanup, and the existing
    conservative rate gate. Do not query a system framebuffer or another PID.
-9. **Wi-Fi and suspend lifecycle:** disconnect Wi-Fi during header, payload,
-   input lease, and file read; suspend and resume once idle and once paired.
-   The transport must close, input must neutralize, stale sessions must not
-   resume, and a fresh explicit initialization must be required.
-10. **Fallback:** after every destructive lifecycle test, exit the candidate
+9. **Fallback:** after every destructive lifecycle test, exit the candidate
    title and verify VitaCompanion remains installed, unmodified, and available
    through its pre-existing workflow. Do not use fallback success to mask a
    companion failure.

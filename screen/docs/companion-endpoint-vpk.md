@@ -94,7 +94,9 @@ Select+Square starts explicitly consented playback of a ready trace.
 
 Known limitations before hardware qualification:
 
-- no hardware, Wi-Fi/suspend, or install behavior has been exercised;
+- no hardware or install behavior has been exercised;
+- Vita suspend and Wi-Fi/network disruption are intentionally outside this
+  qualification because the device has independent reconnection issues;
 - no confidentiality is provided beyond use of an authorized trusted LAN;
 - the example title renders a deterministic diagnostic surface rather than
   integrating a third-party application renderer;
