@@ -157,7 +157,7 @@ class ReceiverTests(unittest.TestCase):
                     self.assertEqual(connection.shutdown_calls, 1)
                     self.assertEqual(connection.close_calls, 1)
 
-    def test_listener_closes_accepted_socket_if_handoff_raises(self) -> None:
+    def test_listener_closes_accepted_socket_if_pre_handoff_raises(self) -> None:
         class FakeAccepted:
             def __init__(self) -> None:
                 self.close_calls = 0
@@ -173,7 +173,8 @@ class ReceiverTests(unittest.TestCase):
                 return self
 
             def __exit__(self, exc_type, exc_value, traceback):
-                return False
+                del exc_type, exc_value, traceback
+                raise ValueError("pre-handoff failure")
 
             def bind(self, address) -> None:
                 del address
@@ -191,10 +192,8 @@ class ReceiverTests(unittest.TestCase):
         listener = FakeListener(accepted)
         with tempfile.TemporaryDirectory() as directory, \
                 mock.patch("vdscreen.receiver.socket.socket",
-                           return_value=listener), \
-                mock.patch("vdscreen.receiver.receive_connection",
-                           side_effect=ValueError("pre-receive failure")):
-            with self.assertRaisesRegex(ValueError, "pre-receive"):
+                           return_value=listener):
+            with self.assertRaisesRegex(ValueError, "pre-handoff"):
                 listen_once(
                     bind="127.0.0.1",
                     port=DEFAULT_LISTENER_PORT,
@@ -204,6 +203,140 @@ class ReceiverTests(unittest.TestCase):
                     store=LatestFrameStore(Path(directory)),
                 )
         self.assertEqual(accepted.close_calls, 1)
+
+    def test_valid_listener_handoff_closes_connection_once(self) -> None:
+        class TrackingConnection:
+            def __init__(self, wrapped: socket.socket) -> None:
+                self.wrapped = wrapped
+                self.close_calls = 0
+
+            def settimeout(self, timeout: float) -> None:
+                self.wrapped.settimeout(timeout)
+
+            def recv_into(self, buffer: memoryview) -> int:
+                return self.wrapped.recv_into(buffer)
+
+            def shutdown(self, how: int) -> None:
+                self.wrapped.shutdown(how)
+
+            def close(self) -> None:
+                self.close_calls += 1
+                self.wrapped.close()
+
+        class FakeListener:
+            def __init__(self, accepted: TrackingConnection) -> None:
+                self.accepted = accepted
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc_value, traceback):
+                del exc_type, exc_value, traceback
+                return False
+
+            def bind(self, address) -> None:
+                del address
+
+            def listen(self, backlog: int) -> None:
+                del backlog
+
+            def settimeout(self, timeout: float) -> None:
+                del timeout
+
+            def accept(self):
+                return self.accepted, ("127.0.0.1", 12345)
+
+        receiver, producer = socket.socketpair()
+        accepted = TrackingConnection(receiver)
+        producer.sendall(encode_auth(TOKEN) + frame(1))
+        producer.shutdown(socket.SHUT_WR)
+        producer.close()
+        with tempfile.TemporaryDirectory() as directory, \
+                mock.patch("vdscreen.receiver.socket.socket",
+                           return_value=FakeListener(accepted)):
+            stats = listen_once(
+                bind="127.0.0.1",
+                port=DEFAULT_LISTENER_PORT,
+                allow_lan=False,
+                accept_timeout_seconds=0.1,
+                token=TOKEN,
+                store=LatestFrameStore(Path(directory)),
+            )
+        self.assertEqual(stats.frames_published, 1)
+        self.assertEqual(accepted.close_calls, 1)
+
+    def test_primary_protocol_error_survives_cleanup_failure(self) -> None:
+        class FailingCleanupStore(LatestFrameStore):
+            def __init__(self, output: Path) -> None:
+                super().__init__(output)
+                self.cleanup_calls = 0
+
+            def cleanup_temps(self) -> None:
+                self.cleanup_calls += 1
+                if self.cleanup_calls > 1:
+                    raise OSError("cleanup failed")
+                super().cleanup_temps()
+
+        receiver, producer = socket.socketpair()
+        producer.sendall(b"bad authentication")
+        producer.shutdown(socket.SHUT_WR)
+        producer.close()
+        shutdown_calls = 0
+        close_calls = 0
+        original_shutdown = receiver.shutdown
+        original_close = receiver.close
+
+        class TrackingConnection:
+            def settimeout(self, timeout: float) -> None:
+                receiver.settimeout(timeout)
+
+            def recv_into(self, buffer: memoryview) -> int:
+                return receiver.recv_into(buffer)
+
+            def shutdown(self, how: int) -> None:
+                nonlocal shutdown_calls
+                shutdown_calls += 1
+                original_shutdown(how)
+
+            def close(self) -> None:
+                nonlocal close_calls
+                close_calls += 1
+                original_close()
+
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(ProtocolError, "truncated record"):
+                receive_connection(
+                    TrackingConnection(),
+                    token=TOKEN,
+                    store=FailingCleanupStore(Path(directory)),
+                )
+        self.assertEqual(shutdown_calls, 1)
+        self.assertEqual(close_calls, 1)
+
+    def test_cleanup_failure_surfaces_after_all_cleanup_attempts(self) -> None:
+        class FinalCleanupFailureStore(LatestFrameStore):
+            def __init__(self, output: Path) -> None:
+                super().__init__(output)
+                self.cleanup_calls = 0
+
+            def cleanup_temps(self) -> None:
+                self.cleanup_calls += 1
+                if self.cleanup_calls > 1:
+                    raise OSError("cleanup failed")
+                super().cleanup_temps()
+
+        receiver, producer = socket.socketpair()
+        producer.sendall(encode_auth(TOKEN))
+        producer.shutdown(socket.SHUT_WR)
+        producer.close()
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(OSError, "cleanup failed"):
+                receive_connection(
+                    receiver,
+                    token=TOKEN,
+                    store=FinalCleanupFailureStore(Path(directory)),
+                )
+        self.assertEqual(receiver.fileno(), -1)
 
     def test_hardware_gate_manifest_has_distinct_identities(self) -> None:
         manifest = json.loads(SIDE_BY_SIDE_CONFIG.read_text())

@@ -144,8 +144,12 @@ ports. This range also cannot collide with VitaCompanion defaults 1337/1338 or
 vita-agent-bridge 1348. A bind failure is terminal for that invocation and the
 failed listener is closed before the error returns. Limits and the nonzero
 authentication token are validated before socket creation; after accept, both
-the listener handoff and receiver own unconditional close paths so setup or
-validation failures cannot leak the accepted connection.
+the listener owns the socket only until the receive handoff begins. The
+receiver is then its sole cleanup owner, so every setup/protocol failure and
+valid session attempts temp cleanup, shutdown, and exactly one close. An active
+protocol/setup error remains primary if temp cleanup also fails; without a
+primary failure, the first cleanup error is surfaced after all cleanup steps
+have been attempted.
 
 Use these exact identities for the first serialized hardware gate:
 

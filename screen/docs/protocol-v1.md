@@ -76,4 +76,8 @@ VitaCompanion's 1337/1338 and vita-agent-bridge's 1348 are outside the accepted
 range. A bind conflict returns an error and closes the failed listener; it
 never falls back to a different port. Local limits and token configuration are
 validated before socket creation, and every accepted connection is closed even
-when receiver setup fails before its first read.
+when receiver setup fails before its first read. Listener ownership ends when
+the receive handoff begins; the receiver then performs temp cleanup, shutdown,
+and one close. Cleanup cannot replace an active protocol/setup error, while a
+cleanup error after an otherwise successful session is returned only after all
+cleanup steps have been attempted.

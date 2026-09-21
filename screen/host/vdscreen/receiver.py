@@ -223,6 +223,23 @@ def _read_exact(connection: socket.socket, size: int,
     return bytes(data)
 
 
+def _finish_connection(connection: socket.socket,
+                       store: LatestFrameStore) -> BaseException | None:
+    first_error: BaseException | None = None
+    operations = (
+        store.cleanup_temps,
+        lambda: connection.shutdown(socket.SHUT_RDWR),
+        connection.close,
+    )
+    for operation in operations:
+        try:
+            operation()
+        except BaseException as error:
+            if first_error is None:
+                first_error = error
+    return first_error
+
+
 def receive_connection(
     connection: socket.socket,
     *,
@@ -233,6 +250,8 @@ def receive_connection(
     now_fn: Callable[[], float] = time.monotonic,
 ) -> ReceiveStats:
     stats = ReceiveStats()
+    primary_error: BaseException | None = None
+    primary_traceback = None
     try:
         limits.validate()
         _validate_auth_token(token)
@@ -290,19 +309,16 @@ def receive_connection(
             stats.frames_published += 1
             last_sequence = header.sequence
             last_timestamp = header.timestamp_us
-        return stats
-    finally:
-        try:
-            store.cleanup_temps()
-        finally:
-            try:
-                connection.shutdown(socket.SHUT_RDWR)
-            except OSError:
-                pass
-            try:
-                connection.close()
-            except OSError:
-                pass
+    except BaseException as error:
+        primary_error = error
+        primary_traceback = error.__traceback__
+
+    cleanup_error = _finish_connection(connection, store)
+    if primary_error is not None:
+        raise primary_error.with_traceback(primary_traceback)
+    if cleanup_error is not None:
+        raise cleanup_error
+    return stats
 
 
 def listen_once(
@@ -322,19 +338,23 @@ def listen_once(
         raise ValueError("accept timeout must be between 0 and 3600 seconds")
     limits.validate()
     _validate_auth_token(token)
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
-        listener.bind((bind, port))
-        listener.listen(1)
-        listener.settimeout(accept_timeout_seconds)
-        connection, peer = listener.accept()
+    connection = None
+    ownership_transferred = False
     try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+            listener.bind((bind, port))
+            listener.listen(1)
+            listener.settimeout(accept_timeout_seconds)
+            connection, peer = listener.accept()
+        ownership_transferred = True
         return receive_connection(
             connection, token=token, store=store, limits=limits, peer=peer)
     finally:
-        try:
-            connection.close()
-        except OSError:
-            pass
+        if connection is not None and not ownership_transferred:
+            try:
+                connection.close()
+            except OSError:
+                pass
 
 
 def read_latest(output: Path, attempts: int = 3) -> tuple[dict, bytes]:
