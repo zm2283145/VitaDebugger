@@ -623,10 +623,13 @@ comparator. The detailed record is
   run while three protocol/fault workers and a console-pressure producer race
   the production gates. A separate production-translation-unit regression
   repeats 100 ACK/no-ack stopped-peer resets and proves listener generation
-  recovery. A 2026-09-20 retail run found that a raw blocking receive did not
-  wake after `SO_LINGER` RST; packet I/O now polls nonblocking with exact socket-
-  generation cancellation, but the hardware retry and long-duration-equivalent
-  cancellation/soak matrix remain pending.
+  recovery. Retail diagnostics observed raw `-35` (`-SCE_NET_EAGAIN`) for an
+  empty nonblocking receive. Packet I/O now accepts exactly the encoded
+  `SCE_NET_ERROR_EAGAIN` and raw negative `SCE_NET_EAGAIN`/
+  `SCE_NET_EWOULDBLOCK`, polls with socket-generation cancellation, and rejects
+  generic `-1` or unrelated negatives. Hardware confirmation of the fix and
+  the stopped-RST plus long-duration-equivalent cancellation/soak matrix remain
+  pending.
 
 ## Documentation map
 

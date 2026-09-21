@@ -123,9 +123,14 @@ delimiter, exact 262,140-byte payload, and connected one-byte-oversize cases.
 It then found that a Windows `SO_LINGER` RST did not wake Vita's raw blocking
 receive while the target was stopped, so no listener reopened within the
 15-second bound. The title was destroyed cleanly and port 1234 was confirmed
-closed without a reboot or kernel configuration change. The nonblocking fix
-above remains hardware-pending; rerun the stopped RST, connected cancellation,
-owner exclusion, command-specific disconnect, and bounded soak matrix before
+closed without a reboot or kernel configuration change. A later retail
+diagnostic observed signed `-35` during an empty raw receive. VitaSDK defines
+both `SCE_NET_EAGAIN` and `SCE_NET_EWOULDBLOCK` as 35, while
+`SCE_NET_ERROR_EAGAIN` is the distinct encoded value `0x80410123`. Production
+now accepts exactly those encoded and raw-negative forms; generic `-1` and
+unrelated negative results remain fatal. The corrected classification remains
+hardware-pending; rerun the stopped RST, connected cancellation, owner
+exclusion, command-specific disconnect, and bounded soak matrix before
 claiming retail closure.
 
 Stop-token acquisition/recovery, thread-context snapshots, cache maintenance,

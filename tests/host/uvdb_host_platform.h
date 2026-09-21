@@ -105,9 +105,9 @@ struct KuKernelExceptionHandlerOpt {
 #define SCE_NET_EPOLLERR 0x08u
 #define SCE_NET_EPOLLHUP 0x10u
 #define SCE_NET_MSG_DONTWAIT 0x80
-#define SCE_NET_ERROR_EAGAIN (-11)
-#define SCE_NET_EAGAIN 11
-#define SCE_NET_EWOULDBLOCK 11
+#define SCE_NET_ERROR_EAGAIN ((int32_t)UINT32_C(0x80410123))
+#define SCE_NET_EAGAIN 35
+#define SCE_NET_EWOULDBLOCK 35
 
 SceUID sceKernelAllocMemBlock(
     const char* name, int type, size_t size, void* options);
