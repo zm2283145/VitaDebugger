@@ -1755,12 +1755,26 @@ def _metadata_uint64_id(value: object, field: str) -> int:
     return parsed
 
 
+def _reject_duplicate_json_object(
+        pairs: list[tuple[str, object]],
+        ) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise TraceFormatError(
+                f"runClocks metadata repeats JSON field {key!r}")
+        result[key] = value
+    return result
+
+
 def decode_run_clocks_experiment(data: bytes) -> RunClocksExperiment:
     if len(data) > MAX_EXPERIMENT_METADATA_BYTES:
         raise TraceFormatError(
             "runClocks experiment metadata exceeds the 65536-byte limit")
     try:
-        decoded = json.loads(data.decode("utf-8"))
+        decoded = json.loads(
+            data.decode("utf-8"),
+            object_pairs_hook=_reject_duplicate_json_object)
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
         raise TraceFormatError(
             "runClocks experiment metadata is not valid UTF-8 JSON") from error
@@ -2019,6 +2033,16 @@ def decode_run_clocks_experiment(data: bytes) -> RunClocksExperiment:
                         other.first_event_index <= phase.last_event_index):
                     raise TraceFormatError(
                         "runClocks metadata has overlapping phase ranges")
+        total_phase_duration = sum(
+            phase.target_duration_us for phase in phases)
+        if total_phase_duration > MAX_EXPERIMENT_DURATION_US:
+            raise TraceFormatError(
+                "runClocks metadata total phase duration exceeds "
+                "600000000 us")
+        if total_phase_duration > normalized["capture_duration_limit_us"]:
+            raise TraceFormatError(
+                "runClocks metadata total phase duration exceeds capture "
+                "duration limit")
         normalized["phases"] = normalized_phases
     if "notes" in decoded:
         normalized["notes"] = _metadata_text(decoded["notes"], "notes")

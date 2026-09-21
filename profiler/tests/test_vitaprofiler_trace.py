@@ -1085,6 +1085,74 @@ class CommandLineTests(unittest.TestCase):
                                     "not valid UTF-8 JSON"):
             trace.decode_run_clocks_experiment(truncated)
 
+        excessive_total = make_run_clocks_metadata(
+            capture_duration_limit_us=5000,
+            phases=[
+                {
+                    "phase_id": "sleep-r1",
+                    "condition": "sleep",
+                    "repeat": 1,
+                    "target_duration_us": 3000,
+                    "worker_count": 1,
+                    "first_event_index": 0,
+                    "last_event_index": 0,
+                },
+                {
+                    "phase_id": "busy-r1",
+                    "condition": "integer workload",
+                    "repeat": 1,
+                    "target_duration_us": 3000,
+                    "worker_count": 1,
+                    "first_event_index": 1,
+                    "last_event_index": 2,
+                },
+            ])
+        with self.assertRaisesRegex(trace.TraceFormatError,
+                                    "total phase duration exceeds"):
+            trace.decode_run_clocks_experiment(
+                json.dumps(excessive_total).encode())
+
+    def test_runclocks_metadata_rejects_duplicate_json_fields(self):
+        encoded = json.dumps(make_run_clocks_metadata())
+        duplicate_top_level = encoded.replace(
+            '"experiment_id": "idle-vs-busy-a"',
+            '"experiment_id": "first", "experiment_id": "second"')
+        with self.assertRaisesRegex(trace.TraceFormatError,
+                                    "repeats JSON field 'experiment_id'"):
+            trace.decode_run_clocks_experiment(
+                duplicate_top_level.encode())
+
+        nested_duplicates = [
+            (
+                "reference timer",
+                '"frequency_hz": 1000000',
+                '"frequency_hz": 1000000, "frequency_hz": 2000000',
+                "frequency_hz",
+            ),
+            (
+                "thread declaration",
+                '"generation": 0',
+                '"generation": 0, "generation": 2',
+                "generation",
+            ),
+            (
+                "phase declaration",
+                '"condition": "bounded integer workload"',
+                ('"condition": "bounded integer workload", '
+                 '"condition": "busy"'),
+                "condition",
+            ),
+        ]
+        for description, original, replacement, field in nested_duplicates:
+            with self.subTest(description):
+                duplicate_nested = encoded.replace(
+                    original, replacement, 1)
+                with self.assertRaisesRegex(
+                        trace.TraceFormatError,
+                        f"repeats JSON field '{field}'"):
+                    trace.decode_run_clocks_experiment(
+                        duplicate_nested.encode())
+
     def test_runclocks_v1_metadata_remains_readable(self):
         metadata = make_run_clocks_metadata()
         metadata["format"] = trace.RUN_CLOCKS_EXPERIMENT_FORMAT_V1

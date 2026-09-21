@@ -53,8 +53,11 @@ same numeric thread ID.
 The app writes exactly one wire-v2 `.vptrace` and one experiment JSON under
 `ux0:data/VitaDebugger`. Both names contain a required operator-supplied,
 path-safe experiment ID. Existing paths cause an abort; files are opened with
-`SCE_O_EXCL`. A failed or lossy capture never gets a metadata file and must not
-be treated as evidence. The capture identifies
+`SCE_O_EXCL`. Metadata is written and synced under a `.part` name, then renamed
+to its final name as the last fallible publication step. Any pre-publication
+failure removes the part file created by that run; a failed or lossy capture
+never gets a final metadata file and must not be treated as evidence. The
+capture identifies
 `sceKernelGetProcessTimeWide` as a monotonic microsecond reference timer. The
 metadata repeats that contract and records the RTC-derived UTC capture time,
 device alias/model, firmware, title, build, clock profile, power state, phase
@@ -78,6 +81,8 @@ command additionally rejects incomplete/truncated captures, fewer than two raw
 samples, samples outside declared thread generations or phases, experiment
 thread ranges/generations that disagree with wire-v2 `THREAD` identities,
 mismatched phase worker counts, samples above declared count/duration bounds,
+aggregate phase duration above the declared capture-duration bound, duplicate
+JSON fields at any object depth,
 session IDs or timer metadata that disagree with the capture, timestamp
 regressions, missing `raw_value` flags, nonzero loss, and metadata loss counts
 that disagree with wire-v2 `END` statistics. Schema-v2 metadata requires a

@@ -1,5 +1,6 @@
 #include "vitaprofiler.h"
 #include "vitaprofiler_stream.h"
+#include "publish.h"
 
 #include <psp2/ctrl.h>
 #include <psp2/io/fcntl.h>
@@ -482,15 +483,18 @@ done:
     return result;
 }
 
-static int rc_write_metadata(
-    const char* path, const struct vp_stats* ring,
-    const struct vp_stream_writer_stats_v2* writer)
+struct rc_metadata_context {
+    const struct vp_stats* ring;
+    const struct vp_stream_writer_stats_v2* writer;
+};
+
+static int rc_write_metadata_contents(void* context, int fd)
 {
-    SceUID fd;
+    const struct rc_metadata_context* metadata =
+        (const struct rc_metadata_context*)context;
+    const struct vp_stats* ring = metadata->ring;
+    const struct vp_stream_writer_stats_v2* writer = metadata->writer;
     uint32_t index;
-    fd = sceIoOpen(path, SCE_O_WRONLY | SCE_O_CREAT | SCE_O_EXCL, 0666);
-    if (fd < 0)
-        return fd;
 #define RC_WRITE_LITERAL(text) \
     do { if (rc_write_text(fd, (text)) < 0) goto write_failed; } while (0)
 #define RC_WRITE_STRING_FIELD(name, value, comma) \
@@ -575,22 +579,81 @@ static int rc_write_metadata(
         "  ],\n"
         "  \"counter_bits\": null,\n"
         "  \"max_wrap_delta_raw\": null,\n"
-        "  \"notes\": \"host-only preparation; hardware run requires "
-        "coordinator authorization\"\n"
+        "  \"notes\": \"source-owned bounded characterization run\"\n"
         "}\n");
-    {
-        const int sync_result = sceIoSyncByFd(fd, 0);
-        const int close_result = sceIoClose(fd);
-        if (sync_result < 0 || close_result < 0)
-            return -1;
-    }
-    return sceIoSync("ux0:", 0);
+    return 0;
 
 write_failed:
-    sceIoClose(fd);
     return -1;
 #undef RC_WRITE_STRING_FIELD
 #undef RC_WRITE_LITERAL
+}
+
+static int rc_publish_open(void* context, const char* path)
+{
+    (void)context;
+    return sceIoOpen(path, SCE_O_WRONLY | SCE_O_CREAT | SCE_O_EXCL, 0666);
+}
+
+static int rc_publish_sync_fd(void* context, int fd)
+{
+    (void)context;
+    return sceIoSyncByFd(fd, 0);
+}
+
+static int rc_publish_close(void* context, int fd)
+{
+    (void)context;
+    return sceIoClose(fd);
+}
+
+static int rc_publish_sync_volume(void* context)
+{
+    (void)context;
+    return sceIoSync("ux0:", 0);
+}
+
+static int rc_publish_path_exists(void* context, const char* path)
+{
+    SceIoStat existing;
+    const int result = sceIoGetstat(path, &existing);
+    (void)context;
+    if (result >= 0)
+        return 1;
+    return (uint32_t)result == UINT32_C(0x80010002) ? 0 : result;
+}
+
+static int rc_publish_rename(
+    void* context, const char* source, const char* destination)
+{
+    (void)context;
+    return sceIoRename(source, destination);
+}
+
+static int rc_publish_remove(void* context, const char* path)
+{
+    (void)context;
+    return sceIoRemove(path);
+}
+
+static int rc_write_metadata(
+    const char* path, const struct vp_stats* ring,
+    const struct vp_stream_writer_stats_v2* writer)
+{
+    static const struct rc_publish_io operations = {
+        rc_publish_open,
+        rc_publish_sync_fd,
+        rc_publish_close,
+        rc_publish_sync_volume,
+        rc_publish_path_exists,
+        rc_publish_rename,
+        rc_publish_remove,
+    };
+    struct rc_metadata_context metadata;
+    metadata.ring = ring;
+    metadata.writer = writer;
+    return rc_publish_atomic(
+        path, rc_write_metadata_contents, &metadata, &operations, NULL);
 }
 
 static int rc_run_experiment(void)
