@@ -328,6 +328,17 @@ receive/send failure in the admission poll itself, so it does not support a
 production RSP change. The attempt stopped cleanly; poll-level and bounded
 loop-liveness telemetry are required before another attempt.
 
+The follow-up journal retained sparse poll heartbeats and cumulative request
+and response observations. Retail telemetry reached at least 100 main-loop
+polls on UDP descriptor 4. Every retained empty receive was `-1` with errno 11,
+while 40 valid host queries timed out; no malformed or valid request reached
+the socket and no response was attempted. This rules out a one-iteration crash
+and locates the failure before request parsing. Bind itself had returned
+success, so an omitted `sockaddr_in.sin_len` is not yet a supported fix. The
+next bounded discriminator must record the effective bound endpoint, the
+route-selected local address, and whether an on-device self-datagram reaches
+the same socket.
+
 The corrected diagnostic passed this boundary on retail 3.65. The out-of-band
 ready snapshot showed listener 88, no candidate or connected socket, the test
 title ready, and no closing/stopped/owner state. The first request then produced

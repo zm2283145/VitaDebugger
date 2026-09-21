@@ -701,10 +701,14 @@ comparator. The detailed record is
   a fresh exact build reached `test_ready` and `main_loop` with no failed
   initialization stage, while UDP 1235 still returned no packet for 20
   seconds. TCP 1234 was not contacted and the run stopped cleanly. This narrows
-  the unexplained boundary to post-marker loop liveness or the admission
-  receive/send poll, but does not yet support a production RSP fix. See
+  the unexplained boundary to the admission receive path. A follow-up retained
+  100 live polls on descriptor 4, each returning `-1`/errno 11, while none of
+  40 valid host datagrams reached parsing and no response was attempted.
+  Effective-bind, route-address, and on-device self-datagram telemetry remain
+  necessary before a local fix is justified. See
   [the confirmation record](docs/hardware/rsp-second-admission-confirmation-3.65.json)
-  and [the startup diagnostic record](docs/hardware/rsp-startup-diagnostic-3.65.json).
+  [the startup diagnostic record](docs/hardware/rsp-startup-diagnostic-3.65.json),
+  and [the poll diagnostic record](docs/hardware/rsp-poll-diagnostic-3.65.json).
 
 ## Documentation map
 

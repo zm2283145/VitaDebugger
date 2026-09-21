@@ -1,0 +1,60 @@
+{
+  "schema": 1,
+  "tested_at": "2026-09-20T23:58:42.405789Z",
+  "firmware": "3.65",
+  "device_class": "retail-handheld",
+  "title_id": "SLRS00001",
+  "source_commit": "a09c3aff2b7fc9aeb2dc88253d90ab5438277bee",
+  "artifacts": {
+    "vpk_sha256": "b2dc124fd0d6534a1f84199ce51386620a98cbef7baf2349ebf4eb8ef55daf9a",
+    "elf_sha256": "79dbef4023dad4c1504bea06e663736eaba04e98e4611681883a6aef158785b3",
+    "eboot_sha256": "602d34bd0828f808e5a2ed4bd9cf33732f0b6ab4aa9b2fa9630995c330640bc5",
+    "freeze_manifest_sha256": "e0d605c5a8d5c587718709227fb848d0df57fc148344bb54359a7c6a0481e057",
+    "startup_runner_sha256": "030bbc14488808821d7ff846c198f52ec73831030e632247aa1388e94c969459",
+    "kubridge_source_commit": "417ddde9a744eba98d769382c1c1372b8e119139",
+    "kubridge_stub_sha256": "fe05a117421b375d77bdc5102d5753f5dcf300e33176222688e490f2d03f5796"
+  },
+  "deployment": {
+    "job": "f2b1aa09f8fa52cf4c72250a209baf90",
+    "signed_manifest_sha256": "56db9565a1a2145c037d30a64baaee5a846c5c54ef9ce7920b0365f3daa5fe23",
+    "result": "success",
+    "installed_identity": "pass"
+  },
+  "poll_telemetry": {
+    "status": "pass",
+    "run_id": 70879200303,
+    "latest_sequence": 20,
+    "latest_stage": "main_loop_heartbeat",
+    "poll_count": 100,
+    "raw_receive_result": -1,
+    "errno": 11,
+    "socket_descriptor": 4,
+    "poll_entered": true,
+    "malformed_request_seen": false,
+    "request_received": false,
+    "response_attempted": false,
+    "response_sent": false,
+    "failed_stage_mask": 0
+  },
+  "explicit_ready": {
+    "status": "fail",
+    "udp_queries": 40,
+    "udp_timeouts": 40,
+    "deadline_seconds": 20,
+    "tcp_1234_contacted": false
+  },
+  "outcome": "hard-stop-before-rsp",
+  "rsp_cases_run": [],
+  "interpretation": "The title remained in its main loop and completed at least 100 nonblocking polls. Each recorded empty poll returned -1 with errno 11. None of the 40 valid host datagrams reached the bound socket, so the response path was not attempted. Bind had returned success; this evidence does not support treating the omitted sockaddr_in.sin_len as the fix. A next diagnostic must record the effective bound endpoint, the route-selected local address, and an on-device self-datagram result.",
+  "sealed_evidence_manifest_sha256": "dbfffc24eefda566f49ea3574b2aa8e14ff348c933d0c1ca87e77454ecfdff0b",
+  "final_state": {
+    "livearea_wait_seconds": 3,
+    "rsp_port_1234_open": false,
+    "diagnostic_port_1235_responding": false,
+    "test_title_running": false,
+    "kernel_configuration_changed": false,
+    "rebooted": false,
+    "device_ownership_released": true
+  },
+  "remaining_gate": "Record the effective UDP bind, route-selected address, and bounded self-datagram result before another completion attempt."
+}
